@@ -625,6 +625,12 @@ PR-time proof only, no publishing.
 
 - **`build-wheel`** builds the frontend, stages it into the package, builds the
   wheel, then `pip install dist/*.whl` and `kirocrew --version` as a smoke test.
+  Bare `--version` is a pre-dispatch fast-path (see
+  `docs/system-specs/modules/cli.md`), so it proves the console script exists
+  and exits 0 — not that `kiro_crew.cli`'s import chain resolves. An
+  `import kiro_crew.cli` probe is what carries that meaning; the wheel lane
+  does not run one, so an undeclared runtime dependency reaches gateway boot
+  before any pip-install lane fails.
 - **`build-desktop`** builds the Electron app unsigned on macos-15 and
   ubuntu-22.04 via `make desktop`, and uploads the artifacts.
 
@@ -632,7 +638,8 @@ PR-time proof only, no publishing.
 `build-desktop.yml` in the release lane both build the real `kirocrew-backend`
 tree via `packaging/build-desktop.sh` — which provisions a
 python-build-standalone interpreter and pip-installs the project into it — and
-then only upload the artifact. The wheel lane at least runs `kirocrew --version`.
+then only upload the artifact. The wheel lane at least runs `kirocrew --version`,
+which since the `--version` fast-path lands before dispatch proves startup only.
 So a packaging change that breaks the packaged app (a layout change, a launcher
 rename, a dependency that fails to install into the bundled interpreter) passes
 every gate: the tests that cover packaged-app behavior monkeypatch `sys.frozen`
