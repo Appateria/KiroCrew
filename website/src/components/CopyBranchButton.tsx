@@ -17,6 +17,11 @@ import { copyToClipboard } from '../utils/clipboard'
  *
  * ``label`` overrides the accessible name's noun for callers where "branch" is
  * not accurate — the project chip shows a short commit on a detached HEAD.
+ *
+ * A pointer press would focus this button before ``click`` runs, pulling focus
+ * out of whatever the user was typing in (the composer sits right above the
+ * project chip). ``onMouseDown`` cancels that default so the copy is a
+ * side-effect only; Tab focus and Enter/Space activation are unchanged.
  */
 export default function CopyBranchButton({
   branch,
@@ -50,6 +55,7 @@ export default function CopyBranchButton({
   return (
     <button
       type="button"
+      onMouseDown={event => event.preventDefault()}
       onClick={handleCopy}
       className={`group/branch min-w-0 inline-flex items-center gap-1 truncate rounded px-1 -mx-1 border-none bg-transparent text-inherit hover:bg-bg-hover cursor-pointer ${className}`}
       aria-label={copied ? i18nT('components.copyBranchButton.copied', { label, branch }) : i18nT('components.copyBranchButton.copy', { label, branch })}

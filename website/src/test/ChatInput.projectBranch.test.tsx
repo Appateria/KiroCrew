@@ -1,6 +1,7 @@
 import React from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { screen, fireEvent, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { renderWithProviders } from './helpers'
 import ChatInput from '../components/ChatInput'
 
@@ -131,5 +132,23 @@ describe('ChatInput project chip branch copy', () => {
     )
     fireEvent.click(chip())
     expect(onProjectClick).toHaveBeenCalled()
+  })
+
+  it('keeps the message input focused while copying the branch', async () => {
+    // A real pointer click moves focus to the pressed button before `click`
+    // fires. The copy button cancels that transfer on mousedown so a user who
+    // is mid-sentence can copy the branch and keep typing. `userEvent`
+    // replays the full mousedown -> focus -> mouseup -> click sequence;
+    // `fireEvent.click` alone would never move focus and could not fail here.
+    const user = userEvent.setup()
+    const writeText = stubClipboard()
+    renderWithProviders(<ChatInput {...defaultProps} projectBranch="feat/example" />)
+    const input = screen.getByRole('textbox', { name: 'Message input' })
+    input.focus()
+
+    await user.click(branchBtn())
+
+    expect(input).toHaveFocus()
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('feat/example'))
   })
 })
