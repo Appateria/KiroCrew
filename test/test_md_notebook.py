@@ -4250,3 +4250,46 @@ async def test_a_tokenless_retry_refuses_to_overwrite_an_external_edit(
     )
     leftovers = sorted(p.name for p in root.glob("One.md.*.tmp"))
     assert not leftovers, "the refused save left its temp behind: %r" % (leftovers,)
+
+
+# --- inline #tag extraction ----------------------------------------------------
+
+
+def test_extract_tags_accepts_a_non_ascii_leading_character() -> None:
+    """A tag may start with any Unicode alphanumeric, as the tail already does.
+
+    Latin-script, Han, Hangul, Cyrillic and Greek leading characters all
+    register the same way. Tags feed an in-memory index, never a path, so
+    the wide lead cannot create a filesystem collision.
+    """
+    from kiro_crew.apps.builtins.md_notebook import notes as notes_mod
+
+    assert notes_mod.extract_tags("#论文") == ["论文"]
+    assert notes_mod.extract_tags("#분기") == ["분기"]
+    assert notes_mod.extract_tags("#Отчет") == ["Отчет"]
+    assert notes_mod.extract_tags("#München") == ["München"]
+    assert notes_mod.extract_tags("#a논문") == ["a논문"]
+    assert notes_mod.extract_tags("see (#논문) note") == ["논문"]
+    assert notes_mod.extract_tags("#todo #论文 #todo") == ["todo", "论文"]
+
+
+def test_extract_tags_still_refuses_a_non_alphanumeric_lead() -> None:
+    """Only the script restriction is lifted; the shape rules stand."""
+    from kiro_crew.apps.builtins.md_notebook import notes as notes_mod
+
+    assert notes_mod.extract_tags("#_foo") == []
+    assert notes_mod.extract_tags("#-x") == []
+    assert notes_mod.extract_tags("# tag") == []
+    assert notes_mod.extract_tags("#\u200bfoo") == []
+    assert notes_mod.extract_tags("#2024") == ["2024"]
+    assert notes_mod.extract_tags("#todo") == ["todo"]
+
+
+def test_extract_tags_ignores_masked_code_in_any_script() -> None:
+    """Code masking still wins over the wider lead: a tag inside fenced or
+    inline code is a sample, not an index entry."""
+    from kiro_crew.apps.builtins.md_notebook import notes as notes_mod
+
+    assert notes_mod.extract_tags("```\n#논문\n```") == []
+    assert notes_mod.extract_tags("`#논문`") == []
+    assert notes_mod.extract_tags("real #논문 and `#가짜`") == ["논문"]

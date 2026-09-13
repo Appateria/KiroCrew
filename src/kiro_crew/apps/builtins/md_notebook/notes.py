@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 
 # [[Target]] or [[Target|alias]] — target may not contain ] [ | or newline.
 WIKILINK_RE = re.compile(r"\[\[([^\]\[|\n]+?)(?:\|([^\]\n]+?))?\]\]")
-# Inline #tag at a word boundary: must start with alphanumeric.
-TAG_RE = re.compile(r"(?:^|[\s(])#([A-Za-z0-9][\w/-]*)", re.MULTILINE)
+# Inline #tag at a word boundary: must start with alphanumeric, in any script.
+TAG_RE = re.compile(r"(?:^|[\s(])#([^\W_][\w/-]*)", re.MULTILINE)
 # YAML frontmatter fenced by --- at the very top of the file.
 FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", re.DOTALL)
 _FENCED_RE = re.compile(r"```.*?(?:```|$)", re.DOTALL)
