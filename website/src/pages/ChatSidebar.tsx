@@ -195,6 +195,16 @@ const ROW_STATUS_LINE_MUTED_CLS = `${ROW_STATUS_CLS} text-muted flex items-cente
  *  glyphs outranks another. */
 const ROW_ICON_PX = 10
 
+/** Is this click the "open as a tab" modifier gesture? One predicate for every
+ *  surface that offers it (session rows, the New button), so the platform split
+ *  cannot drift between them. The split is deliberate: Ctrl+click IS a
+ *  right-click on macOS, so honouring it there would fire this and the context
+ *  menu from one press; Cmd is the tab modifier there. Shift and Alt are
+ *  excluded because both carry other meanings in the sidebar (range/reorder). */
+function isOpenInTabModifierClick(e: React.MouseEvent): boolean {
+  return (IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) && !e.shiftKey && !e.altKey
+}
+
 /** Stable empty fallback for the chat-tags query. Referenced instead of a
  *  `= []` destructuring default so `tagById` (a memoized SessionRow prop)
  *  keeps one identity while the query has no data. */
@@ -2411,10 +2421,8 @@ const SessionRow = memo(function SessionRow({
             // through to `switchSlot` below, because its transcript IS here.
             if (peerId) { onAdoptPeerSession?.(peerId, s.key, rowIdentity); return }
             // Modifier-click = open as a background tab, matching the
-            // editor/browser convention. The platform split is deliberate:
-            // Ctrl+click IS a right-click on macOS, so honouring it there would
-            // fire this and the context menu from one gesture.
-            if (onOpenSlotInNewTab && (IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) && !e.shiftKey && !e.altKey) {
+            // editor/browser convention. Platform split lives in the predicate.
+            if (onOpenSlotInNewTab && isOpenInTabModifierClick(e)) {
               e.preventDefault()
               onOpenSlotInNewTab(s.key, { background: true })
               return
@@ -5850,14 +5858,33 @@ function ChatSidebar({
   // anything to someone who already has a crew connected.
   const remoteCrewChatPreview = usePreviewFlag(PREVIEW_REMOTE_CREW_CHAT)
 
-  // Create default chat session mutation
+  // Create default chat session mutation.
+  //
+  // `inNewTab` is the New button's modifier/middle-click gesture — the same
+  // "open as a BACKGROUND tab" the session rows honour, applied to a session
+  // that does not exist yet. A plain create activates the new slot, and the
+  // tab strip's invariant then REPLACES the tab the user was on with it (see
+  // useSessionTabs), which is exactly what the gesture asks not to happen. So
+  // the create runs with `activate: false` — the slot is registered but focus
+  // stays put — and on success the key is handed to `onOpenSlotInNewTab` in
+  // background mode, which adds a tab beside the active one without switching.
+  // The click site only sets `inNewTab` when that callback exists (embedded
+  // hosts have no tab strip), so a modifier click there stays a plain create.
   const createChatMutation = useMutation({
-    mutationFn: () => {
+    mutationFn: ({ inNewTab }: { inNewTab: boolean }) => {
       setNewChatError('')
       const effectiveMode = loadChatConfig().defaultAutopilot ? 'orchestrator' : (mode || '')
-      return dispatch(createSlot({ agent: defaultAgent || undefined, mode: effectiveMode })).unwrap()
+      return dispatch(createSlot({ agent: defaultAgent || undefined, mode: effectiveMode, activate: !inNewTab })).unwrap()
     },
-    onSuccess: focusComposer,
+    onSuccess: (slot, { inNewTab }) => {
+      if (inNewTab && onOpenSlotInNewTab) {
+        // Background: the user stays on their transcript, so its composer keeps
+        // whatever focus it had — no `focusComposer`, same as the row gesture.
+        onOpenSlotInNewTab(slot.key, { background: true })
+        return
+      }
+      focusComposer()
+    },
     onError: onNewChatError,
   })
 
@@ -6942,7 +6969,20 @@ function ChatSidebar({
             <button
               disabled={creatingSlot}
               className={`flex items-center h-7 cursor-pointer bg-transparent border-none text-accent-fg hover:bg-accent-hover active:scale-95 transition-all disabled:opacity-70 disabled:cursor-wait disabled:active:scale-100 ${compactHeader ? 'justify-center w-7' : 'gap-1.5 pl-2 pr-2.5 text-[12px] font-semibold'}`}
-              onClick={() => { createChatMutation.mutate() }}
+              // Same three-gesture contract as a session row: plain click
+              // creates and switches; Cmd/Ctrl-click and middle-click create the
+              // session as a background TAB and leave the user where they are.
+              // Both tab gestures are gated on `onOpenSlotInNewTab` — without a
+              // tab strip (embedded hosts) there is nothing to open into, so the
+              // modifier is ignored and the click stays an ordinary create.
+              // Middle-press autoscroll is cancelled on mousedown, as on rows.
+              onMouseDownCapture={onOpenSlotInNewTab ? (e => { if (e.button === 1) e.preventDefault() }) : undefined}
+              onAuxClick={onOpenSlotInNewTab ? (e => {
+                if (e.button !== 1 || creatingSlot) return
+                e.preventDefault()
+                createChatMutation.mutate({ inNewTab: true })
+              }) : undefined}
+              onClick={e => { createChatMutation.mutate({ inNewTab: !!onOpenSlotInNewTab && isOpenInTabModifierClick(e) }) }}
               title={i18nT('pages.chatSidebar.new_chat')}
               aria-label={i18nT('pages.chatSidebar.new_chat_session')}
               aria-busy={creatingSlot}
