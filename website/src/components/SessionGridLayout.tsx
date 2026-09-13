@@ -17,18 +17,22 @@ export default function SessionGridLayout({
   renderLeaf,
   onResize,
   ownsTopRight = true,
+  ownsTopLeft = true,
 }: {
   node: GridNode
-  renderLeaf: (leaf: GridLeaf, ownsTopRight: boolean) => ReactNode
+  renderLeaf: (leaf: GridLeaf, ownsTopRight: boolean, ownsTopLeft: boolean) => ReactNode
   onResize: (splitId: string, index: number, deltaFrac: number) => void
   /** Whether this subtree reaches the workspace's top-right corner. Exactly one
    *  leaf inherits it, so only that pane reserves the App-owned panel toggles. */
   ownsTopRight?: boolean
+  /** Same for the top-left corner: the one pane that hosts the shell's leading
+   *  control (the sessions-sidebar toggle) or reserves its space. */
+  ownsTopLeft?: boolean
 }) {
   if (node.type === 'leaf') {
-    return <div className="h-full w-full min-w-0 min-h-0 overflow-hidden">{renderLeaf(node, ownsTopRight)}</div>
+    return <div className="h-full w-full min-w-0 min-h-0 overflow-hidden">{renderLeaf(node, ownsTopRight, ownsTopLeft)}</div>
   }
-  return <SplitContainer node={node} renderLeaf={renderLeaf} onResize={onResize} ownsTopRight={ownsTopRight} />
+  return <SplitContainer node={node} renderLeaf={renderLeaf} onResize={onResize} ownsTopRight={ownsTopRight} ownsTopLeft={ownsTopLeft} />
 }
 
 function SplitContainer({
@@ -36,11 +40,13 @@ function SplitContainer({
   renderLeaf,
   onResize,
   ownsTopRight,
+  ownsTopLeft,
 }: {
   node: GridSplit
-  renderLeaf: (leaf: GridLeaf, ownsTopRight: boolean) => ReactNode
+  renderLeaf: (leaf: GridLeaf, ownsTopRight: boolean, ownsTopLeft: boolean) => ReactNode
   onResize: (splitId: string, index: number, deltaFrac: number) => void
   ownsTopRight: boolean
+  ownsTopLeft: boolean
 }) {
   const ref = useRef<HTMLDivElement>(null)
   // Teardown for an in-progress divider drag, invoked on unmount so closing a
@@ -98,6 +104,8 @@ function SplitContainer({
               renderLeaf={renderLeaf}
               onResize={onResize}
               ownsTopRight={ownsTopRight && (horizontal ? i === node.children.length - 1 : i === 0)}
+              // Top-left is the first child along either axis.
+              ownsTopLeft={ownsTopLeft && i === 0}
             />
           </div>
           {i < node.children.length - 1 && (

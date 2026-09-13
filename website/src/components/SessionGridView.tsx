@@ -4,9 +4,10 @@ import { X, Plus, GitFork, Loader2, Circle } from 'lucide-react'
 import { SplitGlyph } from './SplitGlyph'
 import { api } from '../api/client'
 import SessionGridLayout from './SessionGridLayout'
-import ChatPane from './ChatPane'
+import ChatPane, { type PaneLeading } from './ChatPane'
 import { useSessionGrid, type GridLeaf } from '../hooks/useSessionGrid'
 import { emitSlotFocused } from '../hooks/useWebSocket'
+import PaneDim from './PaneDim'
 
 import { i18nT } from '../i18n/t'
 type Slot = {
@@ -40,6 +41,7 @@ export default function SessionGridView({
   onCollapse,
   seedSlot,
   openSideChat,
+  leading,
 }: {
   /** Leave split mode entirely (everything closed, or a lone empty placeholder). */
   onClose: () => void
@@ -51,6 +53,10 @@ export default function SessionGridView({
    *  selection toolbar's Ask needs. The grid owns no Side Chat of its own
    *  (the host's activity panel does), so without it panes offer Quote only. */
   openSideChat?: (slot: string) => boolean | void | Promise<boolean | void>
+  /** The host's sessions-sidebar toggle lives at the surface's top-left. The
+   *  geometric top-left pane either reserves its column (`inset`, desktop) or
+   *  renders it inline (`control`, mobile) — see ChatPane's `leading`. */
+  leading?: PaneLeading
 }) {
   const grid = useSessionGrid(seedSlot)
 
@@ -130,7 +136,8 @@ export default function SessionGridView({
       : grid.leaves.find((l) => l.kind === 'session' && l.slot)?.slot
   const forkSourceTitle = slots.find((s) => s.key === forkSourceSlot)?.title
 
-  const renderLeaf = (leaf: GridLeaf, ownsTopRight: boolean) => {
+  const renderLeaf = (leaf: GridLeaf, ownsTopRight: boolean, ownsTopLeft: boolean) => {
+    const paneLeading = ownsTopLeft ? leading : undefined
     if (leaf.kind === 'session' && leaf.slot) {
       return (
         <ChatPane
@@ -143,6 +150,7 @@ export default function SessionGridView({
           onOpenFull={onCollapse}
           openSideChat={openSideChat}
           hostsPanelControls={ownsTopRight}
+          leading={paneLeading}
         />
       )
     }
@@ -167,6 +175,7 @@ export default function SessionGridView({
         onSplitRight={() => grid.splitLeaf(leaf.id, 'right')}
         onSplitDown={() => grid.splitLeaf(leaf.id, 'down')}
         hostsPanelControls={ownsTopRight}
+        leading={paneLeading}
       />
     )
   }
@@ -199,6 +208,7 @@ function PlaceholderPane({
   onSplitRight,
   onSplitDown,
   hostsPanelControls,
+  leading,
 }: {
   slots: Slot[]
   occupied: string[]
@@ -211,6 +221,7 @@ function PlaceholderPane({
   onSplitRight: () => void
   onSplitDown: () => void
   hostsPanelControls: boolean
+  leading?: PaneLeading
 }) {
   const [search, setSearch] = useState('')
   const queryClient = useQueryClient()
@@ -251,9 +262,11 @@ function PlaceholderPane({
   return (
     <div
       onMouseDownCapture={onFocus}
-      className="flex flex-col h-full bg-bg overflow-hidden"
+      className="relative flex flex-col h-full bg-bg overflow-hidden"
     >
-      <div className="panel-toolbar flex items-center gap-2 px-2 bg-bg shrink-0">
+      <div className={`panel-toolbar relative flex items-center gap-2 pr-2 bg-bg shrink-0 transition-[padding-left] duration-[240ms] [transition-timing-function:cubic-bezier(.32,.72,0,1)] ${leading?.inset ? 'pl-[56px]' : 'pl-2'}`}>
+        {leading?.inset && <span aria-hidden="true" data-pane-leading-divider className="absolute left-[48px] top-1/2 -translate-y-1/2 w-px h-5 bg-border" />}
+        {leading?.control}
         <div className="flex min-w-0 flex-1 items-center gap-2 text-[12px] text-muted">
           <span className={`w-2 h-2 rounded-full shrink-0 ${focused ? 'bg-accent' : 'bg-muted'}`} />
           <span className="truncate">{i18nT('components.sessionGridView.search_sessions')}</span>
@@ -272,6 +285,8 @@ function PlaceholderPane({
           </button>
         </div>
       </div>
+      {/* After the header so the header stays the first child (tests locate it that way); absolute, so order does not change what paints where. */}
+      <PaneDim dimmed={!focused} />
       <div className="p-2 border-b border-border">
         <input
           autoFocus={focused}

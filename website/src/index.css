@@ -2797,6 +2797,31 @@ html[data-font-family="opendyslexic"] .nav-item {
 [data-panel-toggle-owner="chat"] [data-panel-controls-host="chat"],
 [data-panel-toggle-owner="workspace"] [data-panel-controls-host="workspace"],
 [data-panel-toggle-owner="terminal"] [data-panel-controls-host="terminal"] { padding-right: calc(var(--workspace-panel-control-count, 2) * (var(--panel-toolbar-button-size) + var(--panel-toolbar-gap))); }
+/* Where the owning header's own controls include a close (a split pane's ×,
+   a panel's ⋯ / X) beside the shell's ▣ ▤, the two owners get a hairline
+   between them, with --panel-toolbar-divider-gap on each side — the rule the
+   sessions-sidebar toggle uses at the top-left. The single-chat title row is
+   left alone: its ↗ ▯ are page actions with no close to confuse, and the row
+   is deliberately bare. */
+[data-panel-toggle-owner="chat"] [data-session-grid-view] [data-panel-controls-host="chat"],
+[data-panel-toggle-owner="workspace"] [data-panel-controls-host="workspace"],
+[data-panel-toggle-owner="terminal"] [data-panel-controls-host="terminal"] {
+  position: relative;
+  padding-right: calc(var(--workspace-panel-control-count, 2) * (var(--panel-toolbar-button-size) + var(--panel-toolbar-gap)) - var(--panel-toolbar-gap) + 2 * var(--panel-toolbar-divider-gap) + 1px);
+}
+[data-panel-toggle-owner="chat"] [data-session-grid-view] [data-panel-controls-host="chat"]::after,
+[data-panel-toggle-owner="workspace"] [data-panel-controls-host="workspace"]::after,
+[data-panel-toggle-owner="terminal"] [data-panel-controls-host="terminal"]::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  translate: 0 -50%;
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  pointer-events: none;
+  right: calc(var(--workspace-panel-control-count, 2) * (var(--panel-toolbar-button-size) + var(--panel-toolbar-gap)) - var(--panel-toolbar-gap) + var(--panel-toolbar-divider-gap));
+}
 [data-panel-toggle-owner="workspace"] .panel-toolbar-actions > [data-panel-controls-local-close="workspace"],
 [data-panel-toggle-owner="terminal"] .panel-toolbar-actions > [data-panel-controls-local-close="terminal"] { display: none; }
 
@@ -2804,10 +2829,19 @@ html[data-font-family="opendyslexic"] .nav-item {
 
 /* Shared geometry for chat, workspace and terminal title actions. */
 :root {
+  /* Unfocused split-view panes: opacity of the background-coloured overlay
+     PaneDim lays over them (0 = no dimming). Ghostty dims unfocused splits at
+     0.3 of background; a chat pane is mostly empty background, on which the
+     overlay is invisible, so only its text carries the cue and it needs more
+     to read at a glance. 0.4 was chosen by eye on the dogfood build. */
+  --pane-dim-opacity: 0.4;
   --panel-toolbar-height: 44px;
   --panel-toolbar-button-size: 28px;
   --panel-toolbar-icon-size: 16px;
   --panel-toolbar-gap: 6px;
+  /* Clearance on each side of the hairline that separates a header's own
+     controls from the shell's toggles (and the sidebar toggle from a title). */
+  --panel-toolbar-divider-gap: 8px;
 }
 [data-session-grid-view],
 [data-panel-toggle-owner="chat"]:has([data-session-grid-view]) [data-workspace-panel-controls] {

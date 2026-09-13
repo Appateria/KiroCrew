@@ -368,13 +368,45 @@ per rendered control, including the gap from the preceding action. Only the
 header owning the fixed controls reserves that space, and
 `data-panel-controls-host` goes on that header's action group, never on the
 header row itself: on the row the reserved padding replaces the 8px inset
-instead of stacking on it. The fixed toggles take both width and height from
+instead of stacking on it. Where the owning group's own controls include a
+close beside the toggles (a split pane's ×, the workspace and terminal panels'
+⋯ / X) the reservation grows by a hairline with
+`--panel-toolbar-divider-gap` (8px) on each side, drawn as the group's
+`::after`, so the two owners of the row read apart. The single-chat title row
+keeps the plain reservation: its ↗ and split controls are page actions, and the
+row is deliberately bare.
+
+The surface's top-left is the sessions-sidebar toggle's. In single chat the
+title row carries it (mobile) or clears the shell's stationary button with a
+60px inset and a hairline at 52px (desktop, sidebar collapsed). Split view does
+not render that row, so `SessionGridLayout` hands `ownsTopLeft` to the one
+geometric top-left leaf, exactly as `ownsTopRight` picks the pane that reserves
+the fixed toggles, and `SessionGridView` gives that pane `leading`: `inset`
+reserves the column on the compact token (`pl-[56px]`, hairline at 48px: the
+toggle spans pane x 16..40 because the pane starts 8px left of the toggle's
+container, then 8px, line, 8px), `control` renders the toggle inline ahead of
+the title. While the
+sidebar is collapsed in split view the shell's toggle itself takes the compact
+rect (24px at `top-1`, `SPLIT_TOGGLE_RECT`) so it centres on the 32px pane row;
+with the sidebar open it stands on the sidebar's 44px header and keeps its
+normal rect. The fixed toggles take both width and height from
 the button token, so the session grid's 24px variant keeps them the same size
 as the pane's own controls. They draw the house panel glyphs from
 `components/icons/panels.tsx`, the family the split-pane controls already use
 through `SplitGlyph`, with `open` following the pressed state; do not swap in
 lucide's `PanelRight` / `PanelBottom`, which puts two renderings of "a panel"
 on one row.
+
+Split view marks focus by dimming every other pane, not by recolouring it:
+`PaneDim` lays a background-coloured rectangle over the pane at
+`--pane-dim-opacity` (0.4), the way Ghostty fades an unfocused split, so
+message text, code highlighting and status colours keep their own values
+underneath and only the whole pane reads as "not the one with focus". The
+overlay is always mounted while the pane knows its focus state (opacity 0 when
+focused, so the cue fades both ways), sits at `z-20` between the title row and
+the drop overlay, and takes no pointer events, so the click that claims focus
+lands on the pane. A pane outside split view (`focused` undefined) never mounts
+it. The placeholder pane keeps its accent dot as well.
 
 Title rows are flex-flow chrome, not overlays, and carry no page-level
 z-index. A pane root opens no stacking context, so a z-index on its title row

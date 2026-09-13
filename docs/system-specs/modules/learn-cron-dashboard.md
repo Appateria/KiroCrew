@@ -1835,7 +1835,16 @@ below the app top bar, while either panel opens, closes, or changes dock
 position. The rightmost chat or panel header reserves their space; the controls
 and their stateful pane icons keep their render identity across transitions.
 Only the header owning that edge reserves space for the rendered control count;
-disabling terminals removes their button and reservation.
+disabling terminals removes their button and reservation. A split pane, the
+workspace panel and the terminal panel separate their own controls from the
+fixed toggles with a hairline inside that reservation; the single-chat title row
+does not. In split view the geometric top-left pane also stands in for the
+single-chat title row at the other corner: on desktop it clears the shell's
+sessions-sidebar toggle while the sidebar is collapsed, on mobile it renders
+that toggle inline, so the sessions list stays reachable from a split.
+Every split pane except the focused one is dimmed by a background-coloured
+overlay at `--pane-dim-opacity`, which fades as focus moves; a pane outside split
+view is never dimmed.
 When the workspace is open, its fullscreen control lives in the panel's own
 action group beside the ⋯ menu, never among the fixed toggles: right-docked, in
 fullscreen, and on mobile it is a button in the slot the close X vacates while
