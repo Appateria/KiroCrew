@@ -368,6 +368,7 @@ class _RunContext:
         self.agent_errors: dict[int, str] = {}
         # Per-call durable checkpoint sink (see ``AgentResultFn``).
         self._on_agent_result = on_agent_result
+        self._execution_guard: Optional[Callable[[], Awaitable[None]]] = None
         # RUN-GLOBAL agent concurrency. ``parallel``/``pipeline`` each build their
         # OWN semaphore, so they bound one fan-out but not the run: nested or
         # sequentially overlapping combinators could exceed the configured cap, and
@@ -411,6 +412,9 @@ class _RunContext:
     ) -> Any:
         # B6 cap + A4 ceiling are checked BEFORE the call so a script cannot run
         # past either limit. would_exceed lets us stop at the boundary cleanly.
+        guard = getattr(self, "_execution_guard", None)
+        if guard is not None:
+            await guard()
         self._counter.increment()
         if self.budget.would_exceed():
             raise BudgetExceeded("budget exhausted before agent call")
@@ -620,6 +624,7 @@ class WorkflowRunner:
         ports: Optional[dict] = None,
         on_complete: Optional[Callable[[], Awaitable[None]]] = None,
         pre_terminal: Optional[Callable[[], Awaitable[None]]] = None,
+        execution_guard: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
         self._agent_fn = agent_fn
         self._timeout_secs = timeout_secs
@@ -637,6 +642,7 @@ class WorkflowRunner:
         # session-bound side effects (e.g. in-flight ctx.nudge arms) can land
         # their outcome logs inside the event stream's contract (terminal last).
         self._pre_terminal = pre_terminal
+        self._execution_guard = execution_guard
 
     async def run(
         self,
@@ -895,6 +901,7 @@ class WorkflowRunner:
             replay_before=replay_before,
             on_agent_result=on_agent_result,
         )
+        ctx._execution_guard = self._execution_guard
         ctx._events = events  # share the sink so phase/log/agent events land in order
         safe_globals = build_safe_globals(ctx)
 
@@ -915,6 +922,8 @@ class WorkflowRunner:
         started = time.monotonic()
         task: Optional["asyncio.Task[Any]"] = None
         try:
+            if self._execution_guard is not None:
+                await self._execution_guard()
             exec(  # nosemgrep: python.lang.security.audit.exec-detected.exec-detected
                 compile(source, f"<workflow:{run_id}>", "exec"), safe_globals
             )  # noqa: S102
@@ -953,6 +962,8 @@ class WorkflowRunner:
                     source=source,
                 )
             result = run_task.result()  # re-raises the script's own exception, if any
+            if self._execution_guard is not None:
+                await self._execution_guard()
         except asyncio.CancelledError:
             # Drain owned work before publishing a terminal event, including any
             # cleanup logs/checkpoints and exceptions raised during cancellation.
@@ -1054,11 +1065,13 @@ class WorkflowRunner:
         replay_results: Optional[dict] = None,
         replay_before: int = 0,
         source_is_original: bool = True,
+        execution_binding_version: int = 0,
         workflow_id: str = "",
         workflow_slug: str = "",
         workflow_revision: int = 0,
         intent: str = "",
         author_fn: Optional[AuthorFn] = None,
+        admission_closed: Optional[Callable[[], bool]] = None,
     ) -> str:
         """Start this workflow as a BACKGROUND run tracked in ``registry``.
 
@@ -1084,7 +1097,7 @@ class WorkflowRunner:
                 h.source = src
                 # Durably checkpoint the script now so an authored-in-run
                 # workflow's source survives a restart even before it finishes.
-                persist = getattr(registry, "persist", None)
+                persist = getattr(registry, "persist_soon", None)
                 if persist is not None:
                     try:
                         persist(run_id)
@@ -1168,8 +1181,10 @@ class WorkflowRunner:
             session_key=session_key,
             source=source,
             source_is_original=source_is_original,
+            execution_binding_version=execution_binding_version,
             args=args or {},
             workflow_id=workflow_id,
             workflow_slug=workflow_slug,
             workflow_revision=workflow_revision,
+            admission_closed=admission_closed,
         )
