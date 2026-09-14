@@ -1990,13 +1990,15 @@ repair delegation follows [Agent repair routing](#agent-repair-routing), not a
 replacement of that profile. Dispositions retain the prior judged SHA, finding
 identity and evidence; they never carry a human override onto a new head.
 
-`prepare-pr/scripts/pr_status.py` treats the aggregate status as authoritative
-when present, including over stale failed or pending duplicate checks in
-GitHub's rollup. Older PRs without the aggregate retain the fail-closed legacy
-rollup behavior. Only the commit-status `context` named `PR Readiness` is
-trusted as the aggregate; a same-named CheckRun cannot mask another failure.
-Unresolved review threads are reported for visibility but are advisory rather
-than an automatic readiness failure.
+`prepare-pr/scripts/pr_status.py` folds the aggregate status in as one signal,
+never an override of the rows: its FAILURE blocks and its PENDING waits, but its
+green does not clear an observed failing or pending duplicate check in GitHub's
+rollup, because the aggregate's `context` is a forgeable display string a status
+publisher on the pull request can set. Older PRs without the aggregate retain the
+fail-closed legacy rollup behavior. Only the commit-status `context` named
+`PR Readiness` is read as the aggregate; a same-named CheckRun cannot mask
+another failure. Unresolved review threads are reported for visibility but are
+advisory rather than an automatic readiness failure.
 
 ## Over-engineering resistance
 
