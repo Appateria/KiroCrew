@@ -1012,7 +1012,23 @@ export default function InstancesViewport({ macInset = false }: { macInset?: boo
           // the same rejection). Local (top-level) use is unaffected.
           // Loopback-only, and the pane already runs our own token-authed SPA,
           // so delegating these grants nothing a same-origin top-level load
-          // wouldn't already. clipboard-read is deliberately NOT delegated:
+          // wouldn't already. display-capture follows the same rule: without
+          // it, getDisplayMedia() rejects in the pane while the snip
+          // affordances still RENDER, because the presence gate
+          // (isScreenSnipSupported) only checks the function exists -- true
+          // inside iframes -- so ChatPage's snip flow, WebPreviewPanel's
+          // crop-to-chat and MochiSnipHost all die on click with
+          // NotAllowedError. Delegation only lets the pane ASK. In a browser
+          // the engine's own source picker decides. In the packaged app the main
+          // process decides, and capture-trust.js authorizes by identity -- a
+          // registered capture surface, its own main frame, still on its
+          // registered origin -- so a pane is refused there rather than answered
+          // with the whole desktop from one gesture. That is deliberately not a
+          // frame-position test: a page inside this iframe could navigate the top
+          // frame and inherit its position. Making pane capture WORK under
+          // Electron needs an in-app picker naming the requesting frame, which is
+          // a separate change.
+          // clipboard-read is by contrast still NOT delegated:
           // read is the more sensitive grant class and exceeds this fix's
           // clipboard-write scope. The pane's Paste key (TerminalKeyBar's
           // readText) therefore still fails inside embedded panes, visibly,
@@ -1020,7 +1036,7 @@ export default function InstancesViewport({ macInset = false }: { macInset?: boo
           // left as a maintainer decision.
           // allowFullScreen mirrors the legacy attribute some engines still
           // require alongside the Permissions-Policy delegation.
-          allow="microphone; fullscreen; clipboard-write"
+          allow="microphone; fullscreen; clipboard-write; display-capture"
           allowFullScreen
           onLoad={e => {
             // Fires for the initial about:blank too, which is why a load event is

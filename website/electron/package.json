@@ -187,6 +187,7 @@
       "remote-token.js",
       "token-acquire.js",
       "token-retry.js",
+      "capture-trust.js",
       "display-media.js",
       "focus-chrome.js",
       "permission-handler.js",
