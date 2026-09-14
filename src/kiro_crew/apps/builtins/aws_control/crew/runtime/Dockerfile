@@ -1,7 +1,7 @@
-# The Share My Crew deployment image: three processes, one task.
+# The remote crew deployment image: two processes, one task.
 #
-# What runs here is Kiro Crew's own backend, headless, plus a thin front process
-# and a backup sidecar. Headless means no interface is served to anyone, the
+# What runs here is Kiro Crew's own backend, headless, plus a thin front process.
+# Headless means no interface is served to anyone, the
 # owner included: the owner's control plane stays on the owner's own machine and
 # no part of it is in this image.
 #
@@ -129,10 +129,10 @@ RUN useradd --create-home --home-dir /var/lib/crew --shell /usr/sbin/nologin cre
 # SMC_CONFIG_DIR EQUALS SMC_DATA_HOME, and that is not an oversight. Verified
 # against a running gateway: Kiro Crew's config_dir() and data_home() resolve to
 # the same directory, so session_map.json and open_slots.json live at the home
-# root rather than under a config/ subdirectory. Setting them apart makes the
-# sidecar back up every transcript and neither of those files, which yields a
-# backup that looks healthy and a restore with no resume and no conversation
-# list. The supervisor refuses to start if they disagree.
+# root rather than under a config/ subdirectory. Setting them apart puts those two
+# files somewhere the rest of the task does not read, which leaves the transcripts
+# findable and the resume and the conversation list not. The supervisor refuses to
+# start if they disagree.
 ENV HOME=/var/lib/crew \
     KIROCREW_HOME=/var/lib/kirocrew \
     SMC_DATA_HOME=/var/lib/kirocrew \

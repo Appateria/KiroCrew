@@ -55,7 +55,7 @@ COPY skills /app/crew-bundle/skills
 # build script so the two can never silently disagree.
 LABEL org.opencontainers.image.base.name="${BASE}" \
       org.opencontainers.image.created="${BUILT_AT}" \
-      org.opencontainers.image.title="share-my-crew crew image" \
+      org.opencontainers.image.title="remote crew image" \
       org.opencontainers.image.description="Maintainer base image plus one curated, digest-pinned crew bundle." \
       dev.sharemycrew.crew-name="${CREW_NAME}" \
       dev.sharemycrew.bundle-digest="${BUNDLE_DIGEST}" \
