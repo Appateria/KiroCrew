@@ -477,6 +477,34 @@ export default [
               // merely containing such a token alongside a plain word still
               // fails, because every token must match end to end.
               String.raw`^\[@(?:media|supports)\([^)\s]*\)\]:[^\s]+(?:\s+\[@(?:media|supports)\([^)\s]*\)\]:[^\s]+)*$`,
+              // Tailwind DESCENDANT-VARIANT clusters, e.g. the flush icon-cell row
+              // shared by the message footers in utils/touchActions.ts:
+              // `gap-x-0 [&_button]:h-7 [&>button:first-child]:-ms-[7px] [@media(hover:none)]:[&_button]:h-8`.
+              // Neither shape above covers these: the general class shape forbids
+              // `&`, `>` and `_`, which are what a descendant selector is made of,
+              // and the `@`-variant shape requires EVERY token to open with `[@`,
+              // while this cluster mixes plain utilities (`gap-x-0`) with `[&…]:`
+              // and `[@media(…)]:` tokens. Such constants live at module level
+              // under ALL-CAPS names, so `i18n-strict` looks inside them.
+              //
+              // Deliberately NARROWER than "allow & and > anywhere", on two axes:
+              // (a) the first lookahead rejects any two ADJACENT bare lowercase
+              // words — the prose shape (`copy failed [&_x]:hidden`) that would
+              // otherwise ride in on a single variant token; a class cluster never
+              // has two adjacent bare words, every utility next to a bare
+              // `flex`/`isolate` carries a hyphen, digit, colon or bracket.
+              // (b) the second lookahead requires at least one token that OPENS
+              // with a `[&…]:` descendant variant — copy never opens a word with
+              // `[&` — and `&`, `>`, `_` and `,` are admitted ONLY inside a bracket
+              // group that itself opens with `&` or `@media(`/`@supports(`; outside
+              // them the char class is the general class shape's (plain `[7px]`
+              // arbitrary values included).
+              //
+              // Known false negative, stated: a SINGLE bare word plus variant
+              // tokens (`saved [&_button]:p-0`) is missed — the same single-word
+              // residue the general class shape already accepts, caught by the
+              // en-XA render gate instead.
+              String.raw`^(?!.*(?:^|\s)[a-z]+\s+[a-z]+(?:\s|$))(?=(?:^|.*\s)\[&[^\]\s]*\]:)(?:[\s\-a-z0-9:/().%#\[\]]|\[(?:&|@(?:media|supports)\()[^\]\s]*\])+$`,
               // Tailwind ARBITRARY-VALUE clusters whose bracketed value carries a
               // comma or underscore, e.g. the notification glass surfaces in
               // components/notifications/NotificationFeed.tsx:

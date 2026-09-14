@@ -9337,7 +9337,6 @@
         "workflow_runs_load_failed": "वर्कफ़्लो रन लोड नहीं हो सके"
       },
       "assistantMessage": {
-        "copy_text": "टेक्स्ट कॉपी करें",
         "applied_to_tasks": "कार्यों पर लागू",
         "copied": "कॉपी किया गया!",
         "copy": "कॉपी करें",
@@ -9346,13 +9345,12 @@
         "next_version": "अगला संस्करण",
         "plan_from_here": "यहाँ से योजना बनाएँ",
         "previous_version": "पिछला संस्करण",
-        "raw": "रॉ",
         "raw_markdown": "रॉ markdown",
         "regenerate": "पुनः बनाएँ",
         "regenerate_response": "प्रतिक्रिया पुनः बनाएँ",
-        "rendered": "रेंडर",
         "rendered_view": "रेंडर किया गया व्यू",
         "speak": "ज़ोर से पढ़ें",
+        "copy_text": "टेक्स्ट कॉपी करें",
         "speak_message": "संदेश ज़ोर से पढ़ें",
         "steered": "निर्देशित",
         "switch_to_raw_markdown_view": "रॉ markdown व्यू पर स्विच करें",

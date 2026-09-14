@@ -9206,7 +9206,6 @@
         "workflow_runs_load_failed": "워크플로 실행을 불러올 수 없습니다"
       },
       "assistantMessage": {
-        "copy_text": "텍스트 복사",
         "applied_to_tasks": "작업에 적용됨",
         "copied": "복사했습니다!",
         "copy": "복사",
@@ -9215,13 +9214,12 @@
         "next_version": "다음 버전",
         "plan_from_here": "여기서 플랜 작성",
         "previous_version": "이전 버전",
-        "raw": "원문",
         "raw_markdown": "Markdown 원문",
         "regenerate": "다시 생성",
         "regenerate_response": "응답 다시 생성",
-        "rendered": "렌더링",
         "rendered_view": "렌더링 보기",
         "speak": "읽어 주기",
+        "copy_text": "텍스트 복사",
         "speak_message": "메시지 읽어 주기",
         "steered": "스티어링됨",
         "switch_to_raw_markdown_view": "Markdown 원문 보기로 전환",

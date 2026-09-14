@@ -9468,7 +9468,6 @@
         "workflow_runs_load_failed": "Impossibile caricare le esecuzioni di workflow"
       },
       "assistantMessage": {
-        "copy_text": "Copia testo",
         "applied_to_tasks": "Applicato alle attività",
         "copied": "Copiato!",
         "copy": "Copia",
@@ -9477,13 +9476,12 @@
         "next_version": "Versione successiva",
         "plan_from_here": "Pianifica da qui",
         "previous_version": "Versione precedente",
-        "raw": "grezzo",
         "raw_markdown": "Markdown grezzo",
         "regenerate": "Rigenera",
         "regenerate_response": "Rigenera la risposta",
-        "rendered": "formattato",
         "rendered_view": "Vista formattata",
         "speak": "Leggi ad alta voce",
+        "copy_text": "Copia testo",
         "speak_message": "Leggi il messaggio ad alta voce",
         "steered": "Indirizzato",
         "switch_to_raw_markdown_view": "Passa alla vista del Markdown grezzo",

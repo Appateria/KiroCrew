@@ -9337,7 +9337,6 @@
         "workflow_runs_load_failed": "Workflow-Ausführungen konnten nicht geladen werden"
       },
       "assistantMessage": {
-        "copy_text": "Text kopieren",
         "applied_to_tasks": "Auf Aufgaben angewendet",
         "copied": "Kopiert!",
         "copy": "Kopieren",
@@ -9346,13 +9345,12 @@
         "next_version": "Nächste Version",
         "plan_from_here": "Ab hier planen",
         "previous_version": "Vorherige Version",
-        "raw": "roh",
         "raw_markdown": "Rohes Markdown",
         "regenerate": "Neu erstellen",
         "regenerate_response": "Antwort neu erstellen",
-        "rendered": "gerendert",
         "rendered_view": "Gerenderte Ansicht",
         "speak": "Vorlesen",
+        "copy_text": "Text kopieren",
         "speak_message": "Nachricht vorlesen",
         "steered": "Gesteuert",
         "switch_to_raw_markdown_view": "Zur Roh-Markdown-Ansicht wechseln",

@@ -459,20 +459,29 @@ describe('action footer on touch devices', () => {
     expect(cls).toContain('group-focus-within/msg:opacity-100')
   })
 
-  it('enlarges the actions to 40px touch targets where the pointer cannot hover', () => {
+  it('enlarges the actions to 36x32 touch targets where the pointer cannot hover', () => {
     render(<UserMessage content="hello" renderContent={renderContent} />)
     const cls = footer().className
-    expect(cls).toContain('[@media(hover:none)]:[&_button]:p-3')
+    // Same square-cell shape as the assistant footer, so the two rows share one
+    // rhythm on a phone.
+    expect(cls).toContain('[@media(hover:none)]:[&_button]:h-8')
+    expect(cls).toContain('[@media(hover:none)]:[&_button]:w-9')
+    expect(cls).toContain('gap-x-0')
     expect(cls).toContain('[@media(hover:none)]:[&_svg]:h-4')
     expect(cls).toContain('[@media(hover:none)]:[&_svg]:w-4')
-    // Three 40px actions plus a localized timestamp can exceed a narrow
+    // Three 36px-wide actions plus a localized timestamp can exceed a narrow
     // phone's width, so the grown row must wrap rather than clip.
     expect(cls).toContain('[@media(hover:none)]:flex-wrap')
   })
 
-  it('keeps the compact sizing on the buttons for pointer devices', () => {
+  it('lays the pointer row out as flush 28px cells, matching the assistant footer', () => {
     render(<UserMessage content="hello" renderContent={renderContent} />)
-    expect(screen.getByTitle('Copy').className).toContain('p-0.5')
+    const cls = footer().className
+    expect(cls).toContain('[&_button]:h-7')
+    expect(cls).toContain('[&_button]:w-7')
+    expect(cls).toContain('[&_button:hover]:bg-bg-hover')
+    expect(cls).toContain('gap-y-1')
+    expect(cls).not.toMatch(/(^|\s)gap-2(\s|$)/)
   })
 
   // The pin toggle is a stateful control: assistive tech needs its on/off

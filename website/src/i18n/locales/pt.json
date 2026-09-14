@@ -9468,7 +9468,6 @@
         "workflow_runs_load_failed": "Não foi possível carregar as execuções de fluxo de trabalho"
       },
       "assistantMessage": {
-        "copy_text": "Copiar texto",
         "applied_to_tasks": "Aplicado às tarefas",
         "copied": "Copiado!",
         "copy": "Copiar",
@@ -9477,13 +9476,12 @@
         "next_version": "Próxima versão",
         "plan_from_here": "Planejar a partir daqui",
         "previous_version": "Versão anterior",
-        "raw": "bruto",
         "raw_markdown": "Markdown bruto",
         "regenerate": "Gerar novamente",
         "regenerate_response": "Gerar resposta novamente",
-        "rendered": "renderizado",
         "rendered_view": "Visualização renderizada",
         "speak": "Ler em voz alta",
+        "copy_text": "Copiar texto",
         "speak_message": "Ler a mensagem em voz alta",
         "steered": "Direcionado",
         "switch_to_raw_markdown_view": "Alternar para a visualização em Markdown bruto",

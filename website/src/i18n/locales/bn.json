@@ -9337,7 +9337,6 @@
         "workflow_runs_load_failed": "ওয়ার্কফ্লো রান লোড করা যায়নি"
       },
       "assistantMessage": {
-        "copy_text": "টেক্সট কপি করুন",
         "applied_to_tasks": "টাস্কে প্রয়োগ করা হয়েছে",
         "copied": "কপি হয়েছে!",
         "copy": "কপি করুন",
@@ -9346,13 +9345,12 @@
         "next_version": "পরবর্তী সংস্করণ",
         "plan_from_here": "এখান থেকে প্ল্যান করুন",
         "previous_version": "পূর্ববর্তী সংস্করণ",
-        "raw": "মূল",
         "raw_markdown": "মূল markdown",
         "regenerate": "পুনরায় তৈরি করুন",
         "regenerate_response": "উত্তর পুনরায় তৈরি করুন",
-        "rendered": "রেন্ডার করা",
         "rendered_view": "রেন্ডার করা ভিউ",
         "speak": "পড়ে শোনান",
+        "copy_text": "টেক্সট কপি করুন",
         "speak_message": "মেসেজ পড়ে শোনান",
         "steered": "স্টিয়ার করা হয়েছে",
         "switch_to_raw_markdown_view": "মূল markdown ভিউতে যাও",

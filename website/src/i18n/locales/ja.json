@@ -9206,7 +9206,6 @@
         "workflow_runs_load_failed": "ワークフロー実行を読み込めませんでした"
       },
       "assistantMessage": {
-        "copy_text": "テキストをコピー",
         "applied_to_tasks": "タスクに適用済み",
         "copied": "コピーしました！",
         "copy": "コピー",
@@ -9215,13 +9214,12 @@
         "next_version": "次のバージョン",
         "plan_from_here": "ここからプランを作成",
         "previous_version": "前のバージョン",
-        "raw": "生",
         "raw_markdown": "生 Markdown",
         "regenerate": "再生成",
         "regenerate_response": "レスポンスを再生成",
-        "rendered": "レンダリング済み",
         "rendered_view": "レンダリング済みビュー",
         "speak": "読み上げ",
+        "copy_text": "テキストをコピー",
         "speak_message": "メッセージを読み上げ",
         "steered": "ステアリング済み",
         "switch_to_raw_markdown_view": "生 Markdown ビューに切り替え",

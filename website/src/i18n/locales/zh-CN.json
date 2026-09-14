@@ -9206,7 +9206,6 @@
         "workflow_runs_load_failed": "无法加载工作流运行"
       },
       "assistantMessage": {
-        "copy_text": "复制文本",
         "applied_to_tasks": "已应用到任务",
         "copied": "已复制！",
         "copy": "复制",
@@ -9215,13 +9214,12 @@
         "next_version": "下一个版本",
         "plan_from_here": "从此处开始规划",
         "previous_version": "上一个版本",
-        "raw": "原始",
         "raw_markdown": "原始 Markdown",
         "regenerate": "重新生成",
         "regenerate_response": "重新生成回复",
-        "rendered": "渲染",
         "rendered_view": "渲染视图",
         "speak": "朗读",
+        "copy_text": "复制文本",
         "speak_message": "朗读消息",
         "steered": "已引导",
         "switch_to_raw_markdown_view": "切换到原始 Markdown 视图",

@@ -9599,7 +9599,6 @@
         "workflow_runs_load_failed": "Не удалось загрузить запуски рабочих процессов"
       },
       "assistantMessage": {
-        "copy_text": "Копировать текст",
         "applied_to_tasks": "Применено к задачам",
         "copied": "Скопировано!",
         "copy": "Копировать",
@@ -9608,13 +9607,12 @@
         "next_version": "Следующая версия",
         "plan_from_here": "Составить план отсюда",
         "previous_version": "Предыдущая версия",
-        "raw": "исходник",
         "raw_markdown": "Исходный markdown",
         "regenerate": "Сгенерировать заново",
         "regenerate_response": "Сгенерировать ответ заново",
-        "rendered": "отрисовка",
         "rendered_view": "Отрисованный вид",
         "speak": "Озвучить",
+        "copy_text": "Копировать текст",
         "speak_message": "Озвучить сообщение",
         "steered": "Скорректировано",
         "switch_to_raw_markdown_view": "Переключиться на исходный markdown",
