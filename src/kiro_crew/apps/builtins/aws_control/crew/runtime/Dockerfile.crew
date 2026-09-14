@@ -21,6 +21,16 @@
 ARG BASE
 FROM ${BASE}
 
+# BASE again, INSIDE the stage. An ARG declared before FROM lives outside every
+# build stage, so it is available to `FROM ${BASE}` and to nothing after it: the
+# LABEL below expanded to an empty string in every build until this line existed,
+# which made `docker inspect` on a crew image report no base at all -- the one
+# thing the label is for. Found by running scripts/build_crew_image.sh and reading
+# the labels back; the sibling ARGs below are declared after FROM and were always
+# fine, which is what isolates the cause to the pre-FROM scope rather than to the
+# build arg being unset.
+ARG BASE
+
 # Provenance travels with the image, not alongside it. These are the only inputs
 # the crew layer adds, and they are the answer to "which crew is this image".
 ARG CREW_NAME

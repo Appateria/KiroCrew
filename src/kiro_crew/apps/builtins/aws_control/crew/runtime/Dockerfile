@@ -78,12 +78,28 @@ RUN apt-get purge -y curl xz-utils && apt-get autoremove -y && rm -rf /var/lib/a
 WORKDIR /app
 
 # Kiro Crew is installed as a real package because the backend is RUN here, not
-# imported as a library. scripts/build_image.sh builds the wheel from a checkout
-# and drops it in vendor/; the wheel is a build artifact and is not committed.
-COPY vendor/*.whl /tmp/wheels/
+# imported as a library. scripts/build_crew_base_image.sh builds the wheel from a
+# checkout and stages it in vendor/; the wheel is a build artifact and is not
+# committed.
 COPY container/requirements.txt ./container/requirements.txt
-RUN pip install --no-cache-dir -r container/requirements.txt /tmp/wheels/*.whl \
-    && rm -rf /tmp/wheels
+
+# The wheel reaches pip through a BuildKit context bind mount and NEVER a COPY.
+# Image layers are append-only, so a COPY commits the ~48MB wheel to its own
+# layer and a later `rm` can only stack a whiteout on top: every pull then
+# fetches the wheel and discards it, beside the already-installed copy of the
+# same code. That was measured at 5.7% of the published Kiro Crew image before
+# #5778 replaced the COPY with this mount there. The mount makes the bytes
+# visible for the duration of this RUN only, which is why no cleanup follows it.
+#
+# One pip invocation for the container requirements AND the wheel, so both are
+# resolved together rather than the wheel silently re-resolving a pinned dep.
+# test_docker_wheel_layer_contract.py holds both image recipes to this shape.
+RUN --mount=type=bind,source=vendor,target=/tmp/wheels \
+    set -eux; \
+    WHEEL_COUNT=$(ls /tmp/wheels/*.whl | wc -l); \
+    [ "${WHEEL_COUNT}" -eq 1 ] || { echo "expected exactly one wheel, found ${WHEEL_COUNT}" >&2; exit 1; }; \
+    pip install --no-cache-dir -r container/requirements.txt /tmp/wheels/*.whl; \
+    python -c 'import kiro_crew.cli'
 
 # ONLY the container package. The Kiro Crew app's own backend and UI are in this
 # repository too, and they must never be copied in: that code runs inside the
