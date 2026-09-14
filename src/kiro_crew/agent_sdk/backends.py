@@ -77,6 +77,8 @@ with no row here.
      - driver-internal (which channel carries the MCP server list)
    * - ``ACP_BACKENDS_SESSION_SHARING``
      - pre-session registry query (subagent session allocation)
+   * - ``ACP_BACKENDS_MEMBER_CAPABILITIES``
+     - pre-session registry query (whether enrolled members can load a full saved spec)
    * - ``ACP_BACKENDS_MEMBER_DISPATCH``
      - driver-internal (whether a per-session tool set can be mounted)
    * - ``ACP_BACKENDS_PRIVATE_MEMORY_MCP``
@@ -531,6 +533,13 @@ def resolve_selected_backend(value: object) -> str:
 # pi is not a member: Crew spawns one ``pi-acp`` process per session over its own
 # stdio pipe, so there is no second session to share.
 ACP_BACKENDS_SESSION_SHARING = frozenset({ACP_BACKEND_KIRO})
+
+# Backends that can load an enrolled member's full saved agent spec at spawn.
+# Separate from session sharing and per-session dispatch (harness-parity H6):
+# support for either does not establish full-spec loading. Only kiro-cli has
+# demonstrated it; the provider still requires a live dedicated runtime and a
+# confirmed active template before reporting that the saved spec is loaded.
+ACP_BACKENDS_MEMBER_CAPABILITIES = frozenset({ACP_BACKEND_KIRO})
 
 # Backends that can mount a DIFFERENT MCP tool set on one session than the
 # on-disk agent template declares — the capability crew-member dispatch rides
