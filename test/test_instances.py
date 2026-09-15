@@ -4286,8 +4286,8 @@ class TestSelfHealRefreshRestart:
         inst = reg.get("cd-1")
         # _rebuild takes resolved transport params (not a bare ssh host) so the
         # same code path serves both the ssh and ssm transports.
-        ok = await mgr._rebuild(inst, mgr._resolve_transport(inst), 53999)
-        assert ok is True
+        ok = await mgr._rebuild(inst, mgr._resolve_transport(inst), 53999, expected_epoch=0)
+        assert ok is not None
         # The old tunnel's child must be stopped (port freed) before the replace,
         # else it orphans and holds the forward port -> respawn loop.
         assert old.status.state == TunnelState.STOPPED
@@ -4460,6 +4460,333 @@ class TestSelfHealRefreshRestart:
         assert await refresh is False, "a token for a superseded tunnel must not be stored"
         # The valid token of the CURRENT tunnel is untouched.
         assert mgr.get_token("cd-1") == good
+
+    def _tier2_rig(self, tmp_path):
+        """Manager whose tunnel starts can be failed on demand (drives tier 1
+        to fail so a recovery reaches tier 2) and whose mint can be parked on
+        an Event (only while armed; connect's own mints run through)."""
+        arm = asyncio.Event()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        fail_next = {"n": 0}
+        minted = {"n": 0}
+
+        def factory(*a, **k):
+            t = _ResilTunnel(*a, **k)
+            if fail_next["n"] > 0:
+                fail_next["n"] -= 1
+                t.start_result = False
+            return t
+
+        async def mint(
+            host,
+            *,
+            remote_bin="",
+            ttl="20h",
+            remote_port=None,
+            embed_parent_port=None,
+            timeout_secs=None,
+        ):
+            minted["n"] += 1
+            if arm.is_set():
+                arm.clear()
+                started.set()
+                await release.wait()
+                return "TOK-STALE"
+            return f"TOK-{minted['n']}"
+
+        reg, mgr = self._mgr(tmp_path, mint=mint, factory=factory)
+        return reg, mgr, arm, started, release, fail_next
+
+    @pytest.mark.asyncio
+    async def test_a_tier2_remint_for_a_replaced_tunnel_is_discarded(self, tmp_path):
+        """The self-heal tier-2 re-mint runs without the lock, so the operator
+        can disconnect + reconnect while it is in flight; membership is then
+        satisfied by the NEW generation and only the epoch stamp can refuse the
+        stale store. Without the stamp check the current tunnel's token, mint
+        timestamp and ttl would be overwritten by a mint it never requested,
+        and the stale rebuild would replace its live tunnel.
+        """
+        from kiro_crew.instances.ssh_tunnel_manager import TunnelState
+
+        reg, mgr, arm, started, release, fail_next = self._tier2_rig(tmp_path)
+        reg.add(name="CD", ssh_host="cd-1-alias", instance_id="cd-1")
+        await mgr.connect("cd-1")
+
+        # A tunnel dies; tier 1's rebuild fails; tier 2 parks inside its mint.
+        mgr._tunnels["cd-1"].status.state = TunnelState.ERROR
+        fail_next["n"] = 1
+        arm.set()
+        recovery = asyncio.create_task(mgr._recover("cd-1"))
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        # The ordinary operator reaction: reconnect. connect() replaces the
+        # (ERROR) tunnel left by the failed tier-1 rebuild and bumps the epoch.
+        await mgr.connect("cd-1")
+        good = mgr.get_token("cd-1")
+        good_minted_at = mgr._token_minted_at["cd-1"]
+        good_ttl = mgr._token_ttl_secs["cd-1"]
+        good_tunnel = mgr._tunnels["cd-1"]
+        good_refresh = mgr._refresh_tasks["cd-1"]
+        good_epoch = mgr._tunnel_epoch["cd-1"]
+
+        release.set()
+        await asyncio.wait_for(recovery, timeout=5)
+        # The stale mint was refused whole: token, mint bookkeeping, the live
+        # tunnel (no stale rebuild) and the refresh schedule are all untouched.
+        assert mgr._tokens["cd-1"] == good != "TOK-STALE"
+        assert mgr._token_minted_at["cd-1"] == good_minted_at
+        assert mgr._token_ttl_secs["cd-1"] == good_ttl
+        assert mgr._tunnels["cd-1"] is good_tunnel
+        assert mgr._refresh_tasks["cd-1"] is good_refresh
+        assert mgr._tunnel_epoch["cd-1"] == good_epoch
+
+    @pytest.mark.asyncio
+    async def test_tier2_without_interleaving_still_stores_and_rebuilds(self, tmp_path):
+        """The guard must not be over-eager: an undisturbed tier 2 stores its
+        mint and rebuilds. This also pins the +1 in the store's compare — a
+        failed tier-1 rebuild installs (and bumps the stamp for) its
+        replacement before start() reports failure, so an undisturbed tier 2
+        always sees the Phase 1 stamp plus exactly one.
+        """
+        from kiro_crew.instances.ssh_tunnel_manager import TunnelState
+
+        reg, mgr, _arm, _started, _release, fail_next = self._tier2_rig(tmp_path)
+        reg.add(name="CD", ssh_host="cd-1-alias", instance_id="cd-1")
+        await mgr.connect("cd-1")
+        first_token = mgr.get_token("cd-1")
+
+        mgr._tunnels["cd-1"].status.state = TunnelState.ERROR
+        fail_next["n"] = 1  # tier 1 fails, tier 2's own rebuild succeeds
+        await mgr._recover("cd-1")
+
+        assert mgr.status("cd-1").state == TunnelState.CONNECTED
+        assert mgr.get_token("cd-1") not in (None, first_token)  # re-mint stored
+        assert mgr._recover_attempts.get("cd-1", 0) == 0  # marked recovered
+
+    @pytest.mark.asyncio
+    async def test_a_disconnect_during_tier1_rebuild_is_not_overwritten(self, tmp_path):
+        """The rebuild's slow awaits run without the lock, so a user disconnect
+        can land inside its old.stop(). An unguarded rebuild would reinstall a
+        tunnel and record the recovery, persisting was_connected=True straight
+        over the disconnect's False — reviving, across restarts, an instance
+        the user turned off. The teardown's epoch bump makes the recovery's
+        expected generation stale, so the gated install refuses and the
+        recovery stands down.
+        """
+        from kiro_crew.instances.ssh_tunnel_manager import TunnelState
+
+        arm = asyncio.Event()
+        parked = asyncio.Event()
+        release = asyncio.Event()
+
+        class _StopParkTunnel(_ResilTunnel):
+            async def stop(self):
+                if arm.is_set():
+                    arm.clear()
+                    parked.set()
+                    await release.wait()
+                await super().stop()
+
+        reg, mgr = self._mgr(tmp_path, factory=_StopParkTunnel)
+        reg.add(name="CD", ssh_host="cd-1-alias", instance_id="cd-1")
+        await mgr.connect("cd-1")
+        assert reg.get("cd-1").was_connected is True
+
+        # A tunnel dies; tier 1's rebuild parks inside old.stop().
+        mgr._tunnels["cd-1"].status.state = TunnelState.ERROR
+        arm.set()
+        recovery = asyncio.create_task(mgr._recover("cd-1"))
+        await asyncio.wait_for(parked.wait(), timeout=5)
+
+        # The user turns the instance off while the rebuild is parked.
+        assert await mgr.disconnect("cd-1") is True
+        assert reg.get("cd-1").was_connected is False
+
+        release.set()
+        await asyncio.wait_for(recovery, timeout=5)
+
+        # The recovery stood down: nothing tracked, nothing recorded.
+        assert "cd-1" not in mgr._tunnels
+        assert reg.get("cd-1").was_connected is False
+
+    @pytest.mark.asyncio
+    async def test_a_connect_during_tier1_rebuild_keeps_its_live_tunnel(self, tmp_path):
+        """A connect() landing inside tier 1's old.stop() installs a live
+        replacement. An ungated rebuild would overwrite that replacement
+        without stopping it — an orphaned child holding its port, untracked —
+        and the recovery's mismatch handling would then drop the instance
+        entirely. The install gate refuses instead: the recovery stands down
+        and connect's tunnel, token and record stay exactly as connect left
+        them.
+        """
+        from kiro_crew.instances.ssh_tunnel_manager import TunnelState
+
+        arm = asyncio.Event()
+        parked = asyncio.Event()
+        release = asyncio.Event()
+
+        class _StopParkTunnel(_ResilTunnel):
+            async def stop(self):
+                if arm.is_set():
+                    arm.clear()
+                    parked.set()
+                    await release.wait()
+                await super().stop()
+
+        reg, mgr = self._mgr(tmp_path, factory=_StopParkTunnel)
+        reg.add(name="CD", ssh_host="cd-1-alias", instance_id="cd-1")
+        await mgr.connect("cd-1")
+
+        # A tunnel dies; tier 1's rebuild parks inside old.stop().
+        mgr._tunnels["cd-1"].status.state = TunnelState.ERROR
+        arm.set()
+        recovery = asyncio.create_task(mgr._recover("cd-1"))
+        await asyncio.wait_for(parked.wait(), timeout=5)
+
+        # The user reconnects while the rebuild is parked.
+        await mgr.connect("cd-1")
+        fresh_tunnel = mgr._tunnels["cd-1"]
+        fresh_token = mgr.get_token("cd-1")
+        fresh_epoch = mgr._tunnel_epoch["cd-1"]
+
+        release.set()
+        await asyncio.wait_for(recovery, timeout=5)
+
+        # connect's live tunnel was not overwritten, orphaned, or dropped.
+        assert mgr._tunnels["cd-1"] is fresh_tunnel
+        assert fresh_tunnel.status.state == TunnelState.CONNECTED
+        assert mgr.get_token("cd-1") == fresh_token
+        assert mgr._tunnel_epoch["cd-1"] == fresh_epoch
+        assert reg.get("cd-1").was_connected is True
+
+    @pytest.mark.asyncio
+    async def test_a_disconnect_during_the_rebuilt_tunnels_start_reaps_it(self, tmp_path):
+        """start() is an unlocked await with a window before the child spawns:
+        a disconnect landing there stops a tunnel that has no process yet (a
+        no-op) and untracks it, so the spawn would land afterwards with the
+        rebuild holding the only live handle. The post-start revalidation
+        reaps the rebuild's own tunnel and stands the recovery down instead of
+        leaving an untracked forwarder holding its port.
+        """
+        from kiro_crew.instances.ssh_tunnel_manager import TunnelState
+
+        arm = asyncio.Event()
+        parked = asyncio.Event()
+        release = asyncio.Event()
+
+        class _StartParkTunnel(_ResilTunnel):
+            async def start(self):
+                if arm.is_set():
+                    arm.clear()
+                    parked.set()
+                    await release.wait()
+                return await super().start()
+
+        reg, mgr = self._mgr(tmp_path, factory=_StartParkTunnel)
+        reg.add(name="CD", ssh_host="cd-1-alias", instance_id="cd-1")
+        await mgr.connect("cd-1")
+
+        # A tunnel dies; tier 1's rebuild installs its replacement and parks
+        # inside that replacement's start().
+        mgr._tunnels["cd-1"].status.state = TunnelState.ERROR
+        arm.set()
+        recovery = asyncio.create_task(mgr._recover("cd-1"))
+        await asyncio.wait_for(parked.wait(), timeout=5)
+        rebuilt = mgr._tunnels["cd-1"]
+
+        # The user turns the instance off while the start is parked.
+        assert await mgr.disconnect("cd-1") is True
+
+        release.set()
+        await asyncio.wait_for(recovery, timeout=5)
+
+        # The rebuild reaped its own tunnel: nothing tracked, nothing running,
+        # and the disconnect's record stands.
+        assert "cd-1" not in mgr._tunnels
+        assert rebuilt.status.state == TunnelState.STOPPED
+        assert reg.get("cd-1").was_connected is False
+
+    @pytest.mark.asyncio
+    async def test_shutdown_ends_the_generation_so_a_surviving_recovery_reinstalls_nothing(
+        self, tmp_path
+    ):
+        """shutdown() cancels in-flight recoveries, but a cancellation landing
+        inside a tunnel stop can be swallowed there. Such a survivor must find
+        the generation stamp moved — shutdown bumps every tracked instance's
+        epoch before its stop awaits — so its gated install refuses and no
+        child is spawned after cleanup.
+        """
+        from kiro_crew.instances.ssh_tunnel_manager import TunnelState
+
+        arm = asyncio.Event()
+        parked = asyncio.Event()
+        release = asyncio.Event()
+
+        class _StopParkTunnel(_ResilTunnel):
+            async def stop(self):
+                if arm.is_set():
+                    arm.clear()
+                    parked.set()
+                    # A swallowed cancellation: absorb it and keep going, the
+                    # way _SshTunnel.stop() suppresses CancelledError around
+                    # its child-task awaits.
+                    while True:
+                        try:
+                            await release.wait()
+                            break
+                        except asyncio.CancelledError:
+                            continue
+                await super().stop()
+
+        reg, mgr = self._mgr(tmp_path, factory=_StopParkTunnel)
+        reg.add(name="CD", ssh_host="cd-1-alias", instance_id="cd-1")
+        await mgr.connect("cd-1")
+
+        # A tunnel dies; tier 1's rebuild parks inside old.stop(), tracked the
+        # way _on_tunnel_exit tracks it so shutdown's cancel reaches it.
+        mgr._tunnels["cd-1"].status.state = TunnelState.ERROR
+        arm.set()
+        recovery = asyncio.create_task(mgr._recover("cd-1"))
+        mgr._track_recovery("cd-1", recovery)
+        await asyncio.wait_for(parked.wait(), timeout=5)
+
+        await mgr.shutdown()
+        release.set()
+        # The recovery survived its cancellation (swallowed in stop()) but its
+        # expected epoch is stale: the gated install refuses.
+        await asyncio.wait_for(asyncio.gather(recovery, return_exceptions=True), timeout=5)
+
+        assert "cd-1" not in mgr._tunnels
+
+    @pytest.mark.asyncio
+    async def test_a_recovery_surviving_a_disconnect_stores_and_rebuilds_nothing(self, tmp_path):
+        """Teardown deliberately does not drain a parked self-heal (see
+        _teardown_locked: the recovery's cancellation can be swallowed inside
+        _SshTunnel.stop(), so awaiting it under the lock could deadlock). This
+        pins the property that decision rests on: a recovery whose mint
+        returns after the disconnect stores no token and reinstalls no tunnel.
+        """
+        from kiro_crew.instances.ssh_tunnel_manager import TunnelState
+
+        reg, mgr, arm, started, release, fail_next = self._tier2_rig(tmp_path)
+        reg.add(name="CD", ssh_host="cd-1-alias", instance_id="cd-1")
+        await mgr.connect("cd-1")
+
+        mgr._tunnels["cd-1"].status.state = TunnelState.ERROR
+        fail_next["n"] = 1
+        arm.set()
+        recovery = asyncio.create_task(mgr._recover("cd-1"))
+        mgr._track_recovery("cd-1", recovery)  # as _on_tunnel_exit would
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        assert await asyncio.wait_for(mgr.disconnect("cd-1"), timeout=5) is True
+        release.set()
+        await asyncio.wait_for(recovery, timeout=5)
+
+        assert "cd-1" not in mgr._tokens
+        assert "cd-1" not in mgr._tunnels
+        assert "cd-1" not in mgr._refresh_tasks
 
     @pytest.mark.asyncio
     async def test_a_refresh_refuses_to_start_while_the_instance_is_being_edited(self, tmp_path):
@@ -6256,7 +6583,7 @@ class TestForwarderPidHints:
         assert reg.get("cd-1").forwarder_pid == 54321
         assert reg.get("cd-1").forwarder_start == ""
         mgr._tunnels["cd-1"].pid = os.getpid()  # the rebuilt child's pid
-        await mgr._mark_recovered("cd-1")
+        await mgr._mark_recovered("cd-1", mgr._tunnels["cd-1"], mgr._tunnel_epoch["cd-1"])
         inst = reg.get("cd-1")
         assert inst.forwarder_pid == os.getpid()
         assert inst.forwarder_start == (pc.process_start_time(os.getpid()) or "")
@@ -6302,7 +6629,7 @@ class TestForwarderPidHints:
         # The replacement child bound a different loopback port.
         rebuilt = assigned + 1
         mgr._tunnels["cd-1"].status.local_port = rebuilt
-        await mgr._mark_recovered("cd-1")
+        await mgr._mark_recovered("cd-1", mgr._tunnels["cd-1"], mgr._tunnel_epoch["cd-1"])
 
         inst = reg.get("cd-1")
         assert inst.local_port == rebuilt
@@ -6355,7 +6682,7 @@ class TestForwarderPidHints:
         monkeypatch.setattr(reg, "update", recording_update)
 
         await mgr.connect("cd-1")
-        await mgr._mark_recovered("cd-1")
+        await mgr._mark_recovered("cd-1", mgr._tunnels["cd-1"], mgr._tunnel_epoch["cd-1"])
 
         identity_writes = [w for w in writes if "forwarder_sig" in w]
         assert len(identity_writes) == 2, writes
