@@ -10295,7 +10295,10 @@
       "could_not_generate_title": "Não foi possível gerar um título",
       "could_not_open_side_chat": "Não foi possível abrir o chat lateral",
       "side_command_not_run": "O comando /side não foi executado. Sua mensagem continua no editor.",
-      "could_not_send_to_side_chat": "Não foi possível enviar para o chat lateral"
+      "could_not_send_to_side_chat": "Não foi possível enviar para o chat lateral",
+      "run_in_terminal_liveness_probe_failed_error": "O comando não foi enviado para o novo terminal. O shell dele pode ainda estar em execução, por isso a aba foi mantida aberta.",
+      "run_in_terminal_shell_alive_error": "O comando não foi enviado para o novo terminal, mas o shell dele está em execução — a aba foi mantida aberta para você executar o comando ali.",
+      "run_in_terminal_dispatch_rolled_back_error": "O comando não foi enviado para o novo terminal, por isso esse terminal foi fechado."
     },
     "chatSidebar": {
       "1_skipped_currently_selected": "(1 ignorada — atualmente selecionada)",

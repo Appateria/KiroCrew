@@ -182,6 +182,14 @@ export function adoptTab(id: string, cwd?: string): boolean {
   return true
 }
 
+/** Whether a tab with this session id is currently in the store. Lets the
+ *  run-in-terminal dispatch check, at its deadline, that the tab it minted is
+ *  still its own to roll back — a tab the user already closed is gone from
+ *  here, and rolling back anyway would double-delete the PTY. */
+export function hasTab(id: string): boolean {
+  return state.tabs.some(t => t.id === id)
+}
+
 /** Remove a tab from the store (the caller disposes the PTY/xterm first).
  *  Closing the last tab also hides the panel. */
 export function removeTab(id: string): void {
