@@ -18,6 +18,7 @@ npm run test:website      # vitest run --coverage
 npm run test:integration  # vitest run integration/   (the MSW suite only)
 npm run test:watch        # vitest, watch mode
 npm run test:electron     # the Electron node:test suite
+npx playwright install chromium  # one-time E2E browser setup
 npm run test:playwright   # playwright test --headed --workers=1
 npm run test:playwright:headless
 npm run storybook         # component stories on http://127.0.0.1:6006 (loopback only)
