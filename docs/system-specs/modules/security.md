@@ -1663,13 +1663,25 @@ of controls and URLs, passed through `security.redact()`, and bounded in length 
 count before persistence. Provider failures
 are reduced in memory to fixed error kinds and reason codes, including a non-retryable
 setup kind for missing, untrusted, or unexecutable `gh`; raw diagnostic text is then
-discarded. The load-bearing primary read excludes `statusCheckRollup`; checks are read
-separately with the head revision, so a missing Checks permission or a push between
-requests produces typed incomplete supplemental evidence without erasing authorized
-primary facts. Open-PR review-thread pagination is bounded to ten 100-node pages,
-ignores outdated threads, and preserves usable nodes from partial GraphQL errors;
-incomplete or capped evidence fails closed as pending. A terminal merged/closed
-primary state does not issue either supplemental request. Shadow execution has no dispatcher
+discarded. Every read is a GraphQL document that carries one alias per subject, and no
+part of a subject reaches the document text: aliases and variable names are built from a
+subject's index in the batch, while owner, repository, number, and cursor travel as typed
+GraphQL variables, so a hostile repository name is a value the server binds rather than
+syntax the adapter emits. The load-bearing primary read selects no check rollup; checks
+are read in a separate document with the head revision, so a missing Checks permission or
+a push between requests produces typed incomplete supplemental evidence without erasing
+authorized primary facts. The rollup read compares the head it is given against both the
+primary read's revision and the commit the rollup itself describes, and a mismatch on
+either is typed incomplete evidence rather than another commit's checks. Open-PR
+review-thread pagination is bounded to ten 100-node pages and the check rollup to four
+100-node pages, each subject advancing on its own cursor; both ignore outdated threads and
+preserve usable nodes from partial GraphQL errors; incomplete or capped evidence fails
+closed as pending. A terminal merged/closed
+primary state does not issue either supplemental request. A partial failure degrades only
+the subjects it covers: `gh` exits non-zero whenever a response carries any error, including
+one scoped to a single alias, so the exit code is evidence about that alias and decides the
+outcome only when no payload can be read instead; an error naming no alias in the batch is
+charged to every subject in it rather than dropped. Shadow execution has no dispatcher
 dependency and refuses an enabled wake request before either provider or persistence
 work, so it cannot turn ambient GitHub authority into a model wake in this slice.
 Locally imposed check and review-thread caps remain durable incomplete evidence and do

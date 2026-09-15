@@ -30,7 +30,7 @@ this spec states the target and that one states the present.
 | Layer | Status | Where it lives today |
 |---|---|---|
 | Subject and registry | `partial` | `monitoring/registry.py` owns kind/objective/capability data for four public pull-request kinds plus internal `gh-pr` and `github_workflow_run`; `probes/__init__.py` still has its separate dispatch branch |
-| Probe | `partial` | `monitoring.models.MonitorProbe` and `MonitorProbeResult` are provider-neutral and plural; the `irq.Probe` path remains separate |
+| Probe | `partial` | `monitoring.models.MonitorProbe` and `MonitorProbeResult` are provider-neutral and plural, and `monitoring/github_pull_request.py` batches its subjects into one GraphQL document per evidence kind; the other adapters loop internally and no driver assembles a batch, and the `irq.Probe` path remains separate |
 | Observation | `partial` | the `Observation` type and the `Severity` vocabulary live in `irq.py`; `PrWatchProbe` in `probes/gh_pr.py` emits the keys; `monitoring/` reduces a subject to one fingerprint |
 | Decision | `partial` | `decide_monitor` is IO-free but state-mutating: it coalesces successive changes to one subject over time through a window on `MonitorState` (a floor and a head-change reset) and derives its dedup comparison so an unresolved change re-asserts on a re-alert interval. It writes the window fields on the staged state and READS the alert map; the caller stamps the alert map on a wake and persists the same staged state, so decide-and-persist is a required pairing. `irq.py` keeps its own multi-signal coalescing for the cron path |
 | Persistence | `partial` | versioned in `monitoring/`; unversioned in `irq.py`, which also holds decision logic |
@@ -170,9 +170,22 @@ the read was complete, and a classified error or `None`.
 This is the single most consequential contract in this spec. A per-subject probe
 interface cannot be batched later without changing every implementation and
 every caller, and batching is not a micro-optimization here: fifty subjects read
-one at a time is roughly 150 process invocations against one query. Today
-batching is reachable only from the single out-of-session poller, for no reason
-other than the interface shape.
+one at a time is roughly 150 process invocations against one query.
+
+**Status: the GitHub pull-request probe batches; no caller passes more than one
+subject yet.** `GitHubPullRequestProvider.probe` spends one GraphQL document per
+evidence kind per chunk of at most 25 subjects, so a tick of any size up to that
+bound costs three requests instead of three per subject, and each further chunk
+adds three. It carries the (host, credential) rule as a check rather than as a
+grouping pass: the credential is the call's own argument, and a chunk is refused
+if it names two hosts. The
+other four adapters still loop internally and declare so in their own docstrings.
+What is missing is above the probe, not inside it: the in-session driver arms one
+`asyncio` task per loop in `autonudge.py`, so a tick structurally sees one
+monitor, and the out-of-session poller runs one subject per cron job through
+`irq.Probe.observe`, which is singular. A batch therefore has no assembler; that
+is a driver change, and it belongs with the consolidation rather than with the
+probe.
 
 Rules:
 
@@ -180,7 +193,14 @@ Rules:
   plural signature and loops internally, so the caller never encodes the
   difference.
 - One query per (host, credential) per tick. Subjects sharing a credential share
-  the query.
+  the query. An adapter satisfies this with a CHECK, not with a grouping pass: a
+  pass that sorts subjects into per-host queries is machinery for a case its own
+  target gate cannot construct, so it would ship unexercised, while a check is
+  exercised on every call and fails closed the day a second host is accepted. A
+  read whose failures are separate is a separate query: the GitHub
+  adapter keeps its load-bearing primary read apart from its two supplemental
+  ones, because a document that selects the check rollup hands its lifecycle
+  facts to a missing Checks permission.
 - A partial failure degrades only the subjects it covers. One unreadable subject
   must not fail the batch.
 - Every error is classified before it leaves this layer. An unclassified failure
