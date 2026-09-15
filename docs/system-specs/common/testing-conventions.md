@@ -415,6 +415,23 @@ which testpath asked for the workers.
      never move the anchor.** Redirecting a matcher so a test can pass makes it assert
      against a pattern that no longer matches the thing it protects.
 
+- **Tests MUST NOT derive an expected value from the repo's declared version.**
+  `kiro_crew.__version__` is an input the checkout controls, not a constant: a release
+  branch declares `X.Y.Z-rc.N` by contract ([release](../../build/release.md)), a
+  nightly tree carries `.dev<stamp>`, an insider wheel its own suffix. `main` declares
+  a bare release, so an expectation COMPUTED from it is green there and red exactly
+  where a release is decided: `f"{__version__}.12"` for a `BUILD_VERSION` stamp
+  production honours only over a bare numeric base passed on `main` for months while
+  reddening `release.yml`'s `release-candidate-tests` — the same-SHA gate every
+  prerelease tag must clear before a promotion record can be assembled — and every
+  local run and back-to-`main` PR off that branch with it. Pin a synthetic base
+  instead, and when the test synthesizes the package under test, rewrite the literal
+  there so the test owns that input outright (`test/test_build_version_override.py`'s
+  `_PINNED_BASE`). Comparing the SAME live value on both sides is fine and is not this
+  rule — "`--version` reports the string the package declares" IS the contract; it is
+  computing a DIFFERENT string from the live one that assumes a shape no branch
+  guarantees.
+
 - **Never leave the process working directory somewhere else.** The CWD is
   per-PROCESS, so under xdist one test's `os.chdir` becomes every later test's starting
   directory on that worker. Use `monkeypatch.chdir`, which reverts on its own; the
@@ -820,6 +837,23 @@ Two things the survey CANNOT tell you, both of which misled the first pass:
   held for the life of the worker is paid by every later test on it. And mark the module
   as one `xdist_group` (see "Keeping the suite fast"): a per-module cache that xdist
   spreads over five workers is warmed five times.
+- **A repo-WIDE corpus scan enumerates via git, never the filesystem.** `rglob` and
+  `os.walk` from the repo root descend every gitignored tree and every checkout nested
+  under it, so a worktree under `.claude/worktrees/` (the Claude Code harness creates
+  them there), a local `.kirocrew-dev/` data home or a scratch clone puts a second copy
+  of every shipped file in front of the gate. That is not only a false positive naming a
+  path the author cannot edit: where the gate asserts `any(...)` over its matches — the
+  coverage omit contract does — a stale copy keeps satisfying it after the real file lost
+  the property, and the gate fails OPEN. Use `source_corpus.repo_files()` /
+  `repo_files_named(...)`, which asks `git ls-files --cached --others --exclude-standard`
+  (untracked-but-not-ignored included, so a new file is policed before it is `git add`ed)
+  and keep the gate's own scope filter — `_vendor` is TRACKED, so git names it just as a
+  walk would. Its no-git fallback is reachable ONLY where there is no `.git` (an sdist) or
+  no git binary: a checkout whose `git` call merely FAILED — a leaked `GIT_DIR`,
+  `safe.directory` — raises instead, because a fallback there answers wider than git and
+  no count floor catches a surplus. Skipping one directory by name is not the fix: the set
+  of nested trees is open, and `test_source_corpus.py` pins the rule instead — no test
+  under `test/` or `scripts/` may root a recursive filesystem scan at the repo root.
 
 The second full-run audit (five backend + five frontend runs against a clean `main`)
 found these further classes. Each one passed on the host that wrote it.

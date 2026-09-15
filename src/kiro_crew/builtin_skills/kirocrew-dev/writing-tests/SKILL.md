@@ -465,6 +465,11 @@ The consequence for how you write a test:
 - [ ] A module that `rglob`+`ast.parse`s `src/` once per module also carries
       `pytestmark = pytest.mark.xdist_group(name="tree_scan_<module>")`, or every xdist
       worker it touches re-runs the scan
+- [ ] A scan of the WHOLE repo goes through `source_corpus.repo_files()` /
+      `repo_files_named(...)`, never `rglob`/`os.walk` from the root — a walk descends
+      gitignored trees and any nested worktree, so the gate reports that copy as the
+      offender, or (with an `any(...)` assertion) keeps passing on it; the gate keeps its
+      own scope filter, because `_vendor` is tracked
 - [ ] A fixture stamped from a module-level `NOW` is only compared by production code
       whose clock is pinned to that same `NOW` (a `frozen_clock` fixture) -- never two clocks
 - [ ] After `await handler(...)`, an assertion on something a worker thread emits via
