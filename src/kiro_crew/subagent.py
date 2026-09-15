@@ -2492,6 +2492,9 @@ class SubagentManager:
     def batch_members_pending(self, batch_id: str) -> bool:
         return self._waves.batch_members_pending_impl(batch_id)
 
+    def wave_has_live_nested_spawns(self, batch_id: str) -> bool:
+        return self._waves.wave_has_live_nested_spawns_impl(batch_id)
+
     def finalize_batch(self, batch_id: str) -> None:
         return self._waves.finalize_batch_impl(batch_id)
 

@@ -8508,15 +8508,51 @@ class GatewayOrchestrator:
                     )
                     if _last:
                         # Final chunk: release the spawn-discipline gate.
+                        #
+                        # The tally counts this wave's DIRECT members only.
+                        # ``wave_has_live_nested_spawns`` reports whether a
+                        # member of this wave has itself spawned work that is
+                        # still running (its own independent batch, so not in
+                        # this total). When it is, the completion wording is
+                        # scoped to the direct members and states that their
+                        # nested work reports on its own; the unconditional
+                        # "This run is complete / All results delivered" claim
+                        # is reserved for a wave with no live nested work. The
+                        # check is read-only and never withholds the digest.
+                        try:
+                            _nested_live = bool(
+                                self.subagent_mgr
+                                and self.subagent_mgr.wave_has_live_nested_spawns(_batch_id)
+                            )
+                        except Exception:
+                            _nested_live = False
+                        if _nested_live:
+                            _completion_line = (
+                                f"These {bp['total']} sub-agents finished: "
+                                f"{bp['ok']} ✅ · {bp['err']} ❌ · "
+                                f"{bp['stopped']} ⏹. Their results are below. "
+                                f"NOTE: a sub-agent in this wave spawned further "
+                                f"work that is still running; that nested work "
+                                f"is tracked as its own wave and reports "
+                                f"separately when it finishes — this digest does "
+                                f"NOT cover it.\n"
+                                f"Finish processing these results before "
+                                f"spawning any follow-up sub-agents.\n"
+                            )
+                        else:
+                            _completion_line = (
+                                f"wave finished: "
+                                f"{bp['ok']} ✅ · {bp['err']} ❌ · "
+                                f"{bp['stopped']} ⏹ of {bp['total']} agents. "
+                                f"All results delivered.\n"
+                                f"This run is complete. Finish processing all "
+                                f"results before spawning any follow-up "
+                                f"sub-agents.\n"
+                            )
                         announce = (
                             f"{SUBAGENT_BATCH_COMPLETION_PREFIX}\n"
-                            f"Batch results {_chunk_k}/{_chunk_j} — wave finished: "
-                            f"{bp['ok']} ✅ · {bp['err']} ❌ · "
-                            f"{bp['stopped']} ⏹ of {bp['total']} agents. "
-                            f"All results delivered.\n"
-                            f"This run is complete. Finish processing all "
-                            f"results before spawning any follow-up "
-                            f"sub-agents.\n"
+                            f"Batch results {_chunk_k}/{_chunk_j} — "
+                            f"{_completion_line}"
                             f"{_footer}\n\n{_digest_body}{_guards}"
                         )
                         # This member's completion is delivered as the wave-close
