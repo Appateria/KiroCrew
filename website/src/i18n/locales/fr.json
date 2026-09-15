@@ -579,6 +579,8 @@
       "global": {
         "unattributed_label": "ÉVÉNEMENTS SANS DÉPÔT",
         "unattributed_note": "Enregistrés avant que les événements ne nomment leur dépôt, donc impossibles à attribuer — et non comptés dans les étapes ci-dessous.",
+        "no_step_activity_label": "ÉVÉNEMENTS HORS DE CES ÉTAPES",
+        "no_step_activity_note": "Des événements ont été enregistrés pour ce pipeline (le total des événements compte tout ce qui a été enregistré, autres dépôts compris), mais aucun n'appartient aux étapes de cette vue, donc les colonnes et la dernière activité affichent zéro.",
         "repos_label": "DÉPÔTS",
         "repos_note": "La piste contient aussi les événements des autres. Ce tableau n'affiche que le dépôt sélectionné ci-dessus.",
         "title": "Pipeline",

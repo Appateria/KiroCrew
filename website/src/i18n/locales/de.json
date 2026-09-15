@@ -575,6 +575,8 @@
       "global": {
         "unattributed_label": "EREIGNISSE OHNE REPOSITORY",
         "unattributed_note": "Aufgezeichnet, bevor Ereignisse ihr Repository benannten, daher keinem zuordenbar — und nicht in den Schritten unten mitgezählt.",
+        "no_step_activity_label": "EREIGNISSE AUSSERHALB DIESER SCHRITTE",
+        "no_step_activity_note": "Für diese Pipeline wurden Ereignisse aufgezeichnet — die Ereigniszahl zählt alles jemals Aufgezeichnete, auch andere Repositories — aber keines gehört zu den Schritten dieser Ansicht, daher zeigen die Spalten und die letzte Aktivität null.",
         "repos_label": "REPOSITORYS",
         "repos_note": "Die Spur enthält auch Ereignisse der anderen. Dieses Board zeigt nur das oben ausgewählte Repository.",
         "title": "Pipeline",

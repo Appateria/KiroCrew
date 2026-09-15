@@ -571,6 +571,8 @@
       "global": {
         "unattributed_label": "没有仓库的事件",
         "unattributed_note": "在事件开始记录所属仓库之前写入，因此无法归属到任何仓库，也不计入下方各步骤的数字。",
+        "no_step_activity_label": "不属于这些步骤的事件",
+        "no_step_activity_note": "此流水线记录过事件——事件总数统计所有已记录的事件，包括其他仓库——但没有一个属于此视图的步骤，因此各列和最近活动均显示为零。",
         "repos_label": "仓库",
         "repos_note": "记录中还包含其他仓库的事件。此看板仅显示上方所选的仓库。",
         "title": "流水线",

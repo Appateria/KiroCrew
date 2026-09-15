@@ -579,6 +579,8 @@
       "global": {
         "unattributed_label": "EVENTOS SEM REPOSITÓRIO",
         "unattributed_note": "Registrados antes de os eventos nomearem seu repositório, portanto não podem ser atribuídos a nenhum, e não são contados nas etapas abaixo.",
+        "no_step_activity_label": "EVENTOS FORA DESTAS ETAPAS",
+        "no_step_activity_note": "Eventos foram registrados para este pipeline (o total de eventos conta tudo o que já foi registrado, incluindo outros repositórios), mas nenhum pertence às etapas desta visualização, então as colunas e a última atividade mostram zero.",
         "repos_label": "REPOSITÓRIOS",
         "repos_note": "O registro também contém eventos dos outros. Este painel mostra apenas o repositório selecionado acima.",
         "title": "Pipeline",

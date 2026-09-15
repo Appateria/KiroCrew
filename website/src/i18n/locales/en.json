@@ -325,6 +325,8 @@
       "global": {
         "unattributed_label": "EVENTS WITHOUT A REPOSITORY",
         "unattributed_note": "Recorded before events named their repository, so they cannot be attributed to one — and are not counted in the steps below.",
+        "no_step_activity_label": "EVENTS OUTSIDE THESE STEPS",
+        "no_step_activity_note": "Events were recorded for this pipeline — the events figure counts everything ever recorded, other repositories included — but none of them belong to this view's steps, so the columns and last-activity read zero.",
         "repos_label": "REPOSITORIES",
         "repos_note": "The trail also holds events from the others. This board shows only the repository selected above.",
         "title": "Pipeline",
