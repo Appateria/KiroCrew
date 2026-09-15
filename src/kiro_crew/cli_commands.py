@@ -25,6 +25,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from kiro_crew import __version__, beacon, platform_compat
 from kiro_crew.agent import reset_agent_model
@@ -230,13 +231,16 @@ def _ws_dir_resolves_inside_home(ws_dir: str) -> Path | None:
         return None
 
 
-def _format_schedule(schedule: object) -> str:
+def _format_schedule(schedule: object, *, tz_name: str = "") -> str:
     """Human-readable schedule description (CLI shows full date for 'at' jobs)."""
 
     if not isinstance(schedule, CronSchedule):
         return str(schedule)
     if schedule.kind == "at" and schedule.at_ts:
         try:
+            if tz_name:
+                dt = datetime.fromtimestamp(schedule.at_ts, ZoneInfo(tz_name))
+                return f"at {dt:%Y-%m-%d %H:%M %Z}"
             dt = datetime.fromtimestamp(schedule.at_ts)
             return f"at {dt:%Y-%m-%d %H:%M}"
         except Exception:
@@ -245,6 +249,8 @@ def _format_schedule(schedule: object) -> str:
             # must not crash `kirocrew cron list` -- fall through to the
             # shared renderer, whose own fallback string covers it.
             pass
+    if tz_name:
+        return format_schedule(schedule, tz_name=tz_name)
     return format_schedule(schedule)
 
 
@@ -1344,7 +1350,7 @@ def _cron_dispatch(args: argparse.Namespace) -> None:
             return
         for j in jobs:
             status = "✅" if j.enabled else "⏸️"
-            sched = _format_schedule(j.schedule)
+            sched = _format_schedule(j.schedule, tz_name=j.timezone or "")
             print(f"  {status} {j.id}  {j.name}  ({sched})  {j.message[:60]}")
             # Ownership is printed because it decides which surfaces can manage
             # the job at all: a job with no owning session is outside every chat
@@ -1503,7 +1509,7 @@ def _cron_dispatch(args: argparse.Namespace) -> None:
             job.silent = True
         if agent or silent:
             svc._save()
-        sched_desc = _format_schedule(job.schedule)
+        sched_desc = _format_schedule(job.schedule, tz_name=job.timezone or "")
 
         sel().log_api_access(
             caller="cli",

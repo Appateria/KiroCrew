@@ -2565,7 +2565,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             return f"Error: {exc}"
         except ValueError as e:
             return f"Error: {e}"
-        sched_str = format_schedule(job.schedule)
+        sched_str = format_schedule(job.schedule, tz_name=job.timezone or "")
         sel().log_api_access(
             caller="mcp",
             operation="cron.create",
@@ -2696,7 +2696,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             source="mcp",
             resources=f"job_id={jid}",
         )
-        sched_str = format_schedule(updated.schedule)
+        sched_str = format_schedule(updated.schedule, tz_name=updated.timezone or "")
         # Read from the SAVED row, not from ``args``: an update that leaves
         # persistent_session alone must still warn if the job is already in that
         # state and this call turned it into an agent job, and the flag is writable
