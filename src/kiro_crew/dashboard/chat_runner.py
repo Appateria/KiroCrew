@@ -13544,6 +13544,30 @@ async def _run_chat(
             # has something to retire.
             if slot._active_turn_session_key == session_key:
                 slot._active_turn_session_key = ""
+            # Spelling-independent backstop for a directive call whose tool
+            # identity and result marker were both lost by the backend. The
+            # validated payload reached the gateway, but no frame claimed it,
+            # so every per-frame diagnostic above was structurally unreachable.
+            # Inspect only records parked during THIS turn: residue from an
+            # earlier abandoned turn must not blame the current one. Diagnostic
+            # only — claim, refusal, and expiry semantics stay unchanged.
+            _unclaimed_markers = directive_queue.unclaimed_digest_markers(
+                session_key,
+                not_before=_turn_started,
+            )
+            if _unclaimed_markers:
+                _identity_markers = tuple(
+                    f"{call_id}:{server or '-'}:{tool or '-'}"
+                    for call_id, (server, tool) in sorted(_seen_tool_identity.items())
+                )
+                logger.warning(
+                    "session-directive UNCLAIMED_AT_TURN_END "
+                    "session_key=%r count=%d record_digests=%r tool_identities=%r",
+                    session_key,
+                    len(_unclaimed_markers),
+                    _unclaimed_markers,
+                    _identity_markers,
+                )
         # End-of-turn fallback: catches set_project and reset_conversation calls
         # that fired mid-turn, after the start-of-turn consume already ran. This
         # is the ONLY caller that may consume a queued conversation discard —

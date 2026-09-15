@@ -369,7 +369,16 @@ prefix (KAS; a recorded frame read `Running: @kirocrew-core/ask_question`), or C
 the legacy `AcpClient` builders that serve CC set `AcpEvent.wire_title` from the
 backend's own field; the display `title`, which `select_tool_title` fills from a
 shell call's model-authored `rawInput.description`, is never read for this. A call that resolves to
-no directive tool records no digest. The name is in the key because every
+no directive tool records no digest. A markerless result would otherwise leave
+that failure invisible. The spelling-independent turn-end backstop calls
+`directive_queue.unclaimed_digest_markers` for records parked at or after
+`_turn_started`; when any remain, `_run_chat` emits one WARNING marker,
+`UNCLAIMED_AT_TURN_END`. The line records the session key, current-turn count,
+`<kind>:<12-char digest prefix>` markers, and the tool identities observed during
+that turn. It does not claim, refuse, discard, or expire anything, and it excludes
+records left by earlier abandoned turns.
+
+The name is in the key because every
 no-argument tool hashes `{}` alike: an args-only key let a planted
 `reset_conversation({})` be claimed by the victim's `resource_status({})` frame. Neither side reads the result, so a backend may
 re-serialise, duplicate, offload or cap the result body and the directive still
