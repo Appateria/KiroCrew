@@ -516,7 +516,6 @@ test/test_dashboard_cron_batch_delete_handler.py
 test/test_dashboard_cron_concurrent_create.py
 test/test_dashboard_file_io.py
 test/test_dashboard_files_coverage.py
-test/test_dashboard_hooks.py
 test/test_dashboard_no_legacy.py
 test/test_dashboard_reset_sessions.py
 test/test_dashboard_route_table.py
@@ -764,7 +763,6 @@ test/test_mcp_skill_registry.py
 test/test_mcp_stub_freeze_ratchet.py
 test/test_mcp_stub_migration.py
 test/test_mcp_sync_agent.py
-test/test_md_notebook.py
 test/test_meetings_agent_names.py
 test/test_meetings_dictionary.py
 test/test_meetings_providers.py
@@ -822,7 +820,6 @@ test/test_platform_admission.py
 test/test_platform_compat_coverage.py
 test/test_playwright_e2e.py
 test/test_pod_e2e_video_guard.py
-test/test_pod_self_contained.py
 test/test_port_reclaim.py
 test/test_port_reclaim_cov80.py
 test/test_portability.py
@@ -973,10 +970,8 @@ test/test_stub_bridge_liveness.py
 test/test_stuck_turn_watchdog.py
 test/test_subagent_context_group_plumbing.py
 test/test_subagent_context_groups.py
-test/test_subagent_continuable.py
 test/test_subagent_cost.py
 test/test_subagent_reap_race.py
-test/test_subagent_scale.py
 test/test_subagent_sizing.py
 test/test_subagent_stall.py
 test/test_subquestion_queue.py

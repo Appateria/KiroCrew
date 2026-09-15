@@ -479,6 +479,25 @@ def _stream(data: bytes) -> asyncio.StreamReader:
     return reader
 
 
+def _wait_for_raising(exc: BaseException):
+    """A ``wait_for`` stand-in that fails with *exc* without running the awaitable.
+
+    The code under test hands ``wait_for`` a fresh ``proc.communicate()``
+    coroutine on both the turn and the reap path. A plain ``AsyncMock`` with a
+    ``side_effect`` drops that argument un-awaited, and the interpreter reports
+    it at garbage collection against some later test; closing it first keeps
+    the stand-in faithful to the real ``wait_for``, which always consumes what
+    it is given.
+    """
+
+    async def _wait_for(aw, timeout=None):
+        if asyncio.iscoroutine(aw):
+            aw.close()
+        raise exc
+
+    return _wait_for
+
+
 def _fake_proc(returncode: int = 0, stdout: bytes = b"", stderr: bytes = b"") -> "MagicMock":
     """Build a mock subprocess the production code can actually read.
 
@@ -534,7 +553,7 @@ class TestCommandProviderNoShellAndTimeout:
                 return_value="/usr/bin:/bin",
             ),
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
-            patch("asyncio.wait_for", AsyncMock(side_effect=asyncio.TimeoutError())),
+            patch("asyncio.wait_for", _wait_for_raising(asyncio.TimeoutError())),
         ):
             result = await p.check()
         assert result.error == "check_command timed out"
@@ -577,7 +596,7 @@ class TestCommandProviderNoShellAndTimeout:
                 return_value="/usr/bin:/bin",
             ),
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
-            patch("asyncio.wait_for", AsyncMock(side_effect=asyncio.TimeoutError())),
+            patch("asyncio.wait_for", _wait_for_raising(asyncio.TimeoutError())),
         ):
             assert await p.apply() is False
         proc.kill.assert_called_once()
@@ -733,7 +752,7 @@ class TestCancellationKillsUpdaterChild:
                 return_value="/usr/bin:/bin",
             ),
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
-            patch("asyncio.wait_for", AsyncMock(side_effect=asyncio.CancelledError())),
+            patch("asyncio.wait_for", _wait_for_raising(asyncio.CancelledError())),
         ):
             with pytest.raises(asyncio.CancelledError):
                 await p.apply()
@@ -753,7 +772,7 @@ class TestCancellationKillsUpdaterChild:
                 return_value="/usr/bin:/bin",
             ),
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
-            patch("asyncio.wait_for", AsyncMock(side_effect=asyncio.CancelledError())),
+            patch("asyncio.wait_for", _wait_for_raising(asyncio.CancelledError())),
         ):
             with pytest.raises(asyncio.CancelledError):
                 await p.check()

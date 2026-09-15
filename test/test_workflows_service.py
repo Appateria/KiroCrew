@@ -176,6 +176,10 @@ async def test_author_uses_isolated_destroyed_lite_session(monkeypatch) -> None:
         provider.is_process_alive = lambda: True
         provider.context_usage_pct = lambda: 0.0
         provider.has_active_turn = lambda: False
+        # The identity reclaim after a turn calls the inner client's sync
+        # ``reclaim``; as an AsyncMock child it would return an un-awaited
+        # coroutine.
+        provider.client.reclaim = lambda: None
         provider.cwd = ""
         providers.append(provider)
         agents.append(agent or "")

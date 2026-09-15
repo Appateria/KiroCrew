@@ -22,8 +22,6 @@ import pytest
 
 from kiro_crew.cron import CronJob, CronService
 
-pytestmark = pytest.mark.asyncio
-
 
 @pytest.fixture(autouse=True)
 def _isolate_cron_store(monkeypatch, tmp_path):
@@ -118,6 +116,7 @@ class TestFields:
         assert loaded.source_template_prompt == ""
 
 
+@pytest.mark.asyncio
 class TestAddJobAsync:
     """The dashboard create path (add_job_async) stamps both fields, fully-formed
     on the first save."""

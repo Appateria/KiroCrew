@@ -721,6 +721,10 @@ class TestSpawnCreatesFolder:
         provider.start = AsyncMock()
         provider.shutdown = AsyncMock()
         provider.context_usage_pct = lambda: 0.0
+        # Read synchronously after every turn; as AsyncMock children they
+        # would hand back coroutines nobody awaits.
+        provider.context_window_tokens = lambda: 0
+        provider.context_used_tokens = lambda: 0
 
         async def _empty_stream(*_a, **_kw):
             return
@@ -784,6 +788,10 @@ class TestSpawnCreatesFolder:
         provider.start = AsyncMock()
         provider.shutdown = AsyncMock()
         provider.context_usage_pct = lambda: 0.0
+        # Read synchronously after every turn; as AsyncMock children they
+        # would hand back coroutines nobody awaits.
+        provider.context_window_tokens = lambda: 0
+        provider.context_used_tokens = lambda: 0
 
         async def _empty_stream(*_a, **_kw):
             return
@@ -850,6 +858,10 @@ class TestResultStreamingToAgentFolder:
         provider.start = AsyncMock()
         provider.shutdown = AsyncMock()
         provider.context_usage_pct = lambda: 0.0
+        # Read synchronously after every turn; as AsyncMock children they
+        # would hand back coroutines nobody awaits.
+        provider.context_window_tokens = lambda: 0
+        provider.context_used_tokens = lambda: 0
 
         async def _stream_chunks(*_a, **_kw):
             yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="hello ")
@@ -903,6 +915,10 @@ class TestPerTurnStateUpdates:
         provider.start = AsyncMock()
         provider.shutdown = AsyncMock()
         provider.context_usage_pct = lambda: 0.0
+        # Read synchronously after every turn; as AsyncMock children they
+        # would hand back coroutines nobody awaits.
+        provider.context_window_tokens = lambda: 0
+        provider.context_used_tokens = lambda: 0
         provider.session_id = "session-live"
 
         async def _stream(*_a, **_kw):
@@ -954,6 +970,10 @@ class TestPerTurnStateUpdates:
         provider.start = AsyncMock()
         provider.shutdown = AsyncMock()
         provider.context_usage_pct = lambda: 0.0
+        # Read synchronously after every turn; as AsyncMock children they
+        # would hand back coroutines nobody awaits.
+        provider.context_window_tokens = lambda: 0
+        provider.context_used_tokens = lambda: 0
         provider.approve_tool = AsyncMock()
 
         async def _stream(*_a, **_kw):
@@ -1091,6 +1111,10 @@ class TestTombstoneOnAbnormalExit:
         provider.start = AsyncMock()
         provider.shutdown = AsyncMock()
         provider.context_usage_pct = lambda: 0.0
+        # Read synchronously after every turn; as AsyncMock children they
+        # would hand back coroutines nobody awaits.
+        provider.context_window_tokens = lambda: 0
+        provider.context_used_tokens = lambda: 0
         provider.approve_tool = AsyncMock()
 
         async def _many_tools(*_a, **_kw):
@@ -1156,6 +1180,10 @@ class TestTombstoneOnAbnormalExit:
         provider.start = AsyncMock()
         provider.shutdown = AsyncMock()
         provider.context_usage_pct = lambda: 0.0
+        # Read synchronously after every turn; as AsyncMock children they
+        # would hand back coroutines nobody awaits.
+        provider.context_window_tokens = lambda: 0
+        provider.context_used_tokens = lambda: 0
 
         async def _ok(*_a, **_kw):
             yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="done")
@@ -1204,6 +1232,10 @@ class TestFolderCleanupOnSuccess:
         provider.start = AsyncMock()
         provider.shutdown = AsyncMock()
         provider.context_usage_pct = lambda: 0.0
+        # Read synchronously after every turn; as AsyncMock children they
+        # would hand back coroutines nobody awaits.
+        provider.context_window_tokens = lambda: 0
+        provider.context_used_tokens = lambda: 0
 
         async def _ok(*_a, **_kw):
             yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="done")
@@ -1253,6 +1285,10 @@ class TestFolderCleanupOnSuccess:
         provider.start = AsyncMock()
         provider.shutdown = AsyncMock()
         provider.context_usage_pct = lambda: 0.0
+        # Read synchronously after every turn; as AsyncMock children they
+        # would hand back coroutines nobody awaits.
+        provider.context_window_tokens = lambda: 0
+        provider.context_used_tokens = lambda: 0
 
         async def _ok(*_a, **_kw):
             yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="done")

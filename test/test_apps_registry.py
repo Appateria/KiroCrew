@@ -23,6 +23,7 @@ This file lives in ``test/`` (not ``tests/``) so the ``setup.cfg``
 from __future__ import annotations
 
 import asyncio
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -3176,7 +3177,29 @@ def _build_cmds_for(tmp_path, monkeypatch, files: dict[str, str]) -> list[list[s
     monkeypatch.setattr(registry, "create_subprocess_limited", _fake_exec)
     monkeypatch.setattr(registry, "wrap_argv", lambda cmd, mode="standard": (list(cmd), None))
     monkeypatch.setattr(registry, "cgroup_scope_argv", lambda cmd: list(cmd))
+    _pin_pip_importable(monkeypatch)
     return captured
+
+
+def _pin_pip_importable(monkeypatch) -> None:
+    """Make the planner see a gateway interpreter that HAS ``pip``.
+
+    ``_run_app_build`` probes ``importlib.util.find_spec("pip")`` on the running
+    interpreter and soft-skips the Python build when it is absent. That probe
+    reads the test host's own packaging: a venv created by ``uv`` (or
+    ``--without-pip``) ships no ``pip`` module, so without this pin every
+    "a pip command is planned" assertion fails on such a host while the same
+    test passes on a stdlib venv. The soft-skip branch has its own test that
+    pins the opposite answer.
+    """
+    real_find_spec = importlib.util.find_spec
+
+    def _with_pip(name, *args, **kwargs):
+        if name == "pip":
+            return importlib.machinery.ModuleSpec("pip", loader=None)
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(registry.importlib.util, "find_spec", _with_pip)
 
 
 @pytest.mark.asyncio

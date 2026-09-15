@@ -2634,7 +2634,10 @@ def _tmp_residue(base: pathlib.Path, *, per_test: bool) -> list[str]:
     In per-test mode the immediate children are the per-test bases the fixture itself
     created, so the scan descends one level and reports ``<test id>/<name>``. Without
     that, every test in the run would be reported as its own leak and the mode would
-    answer nothing.
+    answer nothing. The allow-list is applied to the LEAF in that mode: the by-design
+    entries it names (the screenshot spool, a nested basetemp) land inside the per-test
+    base, so matching only the base's name would report every one of them as a leak
+    of the test that happened to reach the feature.
     """
     try:
         children = sorted(base.iterdir())
@@ -2648,7 +2651,11 @@ def _tmp_residue(base: pathlib.Path, *, per_test: bool) -> list[str]:
             residue.append(child.name)
             continue
         try:
-            residue.extend(f"{child.name}/{leaf.name}" for leaf in sorted(child.iterdir()))
+            residue.extend(
+                f"{child.name}/{leaf.name}"
+                for leaf in sorted(child.iterdir())
+                if not leaf.name.startswith(_TMP_RESIDUE_ALLOWED_PREFIXES)
+            )
         except OSError:
             continue
     return residue

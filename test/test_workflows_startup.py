@@ -92,7 +92,11 @@ async def test_dashboard_binds_before_restart_write_and_owns_initialization(
     tmp_path, monkeypatch, cancel
 ):
     from aiohttp.test_utils import make_mocked_request
-    from test_dashboard_server_startup_coverage import _cancel_stray_tasks, _start_dashboard
+    from test_dashboard_server_startup_coverage import (
+        _cancel_stray_tasks,
+        _release_process_handles,
+        _start_dashboard,
+    )
 
     from kiro_crew.dashboard import server
     from kiro_crew.dashboard.handlers.workflows import api_workflow_runs
@@ -129,6 +133,7 @@ async def test_dashboard_binds_before_restart_write_and_owns_initialization(
     monkeypatch.setattr(driver, "attach_workflow_service", attach)
     startup = asyncio.create_task(_start_dashboard(tmp_path, monkeypatch, task_runner=driver))
     runner = None
+    state = None
     shutdown = None
     try:
         await asyncio.wait_for(entered.wait(), 5)
@@ -183,12 +188,14 @@ async def test_dashboard_binds_before_restart_write_and_owns_initialization(
         release.set()
         outcomes = await asyncio.wait_for(asyncio.gather(startup, return_exceptions=True), 15)
         if runner is None and isinstance(outcomes[0], tuple):
-            runner = outcomes[0][0]
+            runner, state = outcomes[0][0], outcomes[0][1]
         if shutdown is not None:
             await asyncio.wait_for(asyncio.gather(shutdown, return_exceptions=True), 5)
         if runner is not None:
             await runner.cleanup()
         await _cancel_stray_tasks()
+        if state is not None:
+            _release_process_handles(state)
 
 
 @pytest.mark.asyncio

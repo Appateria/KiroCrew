@@ -2149,6 +2149,22 @@ def _write_runnable(path: Any) -> None:
     path.chmod(0o755)
 
 
+def _create_real_venv(root: Any) -> None:
+    """Build a REAL ``.venv`` under ``root`` the way ``python -m venv`` does.
+
+    The CLI symlinks the interpreter on POSIX and copies it only on Windows;
+    the ``venv.create`` API defaults to copying everywhere. A copied binary
+    breaks on a relocatable base interpreter (python-build-standalone, which
+    ``uv`` installs): its ``@rpath/libpython`` is resolved relative to the
+    binary's own location, so the copy aborts at load and
+    ``_venv_is_usable``'s probe reads it as "not a venv". Mirror the CLI so
+    the fixture is the venv production expects on every host.
+    """
+    import venv as _venv
+
+    _venv.create(root / ".venv", with_pip=False, symlinks=not bmod.platform_compat.IS_WINDOWS)
+
+
 @pytest.fixture()
 def probe_sandbox_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run the interpreter usability probe without OS confinement.
@@ -2184,9 +2200,7 @@ class TestInterpreterResolution:
     def _real_venv(self, root: Any) -> Any:
         """Build a REAL .venv under root (the resolver now probes the
         interpreter, so a stub file fails _venv_is_usable)."""
-        import venv as _venv
-
-        _venv.create(root / ".venv", with_pip=False)
+        _create_real_venv(root)
         return self._venv_python(root)
 
     def test_a_real_venv_is_preferred(self, tmp_path: Any, probe_sandbox_passthrough: Any) -> None:
@@ -2228,11 +2242,9 @@ class TestInterpreterResolution:
         """The probe executable is app-controlled, so it must receive the
         same sanitized environment every app subprocess gets - never the
         gateway's own, which can carry credentials."""
-        import venv as _venv
-
         from kiro_crew.apps import interpreter as imod
 
-        _venv.create(tmp_path / ".venv", with_pip=False)
+        _create_real_venv(tmp_path)
         monkeypatch.setenv("GATEWAY_SECRET_CANARY", "leak-me")
         seen: dict[str, Any] = {}
         real_run = imod.sandbox.run_limited
@@ -2253,11 +2265,9 @@ class TestInterpreterResolution:
         OS sandbox; a host where wrap_argv fail-closes (no backend) gets no
         positive evidence and falls back to sys.executable - the exception
         must never propagate into spawn or registration."""
-        import venv as _venv
-
         from kiro_crew.apps import interpreter as imod
 
-        _venv.create(tmp_path / ".venv", with_pip=False)
+        _create_real_venv(tmp_path)
 
         def _raise(*_a: Any, **_k: Any) -> Any:
             raise RuntimeError("no sandbox backend")
@@ -2542,11 +2552,9 @@ class TestAsgiDispatch:
         # and checks sys.prefix + ABI), so a stub file fails the probe. A
         # bootstrap skeleton or wrong-ABI copy is rejected by that probe;
         # provisioned deps (absent here) would pin sys.executable instead.
-        import venv as _venv
-
         from kiro_crew.apps.interpreter import venv_python_path
 
-        _venv.create(spawn_root / ".venv", with_pip=False)
+        _create_real_venv(spawn_root)
         venv_py = venv_python_path(spawn_root)
         (spawn_root / "app.py").write_text(self._ASGI_SRC)
         seen = _capture_popen(monkeypatch)

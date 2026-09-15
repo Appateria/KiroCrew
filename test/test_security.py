@@ -2029,6 +2029,23 @@ class TestBuiltinDenyPatterns:
     explicit secret-fetching tool names and destructive ops remain.
     """
 
+    @pytest.fixture(autouse=True)
+    def _own_host_seed_stays_local(self, monkeypatch) -> None:
+        """The ``ssh`` cases here are the first own-host lookup in the process.
+
+        ``is_denied("ssh ...")`` seeds the ssh-to-self floor's own-host set on
+        first use and, once the backoff allows, starts a DNS enrichment thread.
+        The seed learns this machine's outbound address with a UDP ``connect``
+        to a documentation peer -- packet-less, but a real off-loopback connect
+        the routing table has to answer -- and the worker resolves real names.
+        These tests are about the deny patterns, not about this host's identity,
+        so the seed is pinned to the hostname alone and the worker never starts.
+        """
+        from kiro_crew.security import argv_floor
+
+        monkeypatch.setattr(argv_floor, "_own_interface_addresses", set)
+        monkeypatch.setattr(argv_floor, "_OWN_HOST_RESOLVE_NEXT_TRY", float("inf"))
+
     def test_allows_command_with_credential_in_path(self) -> None:
         """Commands in dirs like CredentialValidatorServiceCDK must not be blocked."""
         from kiro_crew.security import is_denied
@@ -7072,37 +7089,29 @@ class TestPublishFloorNestedPayloads:
         one is enough because it runs to the END of the token list and therefore
         already spans every later verb's own suffix.
 
-        Measured across an 8x SIZE GAP, not 2x. At 2x the expected readings are 2x
-        for linear and 4x for quadratic, which a loaded runner does not separate --
-        this assertion failed CI at 3.54x on an implementation that is linear, and
-        no threshold between 2 and 4 is both sound and stable. At 8x the readings
-        are 8x against 64x, so a 20x bound tolerates 2x of scheduling noise and
-        still fails an implementation that has actually regressed. The exact,
-        timing-free half of this property is pinned by
+        Growth is measured as the total characters of payload the walk produces,
+        not as wall-clock time. A join's cost is the length of the string it
+        builds, so the character total IS the join work, and it is a pure
+        function of the input: an 8x size gap reads as exactly 8x for a linear
+        walk and 64x for one that joins once per verb, with nothing to tune. The
+        wall-clock form of this assertion was widened once and still flipped on a
+        loaded host, because the small sample is a few milliseconds and one
+        preemption during the large one breaches any ratio a regression would
+        also breach. Interpreter call counts do not work either: ``str.join`` is
+        one C call whatever its length, so an unbounded join reads as linear
+        there. The exact, size-free half of the property is pinned by
         ``test_only_one_joined_payload_is_produced_per_walk`` (one join per call)
         and ``test_a_join_produced_frame_does_not_join_again`` (no join chain).
         """
-        import time
-
         from kiro_crew.security import _nested_shell_payloads
 
-        def elapsed(n: int) -> float:
+        def payload_chars(n: int) -> int:
             tokens = ["eval", "a", "b"] * n
-            start = time.perf_counter()
-            _nested_shell_payloads(list(tokens))
-            return time.perf_counter() - start
+            return sum(len(payload) for payload in _nested_shell_payloads(list(tokens)))
 
-        def best(n: int, samples: int = 3) -> float:
-            return min(elapsed(n) for _ in range(samples))
-
-        elapsed(500)
-        small, large = best(2000), best(16000)
-        assert large < small * 20, f"{small:.4f}s -> {large:.4f}s looks super-linear"
-        # No absolute wall-clock cap: under the backend jobs' coverage tracing the
-        # same linear implementation costs whatever its LINE-EVENT count is, not
-        # its algorithmic cost, so an absolute bound reds on tracing overhead a
-        # same-runner uninstrumented A/B measures at parity (branch/main 0.94).
-        # The same-run ratio above is the regression guard.
+        small, large = payload_chars(2000), payload_chars(16000)
+        # 16 sits between the linear reading (8x) and the quadratic one (64x).
+        assert large < small * 16, f"{small} -> {large} payload chars looks super-linear"
 
     def test_only_one_joined_payload_is_produced_per_walk(self) -> None:
         """The bound above is what keeps it linear, so pin the bound itself."""

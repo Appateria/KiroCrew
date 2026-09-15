@@ -102,18 +102,21 @@ def test_key(tmp_path_factory: pytest.TempPathFactory, _openssl_bin: str) -> Sig
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        cwd=root,
     )
     subprocess.run(
         [_openssl_bin, "pkey", "-in", str(private), "-pubout", "-out", str(public)],
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        cwd=root,
     )
     der = subprocess.run(
         [_openssl_bin, "pkey", "-pubin", "-in", str(public), "-outform", "DER"],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        cwd=root,
     ).stdout
     return SigningKey(
         private=private,
@@ -125,9 +128,16 @@ def test_key(tmp_path_factory: pytest.TempPathFactory, _openssl_bin: str) -> Sig
 
 def _run_helper(
     *args: str,
+    cwd: Path,
     check: bool = True,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    """Run the signing helper from *cwd*.
+
+    A child inherits pytest's CWD (the checkout) unless told otherwise, so every
+    spawn here runs from the test's own temp dir: the helper -- and the
+    ``openssl`` it shells out to -- can then only ever write there.
+    """
     return subprocess.run(
         [sys.executable, str(HELPER), *args],
         check=check,
@@ -135,6 +145,7 @@ def _run_helper(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
+        cwd=cwd,
     )
 
 
@@ -178,6 +189,7 @@ def _build_manifest(
         str(key.public),
         "--output",
         str(payload),
+        cwd=root,
     )
     subprocess.run(
         [
@@ -193,6 +205,7 @@ def _build_manifest(
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        cwd=root,
     )
     _run_helper(
         "assemble",
@@ -204,6 +217,7 @@ def _build_manifest(
         str(key.public),
         "--output",
         str(manifest),
+        cwd=root,
     )
     return manifest
 
@@ -240,6 +254,7 @@ def test_helper_builds_a_canonical_independently_verifiable_manifest(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        cwd=tmp_path,
     )
     assert verified.returncode == 0, verified.stderr
 
@@ -266,6 +281,7 @@ def test_optional_min_version_is_signed_and_round_trips(
         CHANNEL,
         "--artifact-base",
         CDN_BASE,
+        cwd=tmp_path,
     )
     assert verified.returncode == 0, verified.stderr
 
@@ -284,6 +300,7 @@ def test_optional_min_version_is_signed_and_round_trips(
         "--artifact-base",
         CDN_BASE,
         check=False,
+        cwd=tmp_path,
     )
     assert tampered.returncode != 0
 
@@ -342,18 +359,20 @@ def test_helper_refuses_to_assemble_a_tampered_payload(
         "--output",
         str(tmp_path / "refused.json"),
         check=False,
+        cwd=tmp_path,
     )
     assert refused.returncode == 1
     assert "rejected" in refused.stderr
     assert not (tmp_path / "refused.json").exists()
 
 
-def test_repository_public_key_is_explicitly_unconfigured_or_valid() -> None:
+def test_repository_public_key_is_explicitly_unconfigured_or_valid(tmp_path: Path) -> None:
     result = _run_helper(
         "key-info",
         "--public-key",
         str(PINNED_PUBLIC_KEY),
         check=False,
+        cwd=tmp_path,
     )
     if b"UNCONFIGURED" in PINNED_PUBLIC_KEY.read_bytes():
         assert result.returncode == 1
@@ -494,7 +513,7 @@ def _run_installer(
             "FAKE_INSTALL_MARKER": str(install_marker),
         }
     )
-    result = run_bounded(["sh", str(script), "--cdn", CDN_BASE, *args], env)
+    result = run_bounded(["sh", str(script), "--cdn", CDN_BASE, *args], env, cwd=str(root))
     return result, curl_marker, install_marker
 
 
@@ -546,7 +565,7 @@ wait
     )
 
     with pytest.raises(subprocess.TimeoutExpired):
-        run_bounded(["sh", str(script), str(pidfile)], os.environ.copy(), 5.0)
+        run_bounded(["sh", str(script), str(pidfile)], os.environ.copy(), 5.0, cwd=str(tmp_path))
     pid = int(pidfile.read_text(encoding="utf-8").strip())
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
@@ -757,6 +776,7 @@ def test_kms_signer_requires_matching_non_exportable_key_and_verifies_output(
         str(test_key.public),
         "--output",
         str(payload),
+        cwd=tmp_path,
     )
     subprocess.run(
         [
@@ -772,12 +792,14 @@ def test_kms_signer_requires_matching_non_exportable_key_and_verifies_output(
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        cwd=tmp_path,
     )
     public_der = subprocess.run(
         ["openssl", "pkey", "-pubin", "-in", str(test_key.public), "-outform", "DER"],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        cwd=tmp_path,
     ).stdout
 
     # Import-by-path writes bytecode beside the source unless suppressed; the
@@ -869,6 +891,7 @@ def _verify_manifest(
         "--artifact-base",
         artifact_base,
         check=False,
+        cwd=manifest.parent,
     )
 
 

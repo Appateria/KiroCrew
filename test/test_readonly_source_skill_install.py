@@ -67,6 +67,27 @@ def _chmod_dirs(root: Path, mode: int) -> None:
         os.chmod(directory, mode)
 
 
+def _restore_owner_rwx(root: Path) -> None:
+    """OR owner rwx back onto *root* and every directory below it, top-down.
+
+    Teardown counterpart of ``_chmod_dirs``. A directory left under ``tmp_path``
+    without owner write or search cannot be emptied by pytest's cleanup: the
+    unlink of its children fails, the whole ``tmp_path`` survives its own
+    teardown, and a later session's basetemp prune renames it into a
+    ``garbage-*`` tree in the shared per-user basetemp -- where every other run
+    on the host then trips over it. Each parent is repaired BEFORE the walk
+    descends into it, so a 0o455 or 0o555 parent cannot lock the walk out of the
+    children it still has to repair.
+    """
+    if not root.is_dir():
+        return
+    os.chmod(root, stat.S_IMODE(os.lstat(root).st_mode) | stat.S_IRWXU)
+    for dirpath, dirnames, _filenames in os.walk(root):
+        for name in dirnames:
+            entry = os.path.join(dirpath, name)
+            os.chmod(entry, stat.S_IMODE(os.lstat(entry).st_mode) | stat.S_IRWXU)
+
+
 @pytest.fixture()
 def readonly_source(tmp_path: Path, request: pytest.FixtureRequest) -> Path:
     """A packaged source root whose directories are 0o555, restored on teardown.
@@ -76,7 +97,7 @@ def readonly_source(tmp_path: Path, request: pytest.FixtureRequest) -> Path:
     """
     root = tmp_path / "packaged-src"
     root.mkdir()
-    request.addfinalizer(lambda: _chmod_dirs(root, 0o755))
+    request.addfinalizer(lambda: _restore_owner_rwx(root))
     return root
 
 
@@ -121,6 +142,10 @@ class TestDeployRegisterCoreSkills:
 
         home = tmp_path / "home"
         home.mkdir()
+        # copytree preserves the 0o555 source modes on the copy; only the
+        # production repair under test makes it writable again. Restore it
+        # regardless of the outcome so a regression cannot also leak tmp_path.
+        request.addfinalizer(lambda: _restore_owner_rwx(home))
         monkeypatch.setattr(deploy_pkg, "config_dir", lambda: home)
         monkeypatch.setattr(deploy_pkg, "_SKILLS_DIR", source_root)
 
@@ -134,9 +159,15 @@ class TestDeployRegisterCoreSkills:
 @_POSIX_MODES
 class TestBuiltinSyncFromReadonlySource:
     @pytest.fixture()
-    def base(self, tmp_path: Path) -> Path:
+    def base(self, tmp_path: Path, request: pytest.FixtureRequest) -> Path:
+        """The install destination, with owner rwx restored on every directory
+        at teardown: several tests below chmod a directory of the installed copy
+        to a non-writable mode (0o555, or 0o455 via the copytree wrapper) to
+        model a user customization, and a directory left that way under
+        ``tmp_path`` is one pytest's cleanup cannot remove."""
         dest = tmp_path / "installed-skills"
         dest.mkdir()
+        request.addfinalizer(lambda: _restore_owner_rwx(dest))
         return dest
 
     @pytest.fixture()
@@ -330,4 +361,4 @@ def test_source_fingerprint_predicts_the_normalized_copy(tmp_path: Path) -> None
         assert _skill_tree_fingerprint(a, assume_owner_rwx_dirs=True) == _skill_tree_fingerprint(b)
         assert _skill_tree_fingerprint(a) != _skill_tree_fingerprint(b)
     finally:
-        _chmod_dirs(a, 0o755)
+        _restore_owner_rwx(a)

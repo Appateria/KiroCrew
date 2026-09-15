@@ -1246,12 +1246,24 @@ def test_real_kiro_cli_delivers_the_token_and_still_overrides_the_spec() -> None
         # parent-side timeout would return from run() leaving all of them alive
         # holding the temp dir. The driver tears its own tree down on every exit
         # it controls; this covers the exit it does not.
+        # kiro-cli writes its own log directory and telemetry spool under TMPDIR;
+        # aimed at this tree, that residue is deleted with the test's directory
+        # instead of outliving it in the shared temp root.
+        child_tmp = root / "tmp"
+        child_tmp.mkdir()
+        child_env = {
+            **os.environ,
+            "TMPDIR": str(child_tmp),
+            "TMP": str(child_tmp),
+            "TEMP": str(child_tmp),
+        }
         proc = subprocess.Popen(
             [sys.executable, str(driver), str(root), str(probe), TOKEN_A],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             encoding="utf-8",
             errors="replace",
+            env=child_env,
         )
         try:
             stdout, stderr = proc.communicate(timeout=180)

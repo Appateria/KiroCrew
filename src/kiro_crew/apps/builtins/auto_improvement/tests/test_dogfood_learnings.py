@@ -5083,11 +5083,20 @@ class TestRunStartupSharesTheCloneLock:
         )
 
         sup = runner_mod.RunSupervisor()
+        # The worker's exception is the test's signal, not noise: `build_profile` is stubbed
+        # to raise once startup gets past the checkout, so a captured `ValueError("stop")`
+        # proves the worker took the lock and ran to the stub after we released it. Left
+        # uncaught it would only surface as an unhandled-thread warning that never fails.
+        outcome: list[BaseException] = []
+
+        def _startup() -> None:
+            try:
+                sup._build_driver({"clone": "/tmp/x", "branch": "main"})
+            except BaseException as exc:  # asserted on below
+                outcome.append(exc)
+
         with commit_mod.clone_lock():
-            worker = threading.Thread(
-                target=lambda: sup._build_driver({"clone": "/tmp/x", "branch": "main"}),
-                daemon=True,
-            )
+            worker = threading.Thread(target=_startup, daemon=True)
             worker.start()
             # While WE hold the lock the worker must not reach the checkout. A generous
             # window: the failure mode is that it proceeds immediately.
@@ -5096,7 +5105,11 @@ class TestRunStartupSharesTheCloneLock:
                 "operator mutation held the clone lock"
             )
         worker.join(timeout=5.0)
+        assert not worker.is_alive(), "startup never finished after the lock was released"
         assert checked_out.is_set(), "startup never took the lock it was waiting for"
+        assert [type(e) for e in outcome] == [ValueError] and str(
+            outcome[0]
+        ) == "stop", f"startup stopped somewhere other than the profile-build stub: {outcome!r}"
 
     def test_the_lock_is_reentrant_so_nesting_cannot_deadlock(self) -> None:
         """`_build_driver` is also reached from `calibrate()`, which may already hold the

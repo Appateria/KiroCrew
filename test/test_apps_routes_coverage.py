@@ -3867,11 +3867,24 @@ class _FakeSession:
         return None
 
 
-async def _swap_proxy_session(app: web.Application, exc: BaseException) -> None:
-    real = app.get("_proxy_session")
-    if real is not None and not real.closed:
-        await real.close()
-    app["_proxy_session"] = _FakeSession(exc)
+def _fail_proxy_backend_with(app: web.Application, exc: BaseException) -> None:
+    """Make the proxy's outbound session raise ``exc``, installed BEFORE start.
+
+    ``register_app_routes`` creates the real ``ClientSession`` in an
+    ``on_startup`` hook; hooks run in registration order, so this one runs
+    right after it, closes the real session (its connector would otherwise
+    outlive the test) and installs the fake while the app is still mutable.
+    An ``app[...]`` write after the test server has started is deprecated by
+    aiohttp.
+    """
+
+    async def _swap(app_: web.Application) -> None:
+        real = app_.get("_proxy_session")
+        if real is not None and not real.closed:
+            await real.close()
+        app_["_proxy_session"] = _FakeSession(exc)
+
+    app.on_startup.append(_swap)
 
 
 class TestApiProxyAuthorization:
@@ -3959,8 +3972,8 @@ class TestApiProxyAuthorization:
             routes_mod, "_resolve_app_backend_url", lambda n: "http://127.0.0.1:1"
         )
         app = _make_app()
+        _fail_proxy_backend_with(app, aiohttp.ClientError("refused"))
         async with TestClient(TestServer(app)) as client:
-            await _swap_proxy_session(client.app, aiohttp.ClientError("refused"))
             resp = await client.get(f"/apps/{APP}/api/ping")
             assert resp.status == 502
             assert (await resp.json())["error"] == "backend unreachable"
@@ -3978,8 +3991,8 @@ class TestApiProxyAuthorization:
             routes_mod, "_resolve_app_backend_url", lambda n: "http://127.0.0.1:1"
         )
         app = _make_app()
+        _fail_proxy_backend_with(app, asyncio.TimeoutError())
         async with TestClient(TestServer(app)) as client:
-            await _swap_proxy_session(client.app, asyncio.TimeoutError())
             resp = await client.post(f"/apps/{APP}/api/run", json={"x": 1})
             assert resp.status == 504
             assert (await resp.json())["error"] == "backend timeout"

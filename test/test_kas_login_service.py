@@ -25,8 +25,6 @@ from kiro_crew.auth.service import (
 )
 from kiro_crew.auth.store import KasToken, SocialProvider, TokenStore
 
-pytestmark = pytest.mark.asyncio
-
 
 class _FakeResp:
     def __init__(self, status: int, payload):
@@ -130,6 +128,7 @@ def test_parse_provider_accepts_wire_and_lower_names():
         _parse_provider("facebook")
 
 
+@pytest.mark.asyncio
 async def test_status_unauthenticated(tmp_path, monkeypatch):
     monkeypatch.setenv("KIRO_AUTH_TRANSPORT", "device")
     service, _ = _service(tmp_path)
@@ -147,6 +146,7 @@ async def test_status_unauthenticated(tmp_path, monkeypatch):
     }
 
 
+@pytest.mark.asyncio
 async def test_status_reports_stored_token(tmp_path, monkeypatch):
     monkeypatch.setenv("KIRO_AUTH_TRANSPORT", "loopback")
     store = TokenStore(tmp_path)
@@ -180,6 +180,7 @@ async def test_status_reports_stored_token(tmp_path, monkeypatch):
     assert "at" not in status.values()
 
 
+@pytest.mark.asyncio
 async def test_status_reports_expired_without_refresh_as_unusable(tmp_path, monkeypatch):
     monkeypatch.setenv("KIRO_AUTH_TRANSPORT", "device")
     store = TokenStore(tmp_path)
@@ -202,6 +203,7 @@ async def test_status_reports_expired_without_refresh_as_unusable(tmp_path, monk
     assert status["usable"] is False
 
 
+@pytest.mark.asyncio
 async def test_status_reports_issuer_rejection_without_flipping_usable(tmp_path, monkeypatch):
     monkeypatch.setenv("KIRO_AUTH_TRANSPORT", "device")
     store = TokenStore(tmp_path)
@@ -227,6 +229,7 @@ async def test_status_reports_issuer_rejection_without_flipping_usable(tmp_path,
     assert status["usable"] is True
 
 
+@pytest.mark.asyncio
 async def test_begin_device_returns_public_fields_only(tmp_path, monkeypatch):
     service, _ = _service(tmp_path)
     result = await _begin(service, monkeypatch, _device_auth())
@@ -236,12 +239,14 @@ async def test_begin_device_returns_public_fields_only(tmp_path, monkeypatch):
     assert "dc-1" not in str(result)
 
 
+@pytest.mark.asyncio
 async def test_poll_unknown_login_id_raises(tmp_path):
     service, _ = _service(tmp_path)
     with pytest.raises(UnknownLoginError):
         await service.poll_device("nope")
 
 
+@pytest.mark.asyncio
 async def test_poll_pending(tmp_path, monkeypatch):
     service, session = _service(tmp_path, [_FakeResp(200, {"status": "authorization_pending"})])
     login_id = (await _begin(service, monkeypatch, _device_auth()))["login_id"]
@@ -251,12 +256,14 @@ async def test_poll_pending(tmp_path, monkeypatch):
     assert body == {"deviceCode": "dc-1", "clientId": "Kiro-CLI"}
 
 
+@pytest.mark.asyncio
 async def test_poll_transient_http_error_stays_pending(tmp_path, monkeypatch):
     service, _ = _service(tmp_path, [_FakeResp(500, "boom")])
     login_id = (await _begin(service, monkeypatch, _device_auth()))["login_id"]
     assert await service.poll_device(login_id) == {"status": "pending"}
 
 
+@pytest.mark.asyncio
 async def test_poll_local_expiry_forgets_login(tmp_path, monkeypatch):
     service, session = _service(tmp_path)
     login_id = (await _begin(service, monkeypatch, _device_auth(expires_in_secs=-1)))["login_id"]
@@ -266,6 +273,7 @@ async def test_poll_local_expiry_forgets_login(tmp_path, monkeypatch):
         await service.poll_device(login_id)
 
 
+@pytest.mark.asyncio
 async def test_poll_authorized_saves_token_and_forgets(tmp_path, monkeypatch):
     authorized = _FakeResp(
         200,
@@ -317,6 +325,7 @@ def _stored_idc(tmp_path) -> TokenStore:
     return store
 
 
+@pytest.mark.asyncio
 async def test_switching_account_removes_the_replaced_slot_after_the_new_one_lands(
     tmp_path, monkeypatch
 ):
@@ -344,6 +353,7 @@ async def test_switching_account_removes_the_replaced_slot_after_the_new_one_lan
     assert store.resolve().access_token == "at-new"
 
 
+@pytest.mark.asyncio
 async def test_switching_account_also_clears_slots_the_user_did_not_name(tmp_path, monkeypatch):
     """A forgotten higher-priority slot would otherwise keep winning `resolve()`
     after a switch the card reported as successful. A switch means "this is the
@@ -376,6 +386,7 @@ async def test_switching_account_also_clears_slots_the_user_did_not_name(tmp_pat
     assert store.resolve().identity == "social"
 
 
+@pytest.mark.asyncio
 async def test_switching_account_deletes_a_slot_even_when_its_read_fails(tmp_path, monkeypatch):
     """`load` decides what is REPORTED as replaced, never whether to delete: a
     slot whose read fails transiently is exactly the one that would otherwise
@@ -401,6 +412,7 @@ async def test_switching_account_deletes_a_slot_even_when_its_read_fails(tmp_pat
     assert store.resolve().identity == "social"
 
 
+@pytest.mark.asyncio
 async def test_replacing_the_same_slot_is_a_plain_overwrite(tmp_path, monkeypatch):
     store = TokenStore(tmp_path)
     store.save(
@@ -425,6 +437,7 @@ async def test_replacing_the_same_slot_is_a_plain_overwrite(tmp_path, monkeypatc
     assert store.resolve().access_token == "at-new"
 
 
+@pytest.mark.asyncio
 async def test_failed_switch_keeps_the_previous_account(tmp_path, monkeypatch):
     store = _stored_idc(tmp_path)
     service = KasLoginService(
@@ -441,6 +454,7 @@ async def test_failed_switch_keeps_the_previous_account(tmp_path, monkeypatch):
     assert store.resolve().identity == "identity_center"
 
 
+@pytest.mark.asyncio
 async def test_begin_refuses_an_unknown_replaces_slot(tmp_path, monkeypatch):
     service, _ = _service(tmp_path)
     with pytest.raises(UnknownIdentityError):
@@ -449,6 +463,7 @@ async def test_begin_refuses_an_unknown_replaces_slot(tmp_path, monkeypatch):
         await service.begin_loopback("google", replaces="nope")
 
 
+@pytest.mark.asyncio
 async def test_cancel_during_an_authorized_device_poll_never_persists(tmp_path, monkeypatch):
     """A cancel that lands while the approving network call is in flight wins.
 
@@ -483,6 +498,7 @@ async def test_cancel_during_an_authorized_device_poll_never_persists(tmp_path, 
     assert TokenStore(tmp_path).resolve() is None
 
 
+@pytest.mark.asyncio
 async def test_poll_malformed_json_stays_pending(tmp_path, monkeypatch):
     # A 200 with an undecodable body must not crash the poll; treat as pending
     # (the flow's own expiry bounds the caller's retries).
@@ -495,12 +511,14 @@ async def test_poll_malformed_json_stays_pending(tmp_path, monkeypatch):
     assert await service.poll_device(login_id) == {"status": "pending"}
 
 
+@pytest.mark.asyncio
 async def test_poll_non_object_json_stays_pending(tmp_path, monkeypatch):
     service, _ = _service(tmp_path, [_FakeResp(200, ["not", "a", "dict"])])
     login_id = (await _begin(service, monkeypatch, _device_auth()))["login_id"]
     assert await service.poll_device(login_id) == {"status": "pending"}
 
 
+@pytest.mark.asyncio
 async def test_poll_authorized_store_write_failure_is_error(tmp_path, monkeypatch):
     authorized = _FakeResp(
         200,
@@ -530,12 +548,14 @@ async def test_poll_authorized_store_write_failure_is_error(tmp_path, monkeypatc
         await service.poll_device(login_id)
 
 
+@pytest.mark.asyncio
 async def test_poll_invalid_token_is_error(tmp_path, monkeypatch):
     service, _ = _service(tmp_path, [_FakeResp(200, {"status": "invalid_token"})])
     login_id = (await _begin(service, monkeypatch, _device_auth()))["login_id"]
     assert await service.poll_device(login_id) == {"status": "error"}
 
 
+@pytest.mark.asyncio
 async def test_poll_authorized_without_profile_arn_is_error(tmp_path, monkeypatch):
     authorized = _FakeResp(
         200,
@@ -547,6 +567,7 @@ async def test_poll_authorized_without_profile_arn_is_error(tmp_path, monkeypatc
     assert TokenStore(tmp_path).load("social") is None
 
 
+@pytest.mark.asyncio
 async def test_logout_deletes_identity(tmp_path):
     store = TokenStore(tmp_path)
     store.save(
@@ -563,12 +584,14 @@ async def test_logout_deletes_identity(tmp_path):
     assert store.load("social") is None
 
 
+@pytest.mark.asyncio
 async def test_logout_unknown_identity_raises(tmp_path):
     service, _ = _service(tmp_path)
     with pytest.raises(ValueError):
         await service.logout("../../etc/passwd")
 
 
+@pytest.mark.asyncio
 async def test_logout_leaves_no_identity_behind(tmp_path):
     """The card shows the slot `resolve()` picks; signing out of it must not let
     the next slot down the priority order take over the agents unseen."""
@@ -594,6 +617,7 @@ async def test_logout_leaves_no_identity_behind(tmp_path):
     await service.logout("social")
 
 
+@pytest.mark.asyncio
 async def test_logout_drops_pending_logins_so_a_late_poll_cannot_resurrect_a_credential(
     tmp_path, monkeypatch
 ):
@@ -616,6 +640,7 @@ async def test_logout_drops_pending_logins_so_a_late_poll_cannot_resurrect_a_cre
     assert store.resolve() is None
 
 
+@pytest.mark.asyncio
 async def test_logout_invalidates_a_begin_that_was_already_talking_to_the_issuer(
     tmp_path, monkeypatch
 ):
@@ -647,6 +672,7 @@ async def test_logout_invalidates_a_begin_that_was_already_talking_to_the_issuer
     assert store.resolve().identity == "social"
 
 
+@pytest.mark.asyncio
 async def test_close_closes_owned_session(tmp_path):
     service, session = _service(tmp_path)
     await service.close()
@@ -701,6 +727,7 @@ async def _begin_oidc(service, monkeypatch, provider: str, **kwargs) -> dict:
     return result
 
 
+@pytest.mark.asyncio
 async def test_begin_builder_id_uses_default_start_url(tmp_path, monkeypatch):
     service, _ = _service(tmp_path)
     result = await _begin_oidc(service, monkeypatch, "builder_id")
@@ -709,6 +736,7 @@ async def test_begin_builder_id_uses_default_start_url(tmp_path, monkeypatch):
     assert result["_seen"]["region"] == "us-east-1"
 
 
+@pytest.mark.asyncio
 async def test_begin_idc_requires_start_url(tmp_path):
     service, _ = _service(tmp_path)
     with pytest.raises(MissingStartUrlError):
@@ -717,6 +745,7 @@ async def test_begin_idc_requires_start_url(tmp_path):
         await service.begin_device("idc", start_url="   ")
 
 
+@pytest.mark.asyncio
 async def test_begin_idc_uses_company_start_url_and_region(tmp_path, monkeypatch):
     service, _ = _service(tmp_path)
     result = await _begin_oidc(
@@ -728,6 +757,7 @@ async def test_begin_idc_uses_company_start_url_and_region(tmp_path, monkeypatch
     }
 
 
+@pytest.mark.asyncio
 async def test_poll_builder_id_pending_then_authorized(tmp_path, monkeypatch):
     service, session = _service(
         tmp_path,
@@ -748,6 +778,7 @@ async def test_poll_builder_id_pending_then_authorized(tmp_path, monkeypatch):
     assert saved.client_id == "cid-1"
 
 
+@pytest.mark.asyncio
 async def test_poll_idc_resolves_profile_arn(tmp_path, monkeypatch):
     service, session = _service(
         tmp_path,
@@ -774,6 +805,7 @@ async def test_poll_idc_resolves_profile_arn(tmp_path, monkeypatch):
     assert cp_body == {"maxResults": 10}
 
 
+@pytest.mark.asyncio
 async def test_poll_idc_with_no_profiles_is_error_and_saves_nothing(tmp_path, monkeypatch):
     service, _ = _service(
         tmp_path,
@@ -792,6 +824,7 @@ async def test_poll_idc_with_no_profiles_is_error_and_saves_nothing(tmp_path, mo
         await service.poll_device(begin["login_id"])
 
 
+@pytest.mark.asyncio
 async def test_poll_idc_control_plane_failure_is_error(tmp_path, monkeypatch):
     service, _ = _service(
         tmp_path,
@@ -807,6 +840,7 @@ async def test_poll_idc_control_plane_failure_is_error(tmp_path, monkeypatch):
     assert TokenStore(tmp_path).resolve() is None
 
 
+@pytest.mark.asyncio
 async def test_poll_oidc_expired_token_reports_expired(tmp_path, monkeypatch):
     service, _ = _service(tmp_path, responses=[_FakeResp(400, {"error": "expired_token"})])
     begin = await _begin_oidc(service, monkeypatch, "builder_id")
@@ -815,6 +849,7 @@ async def test_poll_oidc_expired_token_reports_expired(tmp_path, monkeypatch):
         await service.poll_device(begin["login_id"])
 
 
+@pytest.mark.asyncio
 async def test_poll_oidc_multi_profile_picks_first(tmp_path, monkeypatch):
     service, _ = _service(
         tmp_path,
@@ -842,6 +877,7 @@ async def test_poll_oidc_multi_profile_picks_first(tmp_path, monkeypatch):
     assert saved is not None and saved.profile_arn == "arn:one"
 
 
+@pytest.mark.asyncio
 async def test_begin_oidc_rejects_url_metacharacter_regions(tmp_path):
     """A crafted region must never reach hostname interpolation.
 
@@ -868,6 +904,7 @@ async def test_begin_oidc_rejects_url_metacharacter_regions(tmp_path):
             await service.begin_device("idc", start_url="https://a.awsapps.com/start", region=bad)
 
 
+@pytest.mark.asyncio
 async def test_begin_oidc_accepts_real_region_grammar(tmp_path, monkeypatch):
     service, _ = _service(tmp_path)
     for good in ("us-east-1", "eu-west-1", "us-gov-west-1", "ap-southeast-3"):
@@ -877,6 +914,7 @@ async def test_begin_oidc_accepts_real_region_grammar(tmp_path, monkeypatch):
         assert result["_seen"]["region"] == good
 
 
+@pytest.mark.asyncio
 async def test_control_plane_tolerates_amz_json_content_type(tmp_path, monkeypatch):
     """The control plane replies application/x-amz-json-1.0, not application/json.
 
@@ -907,6 +945,7 @@ async def test_control_plane_tolerates_amz_json_content_type(tmp_path, monkeypat
     assert saved is not None and saved.profile_arn == "arn:ct"
 
 
+@pytest.mark.asyncio
 async def test_poll_oidc_undecodable_body_is_pending_not_500(tmp_path, monkeypatch):
     """A malformed token-endpoint body (proxy/LB outage page) must read as pending.
 
@@ -933,6 +972,7 @@ async def test_poll_oidc_undecodable_body_is_pending_not_500(tmp_path, monkeypat
     }
 
 
+@pytest.mark.asyncio
 async def test_oidc_malformed_200_bodies_raise_flow_error_not_crash():
     """A 200 with an unexpected JSON shape must raise BuilderIdAuthError.
 
@@ -973,6 +1013,7 @@ async def test_oidc_malformed_200_bodies_raise_flow_error_not_crash():
                 )
 
 
+@pytest.mark.asyncio
 async def test_oidc_poll_non_object_200_is_terminal_error(tmp_path, monkeypatch):
     """A decodable-but-non-object CreateToken 200 ends the login as a coded error."""
     service, session = _service(tmp_path)
@@ -989,6 +1030,7 @@ async def test_oidc_poll_non_object_200_is_terminal_error(tmp_path, monkeypatch)
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
 async def test_poll_absorbs_consecutive_transport_failures_then_recovers(tmp_path, monkeypatch):
     service, _ = _service(
         tmp_path,
@@ -1007,6 +1049,7 @@ async def test_poll_absorbs_consecutive_transport_failures_then_recovers(tmp_pat
     assert TokenStore(tmp_path).resolve() is not None
 
 
+@pytest.mark.asyncio
 async def test_poll_transport_failure_budget_resets_after_an_answered_poll(tmp_path, monkeypatch):
     """An answered poll clears the count, so only a SUSTAINED outage crosses it."""
     failures = [_FailingResp() for _ in range(MAX_POLL_TRANSPORT_FAILURES)]
@@ -1021,6 +1064,7 @@ async def test_poll_transport_failure_budget_resets_after_an_answered_poll(tmp_p
         assert await service.poll_device(begin["login_id"]) == {"status": "pending"}
 
 
+@pytest.mark.asyncio
 async def test_poll_reports_a_sustained_outage(tmp_path, monkeypatch):
     """Past the budget the error is raised, so the handler answers its coded 502."""
     service, _ = _service(
@@ -1033,6 +1077,7 @@ async def test_poll_reports_a_sustained_outage(tmp_path, monkeypatch):
         await service.poll_device(begin["login_id"])
 
 
+@pytest.mark.asyncio
 async def test_poll_absorbs_a_connect_timeout(tmp_path, monkeypatch):
     """A timeout is the same class of hiccup as a dropped connection."""
     service, _ = _service(tmp_path, responses=[_FailingResp(asyncio.TimeoutError())])
@@ -1040,6 +1085,7 @@ async def test_poll_absorbs_a_connect_timeout(tmp_path, monkeypatch):
     assert await service.poll_device(begin["login_id"]) == {"status": "pending"}
 
 
+@pytest.mark.asyncio
 async def test_poll_oidc_absorbs_transport_failures_then_reports_outage(tmp_path, monkeypatch):
     """The SSO-OIDC poll carries the same budget as the social one."""
     service, _ = _service(
@@ -1052,6 +1098,7 @@ async def test_poll_oidc_absorbs_transport_failures_then_reports_outage(tmp_path
         await service.poll_device(begin["login_id"])
 
 
+@pytest.mark.asyncio
 async def test_auth_session_binds_an_explicit_timeout(tmp_path):
     """aiohttp's 5-minute default would hang a poll far past its own cadence."""
     service = KasLoginService(TokenStore(tmp_path))
@@ -1063,6 +1110,7 @@ async def test_auth_session_binds_an_explicit_timeout(tmp_path):
         await service.close()
 
 
+@pytest.mark.asyncio
 async def test_poll_answer_that_cannot_be_read_costs_no_budget(tmp_path, monkeypatch):
     """A body read that fails still proves the issuer is up, so it charges nothing.
 
@@ -1086,6 +1134,7 @@ async def test_poll_answer_that_cannot_be_read_costs_no_budget(tmp_path, monkeyp
     }
 
 
+@pytest.mark.asyncio
 async def test_poll_unreadable_error_response_costs_no_budget(tmp_path, monkeypatch):
     """Same for a non-200 whose body cannot be read."""
     service, _ = _service(
@@ -1102,6 +1151,7 @@ async def test_poll_unreadable_error_response_costs_no_budget(tmp_path, monkeypa
         await service.poll_device(begin["login_id"])
 
 
+@pytest.mark.asyncio
 async def test_poll_error_response_in_a_broken_charset_is_still_pending(tmp_path, monkeypatch):
     """A mislabelled charset makes decoding the body raise UnicodeDecodeError.
 
@@ -1121,6 +1171,7 @@ async def test_poll_error_response_in_a_broken_charset_is_still_pending(tmp_path
     }
 
 
+@pytest.mark.asyncio
 async def test_poll_oidc_answer_that_cannot_be_read_costs_no_budget(tmp_path, monkeypatch):
     """The SSO-OIDC token poll reads its body the same way, so it counts nothing."""
     service, _ = _service(

@@ -328,9 +328,16 @@ def test_real_kiro_cli_prefers_session_injected_server():
         }), encoding="utf-8")
         driver = root / "drive.py"
         driver.write_text(_DRIVER, encoding="utf-8")
+        # kiro-cli writes its own log directory and telemetry spool under TMPDIR;
+        # aimed at this tree, that residue is deleted with the test's directory
+        # instead of outliving it in the shared temp root.
+        child_tmp = root / "tmp"
+        child_tmp.mkdir()
+        child_env = {**os.environ, "TMPDIR": str(child_tmp), "TMP": str(child_tmp), "TEMP": str(child_tmp)}
         result = subprocess.run(
             [sys.executable, str(driver), str(root), str(probe)],
             capture_output=True,
+            env=child_env,
             encoding="utf-8",
             errors="replace",
             timeout=180,

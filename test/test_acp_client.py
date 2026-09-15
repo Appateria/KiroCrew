@@ -635,6 +635,15 @@ class TestAcpClientSessionKey:
                 "kiro_crew.acp.client._resolve_claude_acp_bin",
                 return_value=(["/usr/bin/node", "/x/acp.js"], ""),
             ),
+            # ``_spawn`` fills CLAUDE_CODE_EXECUTABLE from
+            # ``_resolve_claude_code_executable`` when the env does not carry it,
+            # and that resolver shells out to the host's ``mise`` first. This test
+            # is about the env being forwarded, not about where ``claude`` lives,
+            # so pin the answer instead of depending on the developer's toolchain.
+            patch(
+                "kiro_crew.acp.client._resolve_claude_code_executable",
+                return_value="/usr/local/bin/claude",
+            ),
             patch(
                 "kiro_crew.acp.client.wrap_argv",
                 return_value=(["/usr/bin/node", "/x/acp.js"], None),
@@ -1018,6 +1027,12 @@ class TestAcpClientBackendSelection:
                 ),
             ),
             patch("kiro_crew.acp.client._resolve_kiro_bin", return_value="/usr/bin/kiro-cli"),
+            # The claude path also resolves CLAUDE_CODE_EXECUTABLE through the
+            # host's ``mise``; the subject here is the argv, so pin the resolver.
+            patch(
+                "kiro_crew.acp.client._resolve_claude_code_executable",
+                return_value="/usr/local/bin/claude",
+            ),
             patch(
                 "kiro_crew.acp.client.wrap_argv",
                 side_effect=lambda argv, mode, **kwargs: (argv, None),

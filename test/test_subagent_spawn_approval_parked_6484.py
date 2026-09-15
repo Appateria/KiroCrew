@@ -47,6 +47,9 @@ def _mock_sessions() -> MagicMock:
     provider.start = AsyncMock()
     provider.shutdown = AsyncMock()
     provider.context_usage_pct = lambda: 0.0
+    # Read synchronously by the run loop's window resolution; as an AsyncMock
+    # child it would hand back a coroutine nobody awaits.
+    provider.context_window_tokens = lambda: 0
 
     async def _empty_stream(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
         return

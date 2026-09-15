@@ -41,6 +41,50 @@ _GOLDEN = Path(__file__).parent / "fixtures" / "denied_commands_golden.json"
 _REAL_RESOLVED_HOST_VERDICT = _argv_floor._resolved_host_verdict
 
 
+class _PacketlessProbeSocket(_argv_floor.socket.socket):
+    """``socket.socket`` whose datagram ``connect`` never touches the network.
+
+    ``_own_interface_addresses`` learns this host's primary outbound address per
+    family by ``connect``ing a UDP socket to a documentation peer and reading
+    ``getsockname()``. A UDP connect sends no packet, but it does consult the
+    routing table and is a real off-loopback ``socket.connect`` from the test
+    process, so a network-audited run flags it and a host with no default route
+    answers differently. Here the connect is dropped and ``getsockname`` reports
+    the family's loopback address, so the seed still produces a parseable
+    address for every layer without reaching outside the machine. Stream
+    sockets and every other method are the real thing.
+    """
+
+    def connect(self, address):  # type: ignore[override]
+        if self.type == _argv_floor.socket.SOCK_DGRAM:
+            return None
+        return super().connect(address)
+
+    def getsockname(self):  # type: ignore[override]
+        if self.type == _argv_floor.socket.SOCK_DGRAM:
+            if self.family == _argv_floor.socket.AF_INET6:
+                return ("::1", 0, 0, 0)
+            return ("127.0.0.1", 0)
+        return super().getsockname()
+
+
+@pytest.fixture(autouse=True)
+def _own_address_probe_stays_local(monkeypatch):
+    """Every ``ssh``-family verdict in this module seeds the own-host set.
+
+    The first ``is_denied("ssh ...")`` in the process runs ``_own_host_seed``
+    (which calls ``_own_interface_addresses``) and, once the backoff allows,
+    starts the ``kirocrew-own-host-resolve`` DNS worker. Whichever test happens
+    to run first then carries a real routing-table probe and a daemon thread
+    doing real name resolution. Pin both at module level: the probe socket
+    stays packet-less and local, and the worker backoff is pushed out so no
+    enrichment thread starts. Tests of the worker itself set the backoff to
+    ``0.0`` explicitly, and the resolver tests stub DNS underneath it.
+    """
+    monkeypatch.setattr(_argv_floor.socket, "socket", _PacketlessProbeSocket)
+    monkeypatch.setattr(_argv_floor, "_OWN_HOST_RESOLVE_NEXT_TRY", float("inf"))
+
+
 class TestCatalog:
     def test_catalog_ids_are_unique(self):
         # The one literal pin on the catalog size: every other size assertion in

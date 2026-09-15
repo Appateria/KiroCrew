@@ -44,6 +44,10 @@ def _mock_sessions(resumed: bool = False) -> MagicMock:
     provider.start = AsyncMock()
     provider.shutdown = AsyncMock()
     provider.context_usage_pct = lambda: 0.0
+    # Read synchronously after every turn; as AsyncMock children they
+    # would hand back coroutines nobody awaits.
+    provider.context_window_tokens = lambda: 0
+    provider.context_used_tokens = lambda: 0
 
     async def _empty_stream(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
         return
@@ -174,9 +178,7 @@ class TestKeepThreading:
         sessions = _mock_sessions(resumed=True)
         manager = _manager(sessions)
         with patch("kiro_crew.subagent.Stats"), patch("kiro_crew.subagent.sel"):
-            info = manager.spawn(
-                "follow-up", keep=True, conversation_key="subagent:origrun1"
-            )
+            info = manager.spawn("follow-up", keep=True, conversation_key="subagent:origrun1")
             assert info is not None and not info.error
             await manager._tasks[info.id]
         # get_or_create must be called with the ORIGINAL conversation key.
@@ -201,8 +203,10 @@ class TestContinueConversation:
         sessions = _mock_sessions()
         sessions.resumable_sid = MagicMock(return_value=None)
         manager = _manager(sessions)
-        with patch("kiro_crew.subagent.sel"), \
-                patch("kiro_crew.subagent.read_state", return_value=None):
+        with (
+            patch("kiro_crew.subagent.sel"),
+            patch("kiro_crew.subagent.read_state", return_value=None),
+        ):
             info = manager.continue_conversation("deadbeef", "more work")
         assert info is not None and info.done
         assert info.error.startswith("conversation_gone")
@@ -210,9 +214,12 @@ class TestContinueConversation:
     def test_promotion_write_failure_is_retryable(self) -> None:
         sessions = _mock_sessions()
         manager = _manager(sessions)
-        with patch(
-            "kiro_crew.subagent_persistence.promote_retention", side_effect=OSError("disk busy")
-        ), patch.object(manager, "spawn") as spawn:
+        with (
+            patch(
+                "kiro_crew.subagent_persistence.promote_retention", side_effect=OSError("disk busy")
+            ),
+            patch.object(manager, "spawn") as spawn,
+        ):
             info = manager.continue_conversation("retryrun", "follow-up")
         assert info.done
         assert info.error.startswith("conversation_busy")
@@ -223,9 +230,10 @@ class TestContinueConversation:
     def test_promotion_skipped_state_write_is_retryable(self) -> None:
         sessions = _mock_sessions()
         manager = _manager(sessions)
-        with patch("kiro_crew.subagent.update_state", return_value=False), patch.object(
-            manager, "spawn"
-        ) as spawn:
+        with (
+            patch("kiro_crew.subagent.update_state", return_value=False),
+            patch.object(manager, "spawn") as spawn,
+        ):
             info = manager.continue_conversation("skiprun", "follow-up")
         assert info.done
         assert info.error.startswith("conversation_busy")
@@ -239,10 +247,13 @@ class TestContinueConversation:
         sessions.is_continuable.return_value = True
         manager = _manager(sessions)
         manager._conversations["subagent:kept-run"] = 123.0
-        with patch(
-            "kiro_crew.subagent_persistence.promote_retention",
-            return_value=sp.RetentionPromotionResult.RETRYABLE,
-        ), patch.object(manager, "spawn") as spawn:
+        with (
+            patch(
+                "kiro_crew.subagent_persistence.promote_retention",
+                return_value=sp.RetentionPromotionResult.RETRYABLE,
+            ),
+            patch.object(manager, "spawn") as spawn,
+        ):
             info = manager.continue_conversation("kept-run", "follow-up")
         assert info.done
         assert info.error.startswith("conversation_busy")
@@ -262,9 +273,7 @@ class TestContinueConversation:
 
         def promote(agent_id: str) -> None:
             try:
-                results[agent_id] = manager._promote_conversation(
-                    agent_id, f"subagent:{agent_id}"
-                )
+                results[agent_id] = manager._promote_conversation(agent_id, f"subagent:{agent_id}")
             except BaseException as exc:
                 errors.append(exc)
 
@@ -296,9 +305,12 @@ class TestContinueConversation:
         sessions.resumable_sid = MagicMock(side_effect=[None, "sid-from-state"])
         manager = _manager(sessions)
         state = {"session_id": "sid-from-state", "provider": "acp", "cwd": "/tmp/x"}
-        with patch("kiro_crew.subagent.Stats"), patch("kiro_crew.subagent.sel"), \
-                patch("kiro_crew.subagent.read_state", return_value=state), \
-                patch.object(manager, "_promote_conversation", return_value=object()) as promote:
+        with (
+            patch("kiro_crew.subagent.Stats"),
+            patch("kiro_crew.subagent.sel"),
+            patch("kiro_crew.subagent.read_state", return_value=state),
+            patch.object(manager, "_promote_conversation", return_value=object()) as promote,
+        ):
             info = manager.continue_conversation("origrun2", "follow-up")
             assert info is not None and not info.error, info.error
             await manager._tasks[info.id]
@@ -313,8 +325,10 @@ class TestContinueConversation:
         sessions.resumable_sid = MagicMock(return_value=None)  # both checks fail
         manager = _manager(sessions)
         state = {"session_id": "sid-stale", "provider": "acp", "cwd": ""}
-        with patch("kiro_crew.subagent.sel"), \
-                patch("kiro_crew.subagent.read_state", return_value=state):
+        with (
+            patch("kiro_crew.subagent.sel"),
+            patch("kiro_crew.subagent.read_state", return_value=state),
+        ):
             info = manager.continue_conversation("stalerun", "follow-up")
         assert info is not None and info.done
         assert info.error.startswith("conversation_gone")
@@ -326,8 +340,10 @@ class TestContinueConversation:
         create_agent_folder("origrun1", memory_mode="persistent")
         sessions = _mock_sessions(resumed=True)
         manager = _manager(sessions)
-        with patch("kiro_crew.subagent.Stats"), patch("kiro_crew.subagent.sel"), patch.object(
-            manager, "_promote_conversation", return_value=object()
+        with (
+            patch("kiro_crew.subagent.Stats"),
+            patch("kiro_crew.subagent.sel"),
+            patch.object(manager, "_promote_conversation", return_value=object()),
         ):
             info = manager.continue_conversation("origrun1", "follow-up work")
             assert info is not None and not info.error, info.error
@@ -349,8 +365,10 @@ class TestContinueConversation:
         provider = sessions.get_or_create.return_value[0]
         provider.session_id = "sid-resume-fresh"
         manager = _manager(sessions)
-        with patch("kiro_crew.subagent.Stats"), patch("kiro_crew.subagent.sel"), patch.object(
-            manager, "_promote_conversation", return_value=object()
+        with (
+            patch("kiro_crew.subagent.Stats"),
+            patch("kiro_crew.subagent.sel"),
+            patch.object(manager, "_promote_conversation", return_value=object()),
         ):
             info = manager.continue_conversation("origrun9", "follow-up work")
             assert info is not None and not info.error, info.error
@@ -477,9 +495,7 @@ class TestReleaseAndSweep:
         sessions = _mock_sessions()
         manager = _manager(sessions)
         manager._conversations["subagent:c1"] = time.time()
-        with patch(
-            "kiro_crew.subagent._cleanup_session_files_sync"
-        ) as cleanup:
+        with patch("kiro_crew.subagent._cleanup_session_files_sync") as cleanup:
             ok, detail = manager.release_conversation("c1")
         assert ok and detail == "released"
         cleanup.assert_called_once_with("sid-123", "acp")
@@ -499,9 +515,7 @@ class TestReleaseAndSweep:
         now = time.time()
         manager._conversations["subagent:old1"] = now - 7 * 3600  # expired
         manager._conversations["subagent:new1"] = now - 60  # fresh
-        with patch(
-            "kiro_crew.subagent._cleanup_session_files_sync"
-        ):
+        with patch("kiro_crew.subagent._cleanup_session_files_sync"):
             manager._sweep_conversations(now)
         assert "subagent:old1" not in manager._conversations
         assert "subagent:new1" in manager._conversations
@@ -605,52 +619,39 @@ class TestKeepTranscript:
         return h, sessions, files
 
     @pytest.mark.asyncio
-    async def test_destroy_deletes_transcript_when_terminate_is_cancelled(
-        self, tmp_path
-    ) -> None:
+    async def test_destroy_deletes_transcript_when_terminate_is_cancelled(self, tmp_path) -> None:
         """A cancelled teardown must still unlink; the cancellation must propagate."""
         h, sessions, files = self._handle_with_transcript(tmp_path)
         h._runtime.terminate_session = AsyncMock(side_effect=asyncio.CancelledError())
 
-        with patch(
-            "kiro_crew.acp.session_handle.kiro_sessions_dir", lambda: sessions
-        ):
+        with patch("kiro_crew.acp.session_handle.kiro_sessions_dir", lambda: sessions):
             with pytest.raises(asyncio.CancelledError):
                 await h.destroy()
 
         assert [f for f in files if f.exists()] == [], (
-            "a cancelled teardown leaked this session's transcript; nothing else "
-            "deletes it"
+            "a cancelled teardown leaked this session's transcript; nothing else " "deletes it"
         )
 
     @pytest.mark.asyncio
-    async def test_destroy_deletes_transcript_when_terminate_raises(
-        self, tmp_path
-    ) -> None:
+    async def test_destroy_deletes_transcript_when_terminate_raises(self, tmp_path) -> None:
         """Same for an ordinary exception escaping the runtime call."""
         h, sessions, files = self._handle_with_transcript(tmp_path, sid="sid-raise")
         h._runtime.terminate_session = AsyncMock(side_effect=RuntimeError("boom"))
 
-        with patch(
-            "kiro_crew.acp.session_handle.kiro_sessions_dir", lambda: sessions
-        ):
+        with patch("kiro_crew.acp.session_handle.kiro_sessions_dir", lambda: sessions):
             with pytest.raises(RuntimeError):
                 await h.destroy()
 
         assert [f for f in files if f.exists()] == []
 
     @pytest.mark.asyncio
-    async def test_cancelled_teardown_still_honours_keep_transcript(
-        self, tmp_path
-    ) -> None:
+    async def test_cancelled_teardown_still_honours_keep_transcript(self, tmp_path) -> None:
         """The `finally` must not override the subagent resume guard."""
         h, sessions, files = self._handle_with_transcript(tmp_path, sid="sid-keep")
         h.keep_transcript = True
         h._runtime.terminate_session = AsyncMock(side_effect=asyncio.CancelledError())
 
-        with patch(
-            "kiro_crew.acp.session_handle.kiro_sessions_dir", lambda: sessions
-        ):
+        with patch("kiro_crew.acp.session_handle.kiro_sessions_dir", lambda: sessions):
             with pytest.raises(asyncio.CancelledError):
                 await h.destroy()
 
@@ -687,9 +688,7 @@ class TestPersistenceGuards:
             keep=True,
             conversation_key=f"subagent:{owner_id}",
         )
-        sp.write_tombstone(
-            continuation_id, cause="delivered", recovery_action="none"
-        )
+        sp.write_tombstone(continuation_id, cause="delivered", recovery_action="none")
         d = sp._agent_dir(continuation_id)
         ts_path = d / "tombstone.json"
         ts = json.loads(ts_path.read_text())
@@ -712,8 +711,9 @@ class TestPersistenceGuards:
             result.append(manager.continue_conversation(owner_id, "follow-up"))
             continuation_done.set()
 
-        with patch.object(sp, "_should_defer_tombstone_cleanup", hold_after_false), patch.object(
-            sp, "_cleanup_session_files_sync"
+        with (
+            patch.object(sp, "_should_defer_tombstone_cleanup", hold_after_false),
+            patch.object(sp, "_cleanup_session_files_sync"),
         ):
             prune_thread = threading.Thread(
                 target=sp.prune_stale_tombstones,
@@ -818,9 +818,7 @@ class TestPersistenceGuards:
         sp.update_state(agent_id, session_id="sid-off-loop", provider="acp", keep=False)
         results: list[sp.RetentionPromotionResult] = []
 
-        worker = threading.Thread(
-            target=lambda: results.append(sp.promote_retention(agent_id))
-        )
+        worker = threading.Thread(target=lambda: results.append(sp.promote_retention(agent_id)))
         worker.start()
         worker.join(timeout=2)
 
@@ -873,9 +871,7 @@ class TestPersistenceGuards:
             path.write_text(json.dumps(tombstone))
 
         with patch.object(sp, "_cleanup_session_files_sync") as cleanup:
-            assert sp.prune_stale_tombstones(
-                max_age_days=0, delivered_ttl_secs=0
-            ) == 2
+            assert sp.prune_stale_tombstones(max_age_days=0, delivered_ttl_secs=0) == 2
 
         assert not sp._agent_dir(malformed_id).exists()
         assert not sp._agent_dir(valid_id).exists()
@@ -914,9 +910,7 @@ class TestPersistenceGuards:
         valid_path.write_text(json.dumps(valid_tombstone))
 
         with patch.object(sp, "_cleanup_session_files_sync") as cleanup:
-            assert sp.prune_stale_tombstones(
-                max_age_days=0, delivered_ttl_secs=0
-            ) == 1
+            assert sp.prune_stale_tombstones(max_age_days=0, delivered_ttl_secs=0) == 1
 
         assert sp._agent_dir(deep_id).exists()
         assert not sp._agent_dir(valid_id).exists()
@@ -957,9 +951,7 @@ class TestPersistenceGuards:
             sp._LIVE_CLEANUP_IDENTITIES.clear()
 
         with patch.object(sp, "_cleanup_session_files_sync") as cleanup:
-            assert sp.prune_stale_tombstones(
-                max_age_days=0, delivered_ttl_secs=0
-            ) == 1
+            assert sp.prune_stale_tombstones(max_age_days=0, delivered_ttl_secs=0) == 1
 
         assert sp._agent_dir(corrupt_id).exists()
         assert corrupt_record.read_text() == "{malformed"
@@ -1015,9 +1007,7 @@ class TestPersistenceGuards:
             sp._LIVE_CLEANUP_IDENTITIES.clear()
         assert not ts_path.exists()
         assert sp._cleanup_identities_path(agent_id).exists()
-        sp.write_tombstone(
-            agent_id, cause="gateway_restart", recovery_action="notified"
-        )
+        sp.write_tombstone(agent_id, cause="gateway_restart", recovery_action="notified")
         tombstone = json.loads(ts_path.read_text())
         assert "cleanup_identities" not in tombstone
         assert tombstone["session_id"] == "sid-state"
@@ -1025,9 +1015,7 @@ class TestPersistenceGuards:
         ts_path.write_text(json.dumps(tombstone))
 
         with patch.object(sp, "_cleanup_session_files_sync") as cleanup:
-            assert sp.prune_stale_tombstones(
-                max_age_days=0, delivered_ttl_secs=0
-            ) == 1
+            assert sp.prune_stale_tombstones(max_age_days=0, delivered_ttl_secs=0) == 1
 
         assert cleanup.call_args_list == [
             call("sid-1", "acp", cwd="/first"),
@@ -1068,18 +1056,14 @@ class TestPersistenceGuards:
         tombstone = json.loads(tombstone_path.read_text())
         tombstone["died"] = 1
         tombstone["session_id"] = victim_sid
-        tombstone["cleanup_identities"] = [
-            {"session_id": victim_sid, "provider": "acp"}
-        ]
+        tombstone["cleanup_identities"] = [{"session_id": victim_sid, "provider": "acp"}]
         tombstone_path.write_text(json.dumps(tombstone))
 
         # These are the identity files a subagent can write. Durable cleanup
         # authority lives under the protected trust root, so neither forged
         # spelling may add the victim SID to the provider-deletion set.
         (agent_dir / sp._CLEANUP_IDENTITIES_FILE).write_text(
-            json.dumps(
-                {"identities": [{"session_id": victim_sid, "provider": "acp"}]}
-            )
+            json.dumps({"identities": [{"session_id": victim_sid, "provider": "acp"}]})
         )
         sessions_dir = tmp_path / "sessions"
         sessions_dir.mkdir()
@@ -1089,9 +1073,7 @@ class TestPersistenceGuards:
         victim_file.write_text("victim")
 
         with patch.object(sp, "kiro_sessions_dir", return_value=sessions_dir):
-            assert sp.prune_stale_tombstones(
-                max_age_days=0, delivered_ttl_secs=0
-            ) == 1
+            assert sp.prune_stale_tombstones(max_age_days=0, delivered_ttl_secs=0) == 1
 
         assert not own_file.exists()
         assert victim_file.read_text() == "victim"
@@ -1133,9 +1115,7 @@ class TestPersistenceGuards:
         # Once a provider cleanup implementation succeeds, the same record is
         # enough to complete prune and reap both surfaces.
         with patch.object(sp, "_cleanup_session_files_sync", return_value=True):
-            assert sp.prune_stale_tombstones(
-                max_age_days=0, delivered_ttl_secs=0
-            ) == 1
+            assert sp.prune_stale_tombstones(max_age_days=0, delivered_ttl_secs=0) == 1
         assert not agent_dir.exists()
         assert not protected_path.exists()
 
@@ -1163,9 +1143,7 @@ class TestPersistenceGuards:
         tombstone_path.write_text(json.dumps(tombstone))
 
         with patch.object(sp, "_cleanup_session_files_sync") as cleanup:
-            assert sp.prune_stale_tombstones(
-                max_age_days=0, delivered_ttl_secs=0
-            ) == 0
+            assert sp.prune_stale_tombstones(max_age_days=0, delivered_ttl_secs=0) == 0
         assert agent_dir.exists()
         cleanup.assert_not_called()
 
@@ -1179,9 +1157,7 @@ class TestPersistenceGuards:
         with sp._CLEANUP_IDENTITY_LOCK:
             sp._LIVE_CLEANUP_IDENTITIES.clear()
         with patch.object(sp, "_cleanup_session_files_sync", return_value=True):
-            assert sp.prune_stale_tombstones(
-                max_age_days=0, delivered_ttl_secs=0
-            ) == 1
+            assert sp.prune_stale_tombstones(max_age_days=0, delivered_ttl_secs=0) == 1
         assert not agent_dir.exists()
 
     @pytest.mark.parametrize("trusted_generation", [False, True])
@@ -1214,9 +1190,7 @@ class TestPersistenceGuards:
         protected_path = sp._cleanup_identities_path(agent_id)
         tombstone_path = agent_dir / "tombstone.json"
         tombstone = json.loads(tombstone_path.read_text())
-        tombstone["died"] = (
-            time.time() - sp._UNRECLAIMABLE_LOOKUP_MAX_AGE_SECS - 1
-        )
+        tombstone["died"] = time.time() - sp._UNRECLAIMABLE_LOOKUP_MAX_AGE_SECS - 1
         tombstone_path.write_text(json.dumps(tombstone))
         with sp._CLEANUP_IDENTITY_LOCK:
             sp._LIVE_CLEANUP_IDENTITIES.clear()
@@ -1256,9 +1230,7 @@ class TestPersistenceGuards:
         tombstone_path.write_text(json.dumps(tombstone))
 
         with patch.object(sp, "_cleanup_session_files_sync") as cleanup:
-            assert sp.prune_stale_tombstones(
-                max_age_days=0, delivered_ttl_secs=0
-            ) == 0
+            assert sp.prune_stale_tombstones(max_age_days=0, delivered_ttl_secs=0) == 0
         assert agent_dir.exists()
         cleanup.assert_not_called()
 
@@ -1266,9 +1238,7 @@ class TestPersistenceGuards:
         tombstone["died"] = 1
         tombstone_path.write_text(json.dumps(tombstone))
         with patch.object(sp, "_cleanup_session_files_sync") as cleanup:
-            assert sp.prune_stale_tombstones(
-                max_age_days=0, delivered_ttl_secs=0
-            ) == 1
+            assert sp.prune_stale_tombstones(max_age_days=0, delivered_ttl_secs=0) == 1
         cleanup.assert_called_once_with("sid-promoted", "acp", cwd="")
 
     def test_cleanup_store_restriction_failure_aborts_before_access(
@@ -1285,19 +1255,18 @@ class TestPersistenceGuards:
         original = json.dumps({"identities": [{"session_id": "sid-original"}]})
         protected_path.write_text(original)
 
-        with patch.object(
-            sp.platform_compat, "make_owner_only_dir"
-        ), patch.object(
-            sp.platform_compat,
-            "restrict_dir_to_owner",
-            side_effect=OSError("DACL refused"),
+        with (
+            patch.object(sp.platform_compat, "make_owner_only_dir"),
+            patch.object(
+                sp.platform_compat,
+                "restrict_dir_to_owner",
+                side_effect=OSError("DACL refused"),
+            ),
         ):
             with pytest.raises(OSError, match="DACL refused"):
                 sp._read_cleanup_identities_file(agent_id)
             with pytest.raises(OSError, match="DACL refused"):
-                sp.remember_live_cleanup_identity(
-                    agent_id, session_id="sid-forged", provider="acp"
-                )
+                sp.remember_live_cleanup_identity(agent_id, session_id="sid-forged", provider="acp")
 
         assert protected_path.read_text() == original
 
@@ -1356,9 +1325,7 @@ class TestPersistenceGuards:
             sp._LIVE_CLEANUP_IDENTITIES.clear()
 
         with patch.object(sp, "_cleanup_session_files_sync") as cleanup:
-            assert sp.prune_stale_tombstones(
-                max_age_days=0, delivered_ttl_secs=0
-            ) == 0
+            assert sp.prune_stale_tombstones(max_age_days=0, delivered_ttl_secs=0) == 0
         assert agent_dir.exists()
         cleanup.assert_not_called()
 
@@ -1516,16 +1483,12 @@ class TestPersistenceGuards:
             sp._LIVE_CLEANUP_IDENTITIES.clear()
 
         with patch.object(sp, "_cleanup_session_files_sync") as cleanup:
-            assert sp.prune_stale_tombstones(
-                max_age_days=0, delivered_ttl_secs=0
-            ) == 0
+            assert sp.prune_stale_tombstones(max_age_days=0, delivered_ttl_secs=0) == 0
             assert continuation_dir.exists()
             cleanup.assert_not_called()
 
             sp.update_state(owner_id, keep=False)
-            assert sp.prune_stale_tombstones(
-                max_age_days=0, delivered_ttl_secs=0
-            ) == 1
+            assert sp.prune_stale_tombstones(max_age_days=0, delivered_ttl_secs=0) == 1
 
         assert not continuation_dir.exists()
         cleanup.assert_called_once_with("sid-continuation", "acp", cwd="")

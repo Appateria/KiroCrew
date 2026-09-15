@@ -37,6 +37,29 @@ from kiro_crew.dashboard.state import (
 from kiro_crew.history import ConversationLog
 
 
+def _provider_mock() -> AsyncMock:
+    """A stand-in for the ACP session provider a chat turn drives.
+
+    The turn surface (``stream``, ``shutdown``, ``approve_tool`` ...) is async,
+    so the double is an ``AsyncMock``. The telemetry accessors the runner reads
+    after every turn -- ``context_usage_pct``, ``context_window_tokens``,
+    ``context_used_tokens``, ``mcp_session_report``, ``available_models``, and the
+    inner client's ``pop_pending_oauth_requests`` -- are SYNCHRONOUS on the real
+    provider and are called without ``await``. Left as
+    ``AsyncMock`` children each call would hand back a coroutine nobody awaits,
+    which the interpreter reports at garbage collection against whichever later
+    test happens to trigger it. Tests override any accessor they assert on.
+    """
+    client = AsyncMock()
+    client.context_usage_pct = MagicMock(return_value=0.0)
+    client.context_window_tokens = MagicMock(return_value=0)
+    client.context_used_tokens = MagicMock(return_value=0)
+    client.mcp_session_report = MagicMock(return_value=None)
+    client.available_models = MagicMock(return_value=[])
+    client.client.pop_pending_oauth_requests = MagicMock(return_value=[])
+    return client
+
+
 def test_tool_call_ws_payload_preserves_shell_capability_signal():
     """The dashboard receives an explicit shell signal for indeterminate UX.
 
@@ -5410,7 +5433,7 @@ class TestRunChatSegmentFlush:
     @staticmethod
     def _make_mock_client(events):
         """Create a mock ACP client that yields the given LLMEvent list."""
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=10.0)
 
         async def _stream(msg):
@@ -5867,7 +5890,7 @@ class TestRunChatNativeSubagentAttribution:
 
     @staticmethod
     def _make_mock_client(events):
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=10.0)
 
         async def _stream(msg):
@@ -5998,7 +6021,7 @@ class TestRunChatCompactDeferredWait:
 
     @staticmethod
     def _make_mock_client(events):
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=10.0)
         client.context_window_tokens = MagicMock(return_value=0)
         client.context_used_tokens = MagicMock(return_value=0)
@@ -6297,7 +6320,7 @@ class TestTokenPersistenceBackfill:
         """Mock provider that exposes a nested client._model attribute,
         mirroring AcpClient/CcClient layout (provider.client._model).
         """
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=10.0)
         # Expose `client.client._model` like the real provider wrappers
         inner = MagicMock()
@@ -6599,7 +6622,7 @@ class TestTokenPersistenceBackfill:
         # branch (chat_runner.py:471-476) finds nothing and leaves slot.model
         # blank. Then mutate inner._model mid-stream — just before yielding
         # EVENT_COMPLETE — so only the late backfill branch can populate it.
-        client = AsyncMock()
+        client = _provider_mock()
         client.capabilities = capabilities_for(ACP_BACKEND_CLAUDE)
         client.context_usage_pct = MagicMock(return_value=10.0)
         inner = MagicMock()
@@ -6936,7 +6959,7 @@ class TestKiroBackfillProfileGuard:
         slot.model = ""  # user picked nothing explicit on this turn
 
         # Default test config provider is acp/kiro — exercise that path.
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=10.0)
         inner = MagicMock()
         inner._model = ""  # empty at create; kiro learns the profile mid-turn
@@ -7283,7 +7306,7 @@ class TestPinnedModelWithheld:
         slot = state.get_or_create_slot("s1")
         slot.model = "claude-opus-5"  # pinned before the plan downgrade
 
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=10.0)
         client.capabilities = capabilities_for(ACP_BACKEND_KIRO)
         # The live session advertises the free tier only.
@@ -7366,7 +7389,7 @@ class TestPinnedModelWithheld:
         slot = state.get_or_create_slot("s1")
         slot.model = ""  # inheriting: no pin
 
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=10.0)
         client.is_claude_backend = False
         client.available_models = MagicMock(
@@ -7425,7 +7448,7 @@ class TestPinnedModelWithheld:
         slot = state.get_or_create_slot("s1")
         slot.model = "claude-opus-4.6-1m"  # deprecated spelling: absent from GET /api/models
 
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=10.0)
         client.capabilities = capabilities_for(ACP_BACKEND_KIRO)
         # The session serves the replacement the pin normalizes to.
@@ -7483,7 +7506,7 @@ class TestPinnedModelWithheld:
         slot.model = "claude-opus-5"
         slot.record_model_withheld(True)  # the PREVIOUS session withheld this pin
 
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=10.0)
         client.capabilities = capabilities_for(ACP_BACKEND_KIRO)
         client.available_models = MagicMock(return_value=[])  # advertises nothing
@@ -7556,7 +7579,7 @@ class TestPinnedModelWithheld:
 
         monkeypatch.setattr("kiro_crew.dashboard.chat_runner.KiroCrewConfig.load", load_then_break)
 
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=10.0)
         client.capabilities = capabilities_for(ACP_BACKEND_KIRO)
         client.available_models = MagicMock(return_value=[{"modelId": "claude-sonnet-5"}])
@@ -7600,7 +7623,7 @@ class TestPinnedModelWithheld:
         slot = state.get_or_create_slot("s1")
         slot.model = "claude-opus-5"
 
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=10.0)
         client.capabilities = capabilities_for(ACP_BACKEND_KIRO)
         # This account CAN run the pin, so nothing is withheld.
@@ -7655,7 +7678,7 @@ class TestPinnedModelWithheld:
         slot = state.get_or_create_slot("s1")
         slot.model = "claude-opus-5"
 
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=10.0)
         client.capabilities = capabilities_for(ACP_BACKEND_KIRO)
         client.available_models = MagicMock(return_value=[{"modelId": "claude-sonnet-5"}])
@@ -7712,7 +7735,7 @@ class TestPinnedModelWithheld:
         slot = state.get_or_create_slot("s1")
         slot.model = "claude-sonnet-5"
 
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=10.0)
         client.capabilities = capabilities_for(ACP_BACKEND_KIRO)
         client.available_models = MagicMock(
@@ -9194,7 +9217,7 @@ class TestRunChatToolBoundarySegments:
             LLMEvent(kind="complete"),
         ]
 
-        fake_client = AsyncMock()
+        fake_client = _provider_mock()
 
         async def _stream(msg):
             for e in events:
@@ -9240,7 +9263,7 @@ class TestRunChatToolBoundarySegments:
             LLMEvent(kind="complete"),
         ]
 
-        fake_client = AsyncMock()
+        fake_client = _provider_mock()
 
         async def _stream(msg):
             for e in events:
@@ -9272,7 +9295,7 @@ class TestRunChatToolCallUpdate:
 
     @staticmethod
     def _make_mock_client(events):
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=10.0)
 
         async def _stream(msg):
@@ -9893,7 +9916,7 @@ class TestRunChatModelRefusal:
 
     @staticmethod
     def _make_mock_client(events):
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=10.0)
 
         async def _stream(msg):
@@ -10933,7 +10956,7 @@ class TestOrchestratorPlanGateArming:
 
     @staticmethod
     def _make_mock_client(events):
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=10.0)
         client.context_window_tokens = MagicMock(return_value=0)
         client.context_used_tokens = MagicMock(return_value=0)
@@ -13743,7 +13766,7 @@ class TestGenerateEmojiForName:
         monkeypatch.setattr("kiro_crew.providers.base.EVENT_COMPLETE", "complete")
         monkeypatch.setattr("kiro_crew.providers.base.EVENT_PERMISSION_REQUEST", "permission")
 
-        mock_client = AsyncMock()
+        mock_client = _provider_mock()
         mock_client.prompt = MagicMock(return_value=AsyncIterator([mock_event, done_event]))
         state.sessions.get_bg_session = AsyncMock(return_value=mock_client)
         state.push_slots_update = MagicMock()
@@ -13782,7 +13805,7 @@ class TestGenerateEmojiForName:
         monkeypatch.setattr("kiro_crew.providers.base.EVENT_COMPLETE", "complete")
         monkeypatch.setattr("kiro_crew.providers.base.EVENT_PERMISSION_REQUEST", "permission")
 
-        mock_client = AsyncMock()
+        mock_client = _provider_mock()
         mock_client.prompt = MagicMock(return_value=AsyncIterator([mock_event, done_event]))
         state.sessions.get_bg_session = AsyncMock(return_value=mock_client)
 
@@ -15842,7 +15865,7 @@ class TestStopReasonCancelled:
 
     @staticmethod
     def _make_mock_client(events):
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=10.0)
 
         async def _stream(msg):
@@ -18321,7 +18344,7 @@ class TestRunChatTransientRetry:
 
     @staticmethod
     def _client(stream):
-        client = AsyncMock()
+        client = _provider_mock()
         client.context_usage_pct = MagicMock(return_value=0.0)
         # These are sync accessors on the real provider client; _run_chat
         # calls them without awaiting, so a bare AsyncMock attribute here

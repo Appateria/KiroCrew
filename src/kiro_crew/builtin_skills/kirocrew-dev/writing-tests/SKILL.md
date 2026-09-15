@@ -449,7 +449,12 @@ The consequence for how you write a test:
       `inspect.getsource` (3.13 dedents docstrings)
 - [ ] A test whose contract IS a real symlink is listed in `test/requires-real-symlinks.txt`;
       one that needs a directory that resolves elsewhere uses `make_dir_link`
-- [ ] No `AsyncMock` standing in for a synchronous method; every `cancel()` awaited
+- [ ] No `AsyncMock` standing in for a synchronous method; every `cancel()` awaited. A
+      bare `AsyncMock()` provider makes EVERY accessor an awaitable, and the sync ones
+      (`context_window_tokens()`, `mcp_session_report()`) become `never awaited` warnings
+      attributed to a LATER test — build the double from a factory that pins them as
+      `MagicMock`, and a stand-in for a spawner or `wait_for` must `close()` the coroutine
+      it swallows
 - [ ] No module-level asyncio primitive (`Lock`/`Event`/`Future`/in-flight dict) reachable
       from the code under test without a per-test reset
 - [ ] Nothing can block forever: every await the test itself must unblock is wrapped in a
@@ -472,3 +477,40 @@ The consequence for how you write a test:
       every worker pays it at collection and holds it for the session
 - [ ] Cross-platform: `platform_compat` for process/signal/lock calls, no assumption
       about path separators, case sensitivity, `/tmp`, or timer granularity
+- [ ] `@pytest.mark.asyncio` only on `async def` tests — never a module-level `pytestmark`
+      over a file that also holds sync tests
+- [ ] Every aiohttp `app[...]` write happens before the `TestClient`/`TestServer` starts; an
+      override of something a production `on_startup` hook creates is itself a later
+      `on_startup` hook; an already-set-up runner's app is never wrapped in a second
+      `TestServer` (serve `runner.server` through a `ServerRunner`)
+- [ ] A fixture venv is built with `symlinks=not IS_WINDOWS`, and every probe of the
+      RUNNING interpreter's packaging (`find_spec("pip")`) is pinned — a uv venv has no
+      `pip`, and a copied python-build-standalone binary does not start
+- [ ] A fake `subprocess.run` routes on whole argv tokens, never on a substring of the
+      joined argv — a `TMPDIR` path element can contain any word, including the test's id
+- [ ] A directory chmodded to a non-writable mode under `tmp_path` gets owner rwx back in a
+      finalizer; a nested pytest the test spawns gets `--basetemp` under the outer
+      `tmp_path` (the default is the SHARED per-user tree every other run prunes)
+- [ ] A module- or session-scoped fixture that patches env does it through
+      `pytest.MonkeyPatch.context()` scoped to what actually needs it, never a raw
+      `os.environ[...]` write and never a `MonkeyPatch` held for the whole module when the
+      value it builds is already materialised; an env value each test's subprocess must
+      see (a git identity) is set per test through the function-scoped `monkeypatch`,
+      since a session-lifetime patch still reaches every later suite on the worker
+- [ ] A default that is not HOME-derived (`workspace_root()` → `/Volumes/workplace` on
+      macOS) is relocated by patching the resolver, and the result is asserted to be under
+      `tmp_path`
+- [ ] A resolver that finds a per-user tool (`gh`, `mise`, `say`) is pinned at the seam
+      production reads, never left to find the host's binary; an address probe that
+      `connect`s a datagram socket off-loopback is stubbed with an inert socket subclass
+- [ ] A stub for a runner that owns deferred cleanup (`cleanup_paths`) reaps them itself;
+      a file with a `.lock` sidecar lives under `tmp_path`; a spawned real binary gets
+      `TMPDIR`/`TMP`/`TEMP` inside the test's temp tree in its `env`
+- [ ] A thread count that rises is only a leak if the new threads are not a named bounded
+      pool (`mc-*`, `sel-writer`) — print thread names in the probe first; a
+      `Thread(target=lambda: ...)` that is expected to raise captures the exception and
+      asserts on it instead of leaving a `PytestUnhandledThreadExceptionWarning`
+- [ ] A tree ratchet streams parsed trees and caches RESULTS, never a list of ASTs shared
+      between scanners; a growth/linearity ratchet measures the algorithm's own work
+      (bytes produced, items visited), not wall-clock and not interpreter call counts
+      (`str.join` is one C call at any length)

@@ -1012,6 +1012,42 @@ def _install_step(steps):
     raise AssertionError("no 'pip install' step found in the step list")
 
 
+def _reap_cleanup_paths(cleanup_paths) -> None:
+    """Remove what the sync registered for the run's cleanup, in order.
+
+    Mirrors the real run's cleanup loop: unlink each entry and fall back to
+    rmdir, which only succeeds once the directory is empty -- so the order the
+    sync registered them in (files before their directory) is what makes the
+    directory go too.
+    """
+    for path in cleanup_paths or []:
+        try:
+            os.unlink(path)
+        except OSError:
+            try:
+                os.rmdir(path)
+            except OSError:
+                pass
+
+
+def _start_run_stub(rid: str) -> AsyncMock:
+    """A stand-in for ``_start_run`` that still honours ``cleanup_paths``.
+
+    The sync stages its runner snapshot, steps file and preflight snapshot into
+    private mkdtemp directories and hands them to ``_start_run`` for removal
+    when the run ends. A bare ``AsyncMock`` swallows that kwarg, so every sync
+    driven through one leaves those directories behind in the temp root. Use
+    this in any test that does not need to read the staged files afterwards;
+    a test that does must reap them itself once it has read them.
+    """
+
+    def _run(label, cmd, **kw):
+        _reap_cleanup_paths(kw.get("cleanup_paths"))
+        return rid
+
+    return AsyncMock(side_effect=_run)
+
+
 def _cleanup_sync_tempdirs(mock_start):
     """Delete the snapshot dirs a stubbed _start_run would have cleaned up.
 
@@ -1022,14 +1058,7 @@ def _cleanup_sync_tempdirs(mock_start):
     """
     if not getattr(mock_start, "call_args", None):
         return
-    for path in mock_start.call_args.kwargs.get("cleanup_paths") or []:
-        try:
-            os.unlink(path)
-        except OSError:
-            try:
-                os.rmdir(path)
-            except OSError:
-                pass
+    _reap_cleanup_paths(mock_start.call_args.kwargs.get("cleanup_paths"))
 
 
 #: The main checkout the sync tests run against. Pinned rather than ambient so the
@@ -6158,6 +6187,8 @@ async def test_sync_pip_uses_target_repo_venv(monkeypatch, tmp_path):
     async def fake_start_run(label, cmd, **kw):
         captured["cmd"] = cmd
         captured["start_run_kw"] = kw
+        # The real run removes these when it ends; the stub must too.
+        _reap_cleanup_paths(kw.get("cleanup_paths"))
         return "rid-1"
 
     monkeypatch.setattr(runtime_mod, "_start_run", fake_start_run)
@@ -8014,6 +8045,8 @@ async def test_sync_builds_and_stages_under_one_lock_holder(monkeypatch, tmp_pat
     monkeypatch.setattr(runtime_mod, "_run_cmd", fake_run_cmd)
 
     async def fake_start_run(label, cmd, **kw):
+        # The real run removes these when it ends; the stub must too.
+        _reap_cleanup_paths(kw.get("cleanup_paths"))
         return "rid-stage"
 
     monkeypatch.setattr(runtime_mod, "_start_run", fake_start_run)

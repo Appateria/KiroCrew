@@ -65,11 +65,26 @@ def _config(tmp_path: Path, *, crew_model: str = "") -> KiroCrewConfig:
     return cfg
 
 
+def _pin_sync_accessors(client) -> None:
+    """Give the provider double's remaining SYNC accessors sync stand-ins.
+
+    ``_runner_state`` pins the context-usage trio; the turn also reads
+    ``mcp_session_report``, ``available_models`` and the inner client's
+    ``pop_pending_oauth_requests`` without ``await``. Left as ``AsyncMock``
+    children each returns a coroutine nobody awaits, reported at garbage
+    collection against whichever later test triggers it.
+    """
+    client.mcp_session_report = unittest.mock.MagicMock(return_value=None)
+    client.available_models = unittest.mock.MagicMock(return_value=[])
+    client.client.pop_pending_oauth_requests = unittest.mock.MagicMock(return_value=[])
+
+
 def _turn_state(tmp_path: Path):
     builder = unittest.mock.MagicMock()
     builder.ensure_store = unittest.mock.AsyncMock(return_value=object())
     builder.build_message.return_value = ("fixture context", None)
     state, client = _runner_state(tmp_path, context_builder=builder)
+    _pin_sync_accessors(client)
     _set_stream(client, [LLMEvent(kind=EVENT_TEXT_CHUNK, text="hi"), _complete()])
     return state, client
 
@@ -294,6 +309,7 @@ class TestEagerSpawnDefaultModel:
     async def test_eager_session_starts_on_the_global_default(self, tmp_path, _runner_config):
         _runner_config(_config(tmp_path))
         state, _client = _runner_state(tmp_path)
+        _pin_sync_accessors(_client)
         slot = _slot()
         state._slots[slot.key] = slot
         state.sessions.release = unittest.mock.MagicMock()
@@ -317,6 +333,7 @@ class TestEagerSpawnDefaultModel:
         """
         _runner_config(_config(tmp_path))
         state, _client = _runner_state(tmp_path)
+        _pin_sync_accessors(_client)
         slot = _slot()
         state._slots[slot.key] = slot
         state.sessions.release = unittest.mock.MagicMock()
