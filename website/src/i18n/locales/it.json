@@ -7084,6 +7084,7 @@
       "auto_default": "Predefinito",
       "credit_multiplier": "{{value}} il costo in crediti di Auto",
       "credit_multiplier_baseline": "{{value}}, il costo in crediti di riferimento",
+      "loading_models": "Caricamento dei modelli…",
       "no_matches": "Nessuna corrispondenza"
     },
     "modelEffortDropdown": {
@@ -7092,6 +7093,7 @@
       "default_for_agent": "Modello predefinito per <agent/>",
       "filter_models": "Filtra i modelli",
       "model_list": "Elenco dei modelli",
+      "models_failed": "Impossibile caricare i modelli dell'istanza.",
       "pin_model_unavailable": "<model/> non è offerto al momento",
       "set_default_for_agent": "Imposta <model/> come modello predefinito per <agent/>",
       "set_default_for_new_sessions": "Predefinito globale per le nuove sessioni…",

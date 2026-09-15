@@ -6981,6 +6981,7 @@
       "auto_default": "डिफ़ॉल्ट",
       "credit_multiplier": "Auto की तुलना में {{value}} क्रेडिट लागत",
       "credit_multiplier_baseline": "{{value}}, आधार क्रेडिट लागत",
+      "loading_models": "मॉडल लोड हो रहे हैं…",
       "no_matches": "कोई मेल नहीं"
     },
     "modelEffortDropdown": {
@@ -6989,6 +6990,7 @@
       "default_for_agent": "<agent/> का डिफ़ॉल्ट मॉडल",
       "filter_models": "मॉडल फ़िल्टर करें",
       "model_list": "मॉडल सूची",
+      "models_failed": "इंस्टेंस के मॉडल लोड नहीं हो सके।",
       "pin_model_unavailable": "<model/> अभी पेश नहीं किया जा रहा है",
       "set_default_for_agent": "<model/> को <agent/> का डिफ़ॉल्ट मॉडल बनाओ",
       "set_default_for_new_sessions": "नए सेशन के लिए ग्लोबल डिफ़ॉल्ट…",

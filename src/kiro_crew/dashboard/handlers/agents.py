@@ -2230,6 +2230,12 @@ async def api_models(request: web.Request) -> web.Response:
         # cron and the liveness heartbeat on exactly the host where the probe is
         # slowest. Both reads run in the worker, so the mode is resolved there
         # too rather than passed in.
+        #
+        # A remote hub proxying this endpoint budgets its WHOLE cold path (the
+        # sandbox detection above plus the list-models subprocess below) via
+        # DEFAULT_MODELS_CAPABILITY_PROXY_TIMEOUT_SECS in
+        # kiro_crew/instances/constants.py — growing any bound here means
+        # moving that constant with it.
         argv, cleanup = await asyncio.get_running_loop().run_in_executor(
             subprocess_executor(), _wrap_list_models_argv, argv
         )

@@ -77,6 +77,9 @@ from kiro_crew.instances.constants import (
 )
 from kiro_crew.instances.constants import DEFAULT_MAX_RECOVERY_ATTEMPTS as _MAX_RECOVERY
 from kiro_crew.instances.constants import DEFAULT_MINT_TIMEOUT_SECS as _DEFAULT_MINT_TIMEOUT_SECS
+from kiro_crew.instances.constants import (
+    DEFAULT_MODELS_CAPABILITY_PROXY_TIMEOUT_SECS as _MODELS_CAPABILITY_PROXY_TIMEOUT,
+)
 from kiro_crew.instances.constants import DEFAULT_PROBE_FAILURE_THRESHOLD as _PROBE_FAILS
 from kiro_crew.instances.constants import DEFAULT_PROBE_INTERVAL_SECS as _PROBE_INTERVAL
 from kiro_crew.instances.constants import (
@@ -2701,7 +2704,13 @@ class SshTunnelManager:
                     else "capability_no_credential"
                 ),
             }
-        timeout = aiohttp.ClientTimeout(total=_CAPABILITY_PROXY_TIMEOUT)
+        # /api/models is the one read whose cold path runs bounded subprocess
+        # work on the peer (~15s worst case), so it gets its own budget; the
+        # four cheap reads keep the short one. See both constants for sizing.
+        total = (
+            _MODELS_CAPABILITY_PROXY_TIMEOUT if path == "/api/models" else _CAPABILITY_PROXY_TIMEOUT
+        )
+        timeout = aiohttp.ClientTimeout(total=total)
         reminted = False
         for _attempt in range(2):
             try:

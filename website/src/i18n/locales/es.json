@@ -7084,6 +7084,7 @@
       "auto_default": "Predeterminado",
       "credit_multiplier": "{{value}} el coste en créditos de Auto",
       "credit_multiplier_baseline": "{{value}}, el coste en créditos de referencia",
+      "loading_models": "Cargando modelos…",
       "no_matches": "Sin coincidencias"
     },
     "modelEffortDropdown": {
@@ -7092,6 +7093,7 @@
       "default_for_agent": "Modelo predeterminado para <agent/>",
       "filter_models": "Filtrar modelos",
       "model_list": "Lista de modelos",
+      "models_failed": "No se pudieron cargar los modelos de la instancia.",
       "pin_model_unavailable": "<model/> no se ofrece en este momento",
       "set_default_for_agent": "Establecer <model/> como modelo predeterminado para <agent/>",
       "set_default_for_new_sessions": "Valor predeterminado global para las nuevas sesiones…",

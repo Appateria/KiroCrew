@@ -6981,6 +6981,7 @@
       "auto_default": "Standard",
       "credit_multiplier": "{{value}} der Credit-Kosten von Auto",
       "credit_multiplier_baseline": "{{value}}, die Basis-Credit-Kosten",
+      "loading_models": "Modelle werden geladen…",
       "no_matches": "Keine Treffer"
     },
     "modelEffortDropdown": {
@@ -6989,6 +6990,7 @@
       "default_for_agent": "Standardmodell für <agent/>",
       "filter_models": "Modelle filtern",
       "model_list": "Modellliste",
+      "models_failed": "Die Modelle der Instanz konnten nicht geladen werden.",
       "pin_model_unavailable": "<model/> wird derzeit nicht angeboten",
       "set_default_for_agent": "<model/> als Standardmodell für <agent/> festlegen",
       "set_default_for_new_sessions": "Globaler Standard für neue Sitzungen…",

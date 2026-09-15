@@ -6878,6 +6878,7 @@
       "auto_default": "デフォルト",
       "credit_multiplier": "Auto のクレジット消費量の {{value}}",
       "credit_multiplier_baseline": "{{value}}、クレジット消費量の基準",
+      "loading_models": "モデルを読み込み中…",
       "no_matches": "一致するものがありません"
     },
     "modelEffortDropdown": {
@@ -6886,6 +6887,7 @@
       "default_for_agent": "<agent/> のデフォルトモデル",
       "filter_models": "モデルをフィルター",
       "model_list": "モデルリスト",
+      "models_failed": "インスタンスのモデルを読み込めませんでした。",
       "pin_model_unavailable": "<model/> は現在提供されていません",
       "set_default_for_agent": "<model/> を <agent/> のデフォルトモデルに設定",
       "set_default_for_new_sessions": "新規セッションのグローバルデフォルト…",

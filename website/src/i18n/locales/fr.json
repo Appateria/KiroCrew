@@ -7084,6 +7084,7 @@
       "auto_default": "Par défaut",
       "credit_multiplier": "{{value}} le coût en crédits d'Auto",
       "credit_multiplier_baseline": "{{value}}, le coût en crédits de référence",
+      "loading_models": "Chargement des modèles…",
       "no_matches": "Aucun résultat"
     },
     "modelEffortDropdown": {
@@ -7092,6 +7093,7 @@
       "default_for_agent": "Modèle par défaut pour <agent/>",
       "filter_models": "Filtrer les modèles",
       "model_list": "Liste des modèles",
+      "models_failed": "Impossible de charger les modèles de l'instance.",
       "pin_model_unavailable": "<model/> n’est pas proposé pour le moment",
       "set_default_for_agent": "Définir <model/> comme modèle par défaut pour <agent/>",
       "set_default_for_new_sessions": "Valeur par défaut globale pour les nouvelles sessions…",

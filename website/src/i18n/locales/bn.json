@@ -6981,6 +6981,7 @@
       "auto_default": "ডিফল্ট",
       "credit_multiplier": "Auto-এর তুলনায় {{value}} ক্রেডিট খরচ",
       "credit_multiplier_baseline": "{{value}}, ভিত্তি ক্রেডিট খরচ",
+      "loading_models": "মডেল লোড হচ্ছে…",
       "no_matches": "কোনো মিল নেই"
     },
     "modelEffortDropdown": {
@@ -6989,6 +6990,7 @@
       "default_for_agent": "<agent/>-এর ডিফল্ট মডেল",
       "filter_models": "মডেল ফিল্টার করুন",
       "model_list": "মডেল তালিকা",
+      "models_failed": "ইনস্ট্যান্সের মডেল লোড করা যায়নি।",
       "pin_model_unavailable": "<model/> এই মুহূর্তে অফার করা হচ্ছে না",
       "set_default_for_agent": "<model/>-কে <agent/>-এর ডিফল্ট মডেল করো",
       "set_default_for_new_sessions": "নতুন সেশনের জন্য গ্লোবাল ডিফল্ট…",

@@ -7187,6 +7187,7 @@
       "auto_default": "По умолчанию",
       "credit_multiplier": "{{value}} от стоимости Auto в кредитах",
       "credit_multiplier_baseline": "{{value}}, базовая стоимость в кредитах",
+      "loading_models": "Загрузка моделей…",
       "no_matches": "Совпадений нет"
     },
     "modelEffortDropdown": {
@@ -7195,6 +7196,7 @@
       "default_for_agent": "Модель по умолчанию для <agent/>",
       "filter_models": "Фильтр моделей",
       "model_list": "Список моделей",
+      "models_failed": "Не удалось загрузить модели экземпляра.",
       "pin_model_unavailable": "<model/> сейчас не предлагается",
       "set_default_for_agent": "Сделать <model/> моделью по умолчанию для <agent/>",
       "set_default_for_new_sessions": "Глобальное значение по умолчанию для новых сессий…",

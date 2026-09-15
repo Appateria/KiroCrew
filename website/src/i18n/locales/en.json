@@ -4739,6 +4739,7 @@
       "auto_default": "Default",
       "credit_multiplier": "{{value}} the credit cost of Auto",
       "credit_multiplier_baseline": "{{value}}, the baseline credit cost",
+      "loading_models": "Loading models…",
       "no_matches": "No matches"
     },
     "modelEffortDropdown": {
@@ -4747,6 +4748,7 @@
       "default_for_agent": "Default model for <agent/>",
       "filter_models": "Filter models",
       "model_list": "Model list",
+      "models_failed": "Couldn't load the remote crew's models.",
       "pin_model_unavailable": "<model/> isn't offered right now",
       "set_default_for_agent": "Set <model/> as default model for <agent/>",
       "set_default_for_new_sessions": "Global default for new sessions…",
