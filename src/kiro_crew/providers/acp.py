@@ -26,6 +26,7 @@ from kiro_crew.acp.session_handle import AcpSessionHandle
 from kiro_crew.acp.session_provider import AcpSessionProvider
 from kiro_crew.acp.types import (
     ACP_BACKEND_CODEX,
+    ACP_BACKEND_GOOSE,
     ACP_BACKEND_KAS,
     ACP_BACKEND_KIRO,
     ACP_BACKEND_OPENCODE,
@@ -41,6 +42,7 @@ from kiro_crew.acp.types import (
     PROVIDER_LABEL_CLAUDE,
     PROVIDER_LABEL_CODEX,
     PROVIDER_LABEL_DEFAULT,
+    PROVIDER_LABEL_GOOSE,
     PROVIDER_LABEL_KAS,
     PROVIDER_LABEL_OPENCODE,
     PROVIDER_LABEL_PI,
@@ -557,6 +559,11 @@ class AcpProvider(LLMProvider):
     def is_pi_backend(self) -> bool:
         """True when this ACP provider talks to pi-acp (vs kiro-cli)."""
         return self._client.backend == ACP_BACKEND_PI
+
+    @property
+    def is_goose_backend(self) -> bool:
+        """True when this ACP provider talks to goose (vs kiro-cli)."""
+        return self._client.backend == ACP_BACKEND_GOOSE
 
     @property
     def is_kas_backend(self) -> bool:
@@ -2029,4 +2036,6 @@ def provider_label(provider: Any) -> str:
         return PROVIDER_LABEL_OPENCODE
     if backend == ACP_BACKEND_PI:
         return PROVIDER_LABEL_PI
+    if backend == ACP_BACKEND_GOOSE:
+        return PROVIDER_LABEL_GOOSE
     return PROVIDER_LABEL_DEFAULT

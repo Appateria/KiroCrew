@@ -19,7 +19,7 @@ import logging
 import math
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from kiro_crew import mcp_apps_render, session_directive
 from kiro_crew.acp.types import (
@@ -58,6 +58,7 @@ from kiro_crew.acp.types import (
     JsonRpcMessage,
     RefusalInfo,
 )
+from kiro_crew.acp_backends import ACP_BACKENDS_META_IDENTITY
 from kiro_crew.metrics.tool_calls import note_tool_call_started, record_tool_call_finished
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 
@@ -1282,8 +1283,16 @@ def _build_tool_call_event(
     # False would let the later permission event read it as a RESOLVED non-shell
     # classification (shell_classified) and skip the low-fidelity downgrade
     # without any classification having actually happened.
-    _kind_resolved = isinstance(update.get("kind"), str) and bool(update.get("kind"))
-    is_shell = is_shell_kind(kind)
+    # Two independent channels answer "is this a command?", and a harness sends one or
+    # the other: an ACP ``kind`` of execute, or its own ``_meta`` naming its builtin
+    # shell. Either counts as RESOLVED, because both are harness-authored -- so a frame
+    # carrying only the meta channel is classified rather than left unknown, and the
+    # permission event that inherits it is not downgraded for a missing ``kind``.
+    _meta_shell = meta_builtin_shell(update)
+    _kind_resolved = (
+        isinstance(update.get("kind"), str) and bool(update.get("kind"))
+    ) or _meta_shell
+    is_shell = is_shell_kind(kind) or _meta_shell
     if tool_call_id and shell_cache is not None and _kind_resolved:
         shell_cache[_ck] = is_shell
     # Capture the TRUSTED MCP server identity (_meta.kiro.mcpServerName) so the
@@ -1802,41 +1811,177 @@ def _build_tool_result_event(update: dict[str, Any], cache_scope: str = "") -> A
     )
 
 
-def _kiro_tool_name(update: dict[str, Any]) -> str:
-    """The real tool name from ``_meta.kiro.toolName``, or "" when absent.
+class _MetaIdentityChannel(NamedTuple):
+    """Where one harness puts the ``(server, tool)`` identity of a tool call.
 
-    The user-visible ``title`` is LLM-authored prose ("Creating task list: …"),
-    so it cannot be used to identify a tool. Only this ``_meta`` channel is
-    stable.
+    A TABLE rather than a per-backend branch, because this is a property of the
+    harness's wire format and not of Crew's control flow: a reader consults every
+    channel and takes the first that answers, so a new harness is one row and no call
+    site learns its name.
+
+    ``nested`` is the sub-object the fields sit under, or ``None`` when they sit
+    directly on the harness's own ``_meta`` block.
+
+    ``strips_server_prefix`` records a harness that spells its tool name as
+    ``<server><sep><tool>``. The deny set and the canonical ``mcp__<server>__<tool>``
+    name both spell the BARE tool, so the prefix is removed here rather than at each
+    comparison -- one place where the two spellings are reconciled.
+    """
+
+    key: str
+    server_field: str
+    tool_field: str
+    nested: str | None = None
+    strips_server_prefix: str = ""
+    #: The ``(server, tool)`` pair, as this channel spells it, that names the harness's
+    #: OWN shell rather than a served MCP tool. A harness that models its builtins as
+    #: extensions reports one under the same fields an MCP call uses, so without this the
+    #: server field reads as "an MCP server served this" on a shell command. Matching it
+    #: means two things at once: the call is a shell command, and it has no MCP server.
+    builtin_shell: tuple[str, str] | None = None
+
+
+#: Harness ``_meta`` channels that carry a trusted tool identity, in read order.
+#:
+#: TRUST CLASS: every entry is HARNESS-emitted, not model-authored -- the same class as
+#: kiro-cli's own ``_meta.kiro``. The harness resolves which server and tool it is about
+#: to run and states it; the model cannot reach these fields, which is exactly why the
+#: user-visible ``title`` (LLM prose) cannot be used for identity and these can.
+#:
+#: kiro-cli sets its pair ONLY for MCP-served calls (``kiro_tool_identity_meta`` in the
+#: engine), and goose sets ``extensionName`` only when an extension served the call, so
+#: in both cases a non-empty server is the discriminator "this was served by MCP" that a
+#: security gate needs to tell a genuine MCP tool from a shell command whose stdout the
+#: model authored.
+_MCP_IDENTITY_META_CHANNELS: tuple[_MetaIdentityChannel, ...] = (
+    _MetaIdentityChannel(
+        key="kiro",
+        server_field="mcpServerName",
+        tool_field="toolName",
+        # Read for identity on kiro-cli and kas alike. Which backends the fail-closed
+        # refusal covers is not this table's question: that is ``ACP_BACKENDS_META_IDENTITY``
+        # in the vocabulary module, and the coverage pin measures each member through
+        # these readers rather than through a per-row claim.
+    ),
+    # goose 1.50.1: ``_meta.goose.toolCall.{extensionName,toolName}``, captured live in
+    # ``test/fixtures/acp_frames/goose/mcp-stdio-mount-live.jsonl``. Its ``toolName`` is
+    # the fused ``<extension>__<tool>`` form it also puts in the title, so the extension
+    # prefix is stripped to leave the bare tool the deny set spells.
+    _MetaIdentityChannel(
+        key="goose",
+        server_field="extensionName",
+        tool_field="toolName",
+        nested="toolCall",
+        strips_server_prefix="__",
+        # goose serves its builtin shell from the ``developer`` extension, captured live
+        # in ``test/fixtures/acp_frames/goose/turn-live.jsonl``. It is the harness's own
+        # tool, not one of Crew's MCP servers, and on the branch Crew selects the frame
+        # carries no ``kind`` -- so this pair is the only thing on the wire that says
+        # "this is a command".
+        builtin_shell=("developer", "shell"),
+    ),
+)
+
+
+def _meta_identity_full(update: dict[str, Any]) -> tuple[str, str, bool]:
+    """``(server, tool, builtin_shell)`` from the first meta channel that answers.
+
+    ``("", "", False)`` when none does. Both identity halves come from ONE channel:
+    mixing a server from one harness's block with a tool name from another's would be an
+    identity no harness asserted.
+
+    A pair matching that channel's :attr:`_MetaIdentityChannel.builtin_shell` is reported
+    with an EMPTY server, because the harness named its own extension there and Crew's
+    consumers read a non-empty server as "an MCP server served this call". Returning the
+    name would make the harness's shell look MCP-served, which is the inverse of what the
+    frame says.
     """
     meta = update.get("_meta")
     if not isinstance(meta, dict):
-        return ""
-    kiro = meta.get("kiro")
-    if not isinstance(kiro, dict):
-        return ""
-    name = kiro.get("toolName")
-    return name if isinstance(name, str) else ""
+        return "", "", False
+    for channel in _MCP_IDENTITY_META_CHANNELS:
+        block = meta.get(channel.key)
+        if not isinstance(block, dict):
+            continue
+        if channel.nested is not None:
+            block = block.get(channel.nested)
+            if not isinstance(block, dict):
+                continue
+        server = block.get(channel.server_field)
+        tool = block.get(channel.tool_field)
+        if not isinstance(tool, str):
+            tool = ""
+        if not isinstance(server, str):
+            server = ""
+        # Matched on the RAW pair, before any prefix reduction: the pair is what the
+        # harness wrote, and the reduction below is Crew's own normalization of a fused
+        # MCP tool name.
+        if channel.builtin_shell is not None and (server, tool) == channel.builtin_shell:
+            return "", tool, True
+        if channel.strips_server_prefix and server and tool:
+            prefix = f"{server}{channel.strips_server_prefix}"
+            if tool.startswith(prefix):
+                tool = tool[len(prefix) :]
+        if server or tool:
+            return server, tool, False
+    return "", "", False
+
+
+def _meta_identity(update: dict[str, Any]) -> tuple[str, str]:
+    """``(server, tool)`` from the first meta channel that answers, else ``("", "")``."""
+    server, tool, _ = _meta_identity_full(update)
+    return server, tool
+
+
+def meta_builtin_server_names() -> frozenset[str]:
+    """The ``server`` half of every channel's builtin-shell pair.
+
+    A harness that models its builtins as extensions names one under the same field an
+    MCP call fills, so these are the identities that are NOT foreign to a session even
+    though Crew never placed them on its server array: they are the harness's own.
+    """
+    return frozenset(
+        channel.builtin_shell[0]
+        for channel in _MCP_IDENTITY_META_CHANNELS
+        if channel.builtin_shell is not None
+    )
+
+
+def meta_builtin_shell(update: dict[str, Any]) -> bool:
+    """True when a harness's own ``_meta`` channel says this call is ITS shell.
+
+    The trusted answer to "is this a command?" on a harness that sends no ACP ``kind``.
+    Same trust class as the identity it sits beside: harness-resolved and unreachable by
+    the model, unlike the ``title`` (a formatter's or the model's prose) and unlike
+    ``rawInput`` (the model's own argument map, copied before the harness parses it).
+    """
+    return _meta_identity_full(update)[2]
+
+
+def _kiro_tool_name(update: dict[str, Any]) -> str:
+    """The real tool name from a harness's own ``_meta`` identity channel, or "".
+
+    The user-visible ``title`` is LLM-authored prose ("Creating task list: …"), so it
+    identifies nothing. Only a ``_meta`` channel is stable, and
+    :data:`_MCP_IDENTITY_META_CHANNELS` holds the ones that exist.
+
+    The ``kiro`` in the name reads as the QUESTION this answers ("what tool is this?")
+    rather than as the harness: every channel in that table is consulted here.
+    """
+    return _meta_identity(update)[1]
 
 
 def _kiro_mcp_server_name(update: dict[str, Any]) -> str:
-    """The MCP server name from ``_meta.kiro.mcpServerName``, or "" for
+    """The MCP server name from a harness's own ``_meta`` identity channel, or "" for
     built-in/shell tools.
 
-    kiro-cli sets this ONLY for MCP-served tool calls (see
-    ``kiro_tool_identity_meta`` in the engine), so a non-empty value is the
-    trusted discriminator "this tool call was served by an MCP server" — the
-    signal a security gate needs to tell a genuine MCP directive tool from a
-    shell command whose stdout the model authored.
+    A non-empty value is the trusted discriminator "this tool call was served by an MCP
+    server" — the signal a security gate needs to tell a genuine MCP directive tool from
+    a shell command whose stdout the model authored. Every channel in
+    :data:`_MCP_IDENTITY_META_CHANNELS` sets it only for a served call, so the emptiness
+    carries the same meaning on each.
     """
-    meta = update.get("_meta")
-    if not isinstance(meta, dict):
-        return ""
-    kiro = meta.get("kiro")
-    if not isinstance(kiro, dict):
-        return ""
-    name = kiro.get("mcpServerName")
-    return name if isinstance(name, str) else ""
+    return _meta_identity(update)[0]
 
 
 def _todo_payload(raw_output: Any) -> dict[str, Any] | None:
@@ -2238,6 +2383,11 @@ __all__ = [
     "make_unified_diff",
     "select_tool_title",
     "is_shell_kind",
+    "meta_builtin_shell",
+    "meta_builtin_server_names",
+    # Re-exported from the vocabulary module for the ~1 ACP-layer consumer, the way the
+    # backend ids at the top of this module already are.
+    "ACP_BACKENDS_META_IDENTITY",
     "redact_text",
     "METHOD_SET_MODE",
     "METHOD_SET_MODEL",
