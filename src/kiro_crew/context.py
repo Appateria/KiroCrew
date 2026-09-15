@@ -4092,8 +4092,15 @@ class ContextBuilder:
 
         _private_owner, _private_template = member_for_store(memory_store, member)
         _native_envelopes: list[str] = []
-        _essentials = (
-            self._build_v2_essentials(
+        _essentials = ""
+        if _private_owner:
+            if hook_result.action == HOOK_MODIFY:
+                _trigger_text = hook_result.text
+            elif user_text_range is not None:
+                _trigger_text = text[user_text_range[0] : user_text_range[1]]
+            else:
+                _trigger_text = text
+            _essentials = self._build_v2_essentials(
                 memory_store,
                 member=member,
                 project=project,
@@ -4103,22 +4110,11 @@ class ContextBuilder:
                 native_documents=native_documents,
                 native_envelope_out=_native_envelopes,
                 execution_template=agent or "kirocrew",
-                trigger_text=(
-                    hook_result.text
-                    if hook_result.action == HOOK_MODIFY
-                    else (
-                        text[user_text_range[0] : user_text_range[1]]
-                        if user_text_range is not None
-                        else text
-                    )
-                ),
+                trigger_text=_trigger_text,
                 conditional_index=context_provider is not None
                 and delivery is not None
                 and not context_provider.native_steering,
             )
-            if _private_owner
-            else ""
-        )
         if _essentials and not is_new_session:
             parts.append(_essentials)
         _member_turn = member_turn_context(

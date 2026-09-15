@@ -135,15 +135,12 @@ class EssentialDelivery:
         if candidate is not None and candidate.envelope not in message:
             candidate = None
         if candidate is not None:
-            replacement = (
-                ""
-                if acknowledged == (identity, candidate.digest, epoch)
-                else (
-                    candidate.native_envelope
-                    if candidate.incarnation == identity and candidate.epoch == epoch
-                    else candidate.envelope
-                )
-            )
+            if acknowledged == (identity, candidate.digest, epoch):
+                replacement = ""
+            elif candidate.incarnation == identity and candidate.epoch == epoch:
+                replacement = candidate.native_envelope
+            else:
+                replacement = candidate.envelope
             message = message.replace(candidate.envelope, replacement, 1)
         productive = False
         completed = False

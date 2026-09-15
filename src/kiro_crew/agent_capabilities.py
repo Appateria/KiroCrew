@@ -95,19 +95,14 @@ def _source(name: str, project: str, *, allow_private: bool = False) -> tuple[Pa
                 raise CapabilityError("private_parent_forbidden")
             from kiro_crew.agent_discovery import _global_agent_info
 
-            source = (
-                "project"
-                if scope == "project"
-                else (
-                    "builtin"
-                    if path.name in OWNED_KIRO_AGENT_FILES
-                    else (
-                        "package"
-                        if _global_agent_info(path, spec).source == "package"
-                        else "custom"
-                    )
-                )
-            )
+            if scope == "project":
+                source = "project"
+            elif path.name in OWNED_KIRO_AGENT_FILES:
+                source = "builtin"
+            elif _global_agent_info(path, spec).source == "package":
+                source = "package"
+            else:
+                source = "custom"
             return (
                 path,
                 spec,
@@ -244,11 +239,17 @@ def resolve_effective(
             conflict = key in overrides.get(section, {})
             needs = _expands(section, old, new)
             selected = (section, key) in (accept or set())
+            if old is None:
+                kind = "added"
+            elif new is None:
+                kind = "removed"
+            else:
+                kind = "changed"
             changes.append(
                 {
                     "section": section,
                     "id": key,
-                    "kind": "added" if old is None else "removed" if new is None else "changed",
+                    "kind": kind,
                     "conflict": conflict,
                     "requires_approval": needs,
                     "before": old,
@@ -741,6 +742,12 @@ class CapabilityService:
             descriptor = (intent or {}).get(
                 "parent", {"name": parent_name, "scope": "global", "source": "unknown"}
             )
+        if intent:
+            mode = "inherited"
+        elif lineage:
+            mode = "legacy_snapshot"
+        else:
+            mode = "shared"
         snapshot = {
             "member": member,
             "target": target,
@@ -752,7 +759,7 @@ class CapabilityService:
             "intent": intent,
             "catalog": catalog,
             "project": project,
-            "mode": "inherited" if intent else "legacy_snapshot" if lineage else "shared",
+            "mode": mode,
             "error": error,
             "binding": binding_data,
             "connections": connections,
@@ -972,16 +979,18 @@ class CapabilityService:
                 keys.setdefault(section)
             for key in keys:
                 override = overrides.get(section, {}).get(key)
+                if not override:
+                    state = "inherited"
+                elif override["action"] == "remove":
+                    state = "removed"
+                else:
+                    state = "local"
                 output.append(
                     {
                         "section": section,
                         "id": key,
                         "label": key,
-                        "state": (
-                            "inherited"
-                            if not override
-                            else "removed" if override["action"] == "remove" else "local"
-                        ),
+                        "state": state,
                         "present": key in rows[section],
                         "value": rows[section].get(
                             key, "" if section in ("prompt", "model") else None
@@ -1111,16 +1120,18 @@ class CapabilityService:
                 for key in dict.fromkeys([*old[section], *new[section]]):
                     before, after = old[section].get(key), new[section].get(key)
                     if before != after:
+                        if before is None:
+                            change = "added"
+                        elif after is None:
+                            change = "removed"
+                        else:
+                            change = "changed"
                         impact.append(
                             {
                                 "member": current["member"],
                                 "section": section,
                                 "id": key,
-                                "change": (
-                                    "added"
-                                    if before is None
-                                    else "removed" if after is None else "changed"
-                                ),
+                                "change": change,
                                 "approval_expanded": section in ("allowedTools", "autoApprove")
                                 and after is not None,
                             }
