@@ -881,7 +881,7 @@ modes, heartbeat maintenance ticks) never call a model and must not write a row.
 produced by `context_blocks.split_blocks(prompt, user_chars=…)`, which attributes
 the FINAL assembled prompt to the blocks that produced it by matching the bracket
 markers the assembly emits (`[CRITICAL RULES`, `[Memory`, `[Skills:]`,
-`[USER PROFILE]`, `[UI LANGUAGE]`, `[CURRENT USER REQUEST`,
+`[USER PROFILE]`, `[UI LANGUAGE]`, `[RESPONSE PREFERENCES`, `[CURRENT USER REQUEST`,
 `[REPLY FORMAT RULES]`, …) rather than counting at each of the ~30 append sites.
 Reading the OUTPUT means the attribution cannot drift from what was actually
 sent. `_MARKERS` is deliberately kept in sync with EVERY opener the assembly can
