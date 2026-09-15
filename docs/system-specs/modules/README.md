@@ -77,7 +77,7 @@ agent loads only the one it needs.
 | [slack-gateway.md](slack-gateway.md) | The Slack gateway, its event dispatch, Block Kit rendering, and the `action::` inline-action value protocol. |
 | [stt-streaming.md](stt-streaming.md) | Live dictation in the composer: the three providers, the WebSocket frames, the local recognizer's endpointing and partial pipeline, and the model download. |
 | [voice-streaming.md](voice-streaming.md) | Streaming voice replies, and the text normalization applied before synthesis. |
-| [turn-complete-chime.md](turn-complete-chime.md) | The end-of-turn audio cue, and what the policy deliberately does not inspect. |
+| [turn-complete-chime.md](turn-complete-chime.md) | Audio when a conversation stops or requires input, with intermediate work kept quiet. |
 
 ## Apps and UI surfaces
 

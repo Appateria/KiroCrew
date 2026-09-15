@@ -99,6 +99,7 @@ from kiro_crew.dashboard.chat_utils import (
     _redact_meta_for_role,
     _remove_queued_by_id,
     _sync_dashboard_slots,
+    chat_done_payload,
     effective_session_key,
     history_corpus_unreadable,
     slot_history_key,
@@ -1015,7 +1016,7 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
                     t.cancel()
         stop_msg = "🛑 [SYSTEM] Orchestration stopped by user."
         append_and_surface(state, slot, "assistant", stop_msg, "msg msg-a")
-        state.broadcast_ws("chat_done", {"slot": slot.key})
+        state.broadcast_ws("chat_done", chat_done_payload(state, slot))
         return web.json_response({"ok": True, "stopped": True})
 
     # ── Reset rounds after user guidance (not a stop) ───────────────

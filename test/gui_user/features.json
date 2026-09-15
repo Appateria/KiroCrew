@@ -6466,7 +6466,7 @@
       "title": "Override sound per notification category",
       "user_story": "As a dashboard user, I want to choose a different sound for Approval or Cron notifications, so that I can tell them apart by ear.",
       "start_url": "/settings/notifications",
-      "entry_path": "Settings > Notifications > category selects (Agent replies, Approval, Cron, Subagent, Tasks, Webhook, Skills, Heartbeat)",
+      "entry_path": "Settings > Notifications > category selects (Conversation handoffs, Approvals and questions, Cron, Subagent, Tasks, Webhook, Skills, Heartbeat)",
       "preconditions": {
         "seed": "minimal",
         "members": [],

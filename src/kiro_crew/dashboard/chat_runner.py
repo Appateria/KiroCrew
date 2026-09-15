@@ -106,6 +106,7 @@ from kiro_crew.dashboard.chat_utils import (
     _remove_queued_by_id,
     _validate_tool_name,
     build_recovery_requeue,
+    chat_done_payload,
     chunk_generation,
     effective_session_key,
     expire_slack_options,
@@ -6290,7 +6291,7 @@ def _finish_queue_cycle(
     slot.append("done", "", "done")
     slot.task = None
     state.push_slots_update()
-    state.broadcast_ws("chat_done", {"slot": slot.key})
+    state.broadcast_ws("chat_done", chat_done_payload(state, slot))
     # The turn that just finished is the most likely moment for this session's
     # PRs to have moved (opened, pushed, merged, reviewed), so re-read their
     # status now instead of leaving the sidebar chips on TTL rotation and the
@@ -6419,7 +6420,7 @@ async def _run_chat(
             "msg msg-err",
         )
         try:
-            state.broadcast_ws("chat_done", {"slot": slot.key})
+            state.broadcast_ws("chat_done", chat_done_payload(state, slot))
         except Exception:  # pragma: no cover - unblock is best-effort
             logger.debug("chat_done broadcast failed for refused remote slot", exc_info=True)
         return
@@ -11405,7 +11406,7 @@ async def _run_chat(
             assistant_text = ""
             _wsred.reset()
             _produced_visible_output = True
-            state.broadcast_ws("chat_done", {"slot": slot.key})
+            state.broadcast_ws("chat_done", chat_done_payload(state, slot, continuing=True))
 
             # claude-agent-acp performs /compact synchronously inside session/prompt;
             # there is no out-of-band _kiro.dev/compaction/status notification, so

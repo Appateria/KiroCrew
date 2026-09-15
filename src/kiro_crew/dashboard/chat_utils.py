@@ -804,6 +804,48 @@ def subagents_attached(
     return bool(running is None or running or queued or inflight)
 
 
+def chat_done_payload(
+    state: DashboardState, slot: _ChatSlot, *, continuing: bool = False
+) -> dict[str, Any]:
+    """Describe whether a turn boundary actually hands the floor to the user.
+
+    Slot snapshots are coalesced, so a sound decision cannot use stale
+    child/plan state from the browser when this frame arrives. Read the same
+    attached-child guard that protects session teardown, including queued spawns
+    and results still being delivered. This is a notification hint only; it never
+    changes dispatch, transcript finalization, or the slot's running state.
+    """
+    # Avoid a circular import: autonudge's slot lookup imports dashboard.state.
+    from kiro_crew.autonudge import get_instance
+
+    try:
+        service = get_instance()
+        loop = service.get_by_slot(slot.key) if service is not None else None
+        workflows = getattr(state, "workflow_service", None)
+        continuing = bool(
+            continuing
+            or slot._in_stage_execution
+            or slot._pending_synthesis
+            or (slot.queue_depth and not slot._last_turn_auth_required)
+            or subagents_attached(state, slot, effective_session_key(slot), "completion_sound")
+            or (
+                workflows is not None
+                and workflows.registry.has_pending_work_for(effective_session_key(slot))
+            )
+            or (loop is not None and loop.active)
+        )
+    except Exception:
+        # Unknown activity must not announce a finished conversation, but a
+        # notification failure must never prevent the terminal frame itself.
+        logger.warning("Completion activity unavailable for slot %s", slot.key, exc_info=True)
+        continuing = True
+    return {
+        "slot": slot.key,
+        "continuing": continuing,
+        "needs_input": bool(slot._question_pending),
+    }
+
+
 def wire_session_subagent_probe(state: DashboardState) -> None:
     """Hand ``SessionManager`` the sub-agent probe its RSS ceiling consults.
 

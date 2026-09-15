@@ -2994,7 +2994,9 @@ class TestFinishQueueCycle:
         assert slot.messages[-1]["role"] == "done"
         assert slot.task is None
         state.refresh_slot_source_status.assert_called_once_with(slot.key)
-        state.broadcast_ws.assert_any_call("chat_done", {"slot": slot.key})
+        state.broadcast_ws.assert_any_call(
+            "chat_done", {"slot": slot.key, "continuing": False, "needs_input": False}
+        )
 
 
 class TestTtftMetric:

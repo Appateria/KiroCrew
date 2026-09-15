@@ -17,6 +17,8 @@ import { reportVoiceFailure } from '../lib/voiceFailure'
 import {
   fetchHistory, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, refreshSlot, warmSlotCache, sseContextUsage, clearMessages, clearSlotCache, setVoicePlaying, setVoiceAudio, resolveByApprovalId, clearSubagentsForSnapshot, sseSubagentPending, sseSubagentSpawn, sseSubagentQueued, sseSubagentTool, sseSubagentStalled, sseSubagentRetrying, sseSubagentDone, sseSubagentSnapshot, sseSubagentBatchUpdate, sseSubagentBatchChunks, sseToolActivity, sseToolResult, sseActivityEvent, sseSideResult, sseWorkflowEvent, setSlotStatusDetail, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage, reorderQueuedMessages, appendSlotMessage, setQuestionCard, resolveQuestionCard, setFollowupCard, setFolderSuggestion, sseMcpAppRender, setAutomations, sseAutomation, removeAutomation, sseSideQueue, reconcileWorkflowRuns,
 } from '../store/chatSlice'
+import { selectSidebarSubagentCounts, selectSidebarWorkflowActive, selectSidebarAutomationRunningKeys } from '../store/chatSlice'
+import { normalizeRunSessionKey } from '../apps/workflows/runModel'
 import { anchorForSlot, loadLayout, sessionSlots } from './splitLayoutStore'
 import { TAB_ID } from '../api/tabId'
 import { api } from '../api/client'
@@ -1772,13 +1774,19 @@ export function useWebSocket() {
             // tool_call_id; ToolCallLine mounts an McpAppFrame below the row.
             dispatch(sseMcpAppRender(data as Parameters<typeof sseMcpAppRender>[0]))
             break
-          case 'question_card':
-            // `fresh` marks a LIVE ask delivery: even if its payload repeats
-            // the identical question, it must get its own delivery identity
-            // (cardId) — unlike the reconnect re-sync above, which re-dispatches
-            // a still-pending card and must keep the existing entry.
+          case 'question_card': {
+            const previous = store.getState().chat.pendingQuestions?.[data.slot]
+            // `fresh` marks a live delivery and preserves the card's existing
+            // identity/rehydration contract. Audio deduplicates by server id.
             dispatch(setQuestionCard({ ...(data as Parameters<typeof setQuestionCard>[0]), fresh: true }))
+            const current = store.getState().chat.pendingQuestions?.[data.slot]
+            const id = data.ask_id || data.card_id
+            if (current?.slot === data.slot && !reconnectingRef.current
+                && (!id || identityOf(previous) !== id)) {
+              dispatchMcNotification(APPROVAL_KIND)
+            }
             break
+          }
           case 'question_card_resolved': {
             const ask = data as { ask_id?: string; card_id?: string }
             // Recorded independently of local state: a resolution can arrive for
@@ -2043,7 +2051,10 @@ export function useWebSocket() {
           case 'chat_variant_switch':
             if (data.slot) dispatch(refreshSlot(data.slot))
             break
-          case 'chat_done':
+          case 'chat_done': {
+            let completionNeedsAttention = false
+            let completionNeedsInput = false
+            let questionPending = false
             flushChunks()
             if (data.slot) chunkBufRef.current.delete(data.slot)
             // Consume the tail while the streaming row still carries the same
@@ -2055,36 +2066,61 @@ export function useWebSocket() {
               if (last) flushVoiceTail(data.slot, last)
             }
             dispatch(sseChatMessage({ ...data, role: '_done' }))
-            // Turn-complete chime: sound-only (no feed entry, and no toast of
-            // its own — the opt-in one below is a separate branch on its own
-            // gate). Plays on every real turn completion — active or background
-            // chat — and never during reconnect catch-up replay.
-            // Preset/volume/mute resolve in useNotificationSound via the
-            // 'turn' category.
-            if (shouldChimeOnTurnDone({
-              slot: data.slot,
-              reconnecting: reconnectingRef.current,
-            })) {
-              dispatchMcNotification(TURN_DONE_KIND)
+            // Keep transcript finalization independent from attention: a parent
+            // can finish a turn while its children or workflow still owe work.
+            // A frame's activity hint wins over coalesced snapshots; older
+            // frames fall back to the existing per-session activity selectors.
+            if (data.slot) {
+              const soundState = store.getState()
+              const soundSlot = soundState.dashboard.slots.find(s => s.key === data.slot)
+              const workflows = selectSidebarWorkflowActive(soundState)
+              const workflowActive = !!(
+                workflows[normalizeRunSessionKey(data.slot)]
+                || (soundSlot?.linked_session_key && workflows[normalizeRunSessionKey(soundSlot.linked_session_key)])
+              )
+              const continuing = data.continuing ?? !!(
+                workflowActive
+                || selectSidebarSubagentCounts(soundState)[data.slot]
+                || soundSlot?.subagents_running
+                || soundSlot?.orchestrating
+                || (soundSlot?.queue_depth ?? 0) > 0
+                || selectSidebarAutomationRunningKeys(soundState).includes(dashboardAutomationSlotKey(data.slot))
+              )
+              questionPending = !!soundState.chat.pendingQuestions?.[data.slot]
+              // An authoritative frame hint (explicit question, manual Go) or a
+              // live question card both mean the conversation paused for the
+              // user rather than finished; the toast wording reads this too.
+              completionNeedsInput = data.needs_input === true || questionPending
+              completionNeedsAttention = shouldChimeOnTurnDone({
+                slot: data.slot,
+                reconnecting: reconnectingRef.current,
+                continuing,
+                needsInput: completionNeedsInput,
+              })
+              // A live question card already requested audio. Keep its named
+              // desktop toast eligible, but do not request a second chime.
+              if (completionNeedsAttention && !questionPending) dispatchMcNotification(TURN_DONE_KIND)
             }
-            // Opt-in native toast, default OFF, and gated on the user being
-            // AWAY — deliberately not the chime's gate, which ignores focus so
-            // every turn is audible. Titled with the finishing session so a
-            // user tracking several background threads learns which one is
-            // done; `tag` is per-slot so concurrent completions coalesce per
-            // session instead of overwriting one another.
-            if (shouldNotifyOnChatComplete({
+            // Native notifications can carry an OS sound too, so they share
+            // the attention gate before applying the opt-in and away checks.
+            if (completionNeedsAttention && shouldNotifyOnChatComplete({
               slot: data.slot,
               reconnecting: reconnectingRef.current,
             })) {
               const doneSlot = data.slot as string
               const doneTitle = store.getState().dashboard.slots
                 .find(s => s.key === doneSlot)?.title || doneSlot
+              // A toast that reads "Response ready" while the agent is waiting
+              // on the user misdescribes the handoff; two literal keys keep the
+              // reference statically checkable (see check-i18n-keys.mjs).
+              const doneBody = completionNeedsInput
+                ? i18nT('hooks.useWebSocket.waiting_for_input')
+                : i18nT('hooks.useWebSocket.response_ready')
               // Android Chrome throws "Illegal constructor" for page-context
               // Notification; an uncaught throw here kills the whole message
               // handler, so the native toast is best-effort (same as approval).
               try {
-                new Notification(doneTitle, { body: i18nT('hooks.useWebSocket.response_ready'), tag: `kirocrew-chat-done:${doneSlot}` })
+                new Notification(doneTitle, { body: doneBody, tag: `kirocrew-chat-done:${doneSlot}`, silent: questionPending })
               } catch {
                 /* unsupported platform */
               }
@@ -2153,6 +2189,7 @@ export function useWebSocket() {
               api.voiceConfig().then(c => { autoSpeakRef.current = !!c.autoSpeak }).catch(() => {})
             }
             break
+          }
           case 'autonudge_state': {
             // One transport path feeds the authoritative collection consumed by
             // both the sidebar and active-slot detail surface.
