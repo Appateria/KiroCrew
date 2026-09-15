@@ -541,3 +541,52 @@ an anti-pattern outright. Both current implementations share this deviation, and
 it is not resolved here: the change is larger than this consolidation and belongs
 in its own proposal. It is recorded so a reader does not mistake the omission for
 an argument that same-session wakes are correct.
+
+## The two arming tools read in the wrong order, and the names stay
+
+`monitor_start` arms the in-session timer. `monitor_watch` arms the observation-gated
+probe. Read cold, that is backwards: `start` is the generic primary verb, so the older
+timer reads as the default way to arm a monitor and the newer, cheaper, zero-token
+probe reads as a variant of it. A reader picking by name picks the expensive one.
+`patrol` would say what the timer actually does -- a watch waits and reports when a
+fact changes, a patrol walks the route every interval whether or not anything did --
+and the shipped conductor prompts already use that word for it.
+
+The names stay anyway, and the reason is worth more than the fix would have been.
+
+**A published tool name is a key that other people's persisted records were written
+against, and every one of those records is a decision that silently changes meaning
+when the key changes.** Restrictions are the dangerous half: a persisted rule naming
+a tool that no longer exists does not fail loudly, it stops matching. The capability
+the operator switched off comes back on, and nothing at the call site says so.
+
+Kiro Crew resolves tool restrictions at several name-keyed surfaces, at different
+lifecycle stages, in different shapes:
+
+| Site | Lifecycle stage | Shape | Reachable from code |
+|---|---|---|---|
+| `mcp_shared._resolve_excluded_tools` | per call, cached per session | flat name set from `managedToolPolicy.exclude` | yes |
+| the same function's fail-open returns | before the exclude list is parsed | returns an empty set | nothing to migrate; withholds every exclusion equally |
+| `acp/kas_agents.to_client_custom_agent` | startup projection, before the session exists | `excludedTools` list relayed to the agent host | yes |
+| `acp/session_mcp.session_mcp_disabled_tools` | session projection: Claude `permissions.deny`, codex `rawInput.server`/`tool` | `(server, tool)` pairs, unioned from the agent spec AND the dashboard-written global `mcp.json` | yes |
+| `agent._WORKER_MIRRORED_SHAPES` | derive-time copy | copies the persisted key | copies rather than resolves, so a rewrite here would alter a user's stored value |
+| `GET /api/session-tool-policy` | on request | the raw persisted rule | deliberately raw, so an operator can see a stale spelling and re-key it |
+| a hand-written block in an on-disk profile | the backend reads the file itself | unknown to this repo | **no** |
+
+The last row is what settles it. `acp/kas_agents.py` states the boundary: a
+hand-written block "is not ignored, just not Crew's to relay: it lives in the profile
+on disk, which the backend reads itself when Crew is not injecting an agent over the
+wire." No code here composes that file, so no migration can expand a retired name in
+it and nothing can warn the operator holding one.
+
+So the best achievable end state for renaming a published tool is a known silent
+fail-open that cannot be closed -- not a step on the way to a complete job, but the
+complete job's residue. A rename of a published name is therefore a policy migration
+with a permanent remainder, not a legibility change, and it should be priced that way
+before it is approved rather than discovered one surface at a time.
+
+Weighed against that: the mispick this rename would prevent has not been observed.
+
+What remains available, because none of it is name-keyed: the tool descriptions, this
+spec, and the prompts that choose between the two. A caller reading `monitor_start`'s
+description learns it is the timer without the name having to carry it.
