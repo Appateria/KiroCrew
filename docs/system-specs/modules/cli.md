@@ -602,6 +602,27 @@ All write paths emit SEL audit events (`config_get`, `config_set`, `config_set_f
 
 `kirocrew gateway` creates `~/.kiro/crew/config.json` with defaults if the file doesn't exist. Does nothing if it already exists.
 
+## Secrets Command
+
+`kirocrew secrets` maintains the encrypted secret vault. The vault's
+store/list/delete surface is the dashboard **Settings → Secrets** tab (the
+`/api/secrets` routes); the CLI carries only the migration importer:
+
+- **import** — migrate plaintext credential lines from the data-home `.env`
+  into the vault. Dry-run by default (reports what *would* migrate, changes
+  nothing); pass `--apply` to store the secret(s) and rewrite each migrated
+  `.env` line to a `secret://KEY` reference. Only the Jira credential keys the
+  vault-aware consumer reads are migrated (`JIRA_API_TOKEN` and per-host
+  `JIRA_TOKEN_<HEX>`); every other key is left untouched. There is no `--file`
+  option — the importer reads only the data-home `.env`, so a caller cannot
+  point it at an attacker-controlled file.
+
+Once stored, a secret is referenced from `mcp.json` as `secret://NAME` and
+resolved into the bound server's environment at spawn time. See
+[secrets-env.md](../../guides/secrets-env.md) for the end-to-end flow. Secret
+values are write-only — there is deliberately no command that reads a stored
+value back.
+
 ## Verbosity
 
 | Flag | Level | What you see |
