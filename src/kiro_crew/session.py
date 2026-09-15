@@ -64,7 +64,7 @@ Four mechanisms clean up processes. They are complementary — not redundant.
    unless explicitly killed.
 
 2. ``_cleanup_orphaned_mcp_servers()`` — **periodic** (every ~5 min).
-   Reads ``kiro_pids.txt`` (child:parent pairs). Kills children whose parent
+   Reads ``kiro_pids.txt`` (child:parent[:start-id] entries). Kills children whose parent
    is confirmed dead. PPid-based reuse guard prevents killing recycled PIDs.
    Also prunes dead bare PIDs. *Depends on (1)* — children are only orphaned
    after their sandbox root is killed.

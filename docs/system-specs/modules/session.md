@@ -1683,15 +1683,35 @@ session dies, `killpg` only reaches the kiro-cli process group — MCP servers
 in other groups get reparented to init and leak memory.
 
 **Tracking**: at session init, `AcpClient.ensure_ready()` snapshots all
-descendant PIDs and persists them to `kiro_pids.txt` as `child_pid:parent_pid`
-pairs via `_track_child_pids(pids, parent_pid=self._pid)`.  On clean shutdown,
+descendant PIDs and persists them to `kiro_pids.txt` as
+`child_pid:parent_pid[:start-id]` entries via
+`_track_child_pids(pids, parent_pid=self._pid)`; the third field is the
+child's process-start identity (`_pid_start_token`, colon-free, in-process
+and non-blocking on every platform), omitted only when unreadable at track
+time.  On clean shutdown,
 `_reset_state()` removes them via `_untrack_child_pids()`.  If the gateway
 crashes, the entries remain in the file for the next startup.
 
 **Detection**: reads `kiro_pids.txt`, processes only `child:parent` lines
 (bare PID lines are kiro-cli parents handled by `cleanup_orphaned_sessions()`).
 If the child is alive but its parent PID is dead, the child is orphaned and
-killed.
+killed.  Two guards run first.  The start identity (entries carrying the
+start-id field) is subtractive evidence: a live `_pid_start_token` that
+differs from the recorded one proves the PID was recycled, and the stale
+entry is pruned without killing.  A matching or unreadable token never
+authorizes the kill by itself -- the tracking file is same-uid-writable, so
+a forged line must not aim the sweep at an arbitrary process.  The kill is
+authorized only by the reparent heuristic: a genuine orphan reparented to
+init (pid 1), or still showing the dead parent's PID (kill/reparent race),
+is killed outright, while a PPid in the same-uid `systemd --user` subreaper
+set -- the same accepted-parent set `_our_orphan_pids()` uses, computed by
+the shared `_accepted_subreaper_pids()` -- additionally requires BOTH the
+`KIROCREW_SPAWNED` environ marker AND positive runtime argv identity
+(`_tracked_child_has_runtime_identity`: managed agent runtime, MCP
+entrypoint, or marked launcher shape; unreadable argv fails closed), because
+every manager-started user service holds the manager's PID as its PPid for
+its whole life and the marker is tree-wide, inherited even by intentional
+survivors.  Any other PPid means recycled: pruned without killing.
 
 **Why not ancestor walk?** MCP servers are spawned in separate process groups
 and immediately reparented to init (ppid=1) even while the session is alive.

@@ -7248,7 +7248,13 @@ class AcpClient:
         if self._child_pids:
             from kiro_crew.session import _track_child_pids
 
-            _track_child_pids(self._child_pids, parent_pid=self._pid or 0)
+            # Exclusive file lock + read-modify-append + per-child start-id
+            # reads -- blocking syscalls that must not run on the event loop.
+            # Ride the same executor as the twin call site in _spawn().
+            await _loop.run_in_executor(
+                subprocess_executor(),
+                functools.partial(_track_child_pids, self._child_pids, parent_pid=self._pid or 0),
+            )
             logger.info("Tracked %d descendant PIDs for PID %d", len(self._child_pids), self._pid)
 
     async def _kill_process(self, *, force: bool = False) -> None:
