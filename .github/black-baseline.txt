@@ -153,7 +153,6 @@ src/kiro_crew/channel_history.py
 src/kiro_crew/channel_transcript_migration.py
 src/kiro_crew/cli_cloud.py
 src/kiro_crew/cli_desktop.py
-src/kiro_crew/cloud/connect.py
 src/kiro_crew/cloud/ec2.py
 src/kiro_crew/cloud/launch_engine.py
 src/kiro_crew/cloud/launch_job.py
@@ -464,7 +463,6 @@ test/test_cli_doctor.py
 test/test_cli_lazy_imports.py
 test/test_cli_logging.py
 test/test_close_guard_parity.py
-test/test_cloud_connect.py
 test/test_cloud_ec2.py
 test/test_cloud_handlers.py
 test/test_cloud_launch_job.py

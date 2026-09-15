@@ -2444,6 +2444,20 @@ class TestHandlers:
         assert len(b["instances"]) == 3
         assert b["warm_set_cap"] == 3
 
+    def test_automatic_cap_serves_ten_and_then_stops_growing(self, tmp_path, monkeypatch):
+        from kiro_crew.dashboard import handlers_instances as handlers
+
+        _enable(tmp_path, monkeypatch)
+        reg = self._reg(tmp_path)
+        for index in range(11):
+            reg.add(name=f"crew-{index}", ssh_host=f"crew-{index}")
+        state = _State(reg, _ConnectedMgr([]))
+
+        body = _body(asyncio.run(handlers.api_instances_list(_FakeReq(state))))
+
+        assert len(body["instances"]) == 11
+        assert body["warm_set_cap"] == 10
+
     def test_adding_a_crew_widens_the_served_cap(self, tmp_path, monkeypatch):
         """Otherwise every new crew has to be paired with a config edit.
 
@@ -3459,6 +3473,45 @@ class TestHandlers:
         )
         assert r.status == 200 and _body(r)["name"] == "Renamed"
         assert mgr.disconnected == []
+
+    def test_rename_persists_in_instances_json_and_survives_reload(self, tmp_path, monkeypatch):
+        from kiro_crew.dashboard import handlers_instances as handlers
+        from kiro_crew.instances.registry import InstancesRegistry
+
+        _enable(tmp_path, monkeypatch)
+        path = tmp_path / "instances.json"
+        reg = InstancesRegistry(path=path)
+        reg.add(name="Old name", ssh_host="crew-host", instance_id="crew-1")
+        state = _State(reg)
+
+        response = asyncio.run(
+            handlers.api_instances_update(
+                _FakeReq(state, match={"id": "crew-1"}, body={"name": "New name"})
+            )
+        )
+
+        assert response.status == 200
+        assert _body(response)["name"] == "New name"
+        assert InstancesRegistry(path=path).get("crew-1").name == "New name"
+
+    def test_blank_rename_is_rejected_without_changing_the_stored_name(self, tmp_path, monkeypatch):
+        from kiro_crew.dashboard import handlers_instances as handlers
+        from kiro_crew.instances.registry import InstancesRegistry
+
+        _enable(tmp_path, monkeypatch)
+        path = tmp_path / "instances.json"
+        reg = InstancesRegistry(path=path)
+        reg.add(name="Keep me", ssh_host="crew-host", instance_id="crew-1")
+
+        response = asyncio.run(
+            handlers.api_instances_update(
+                _FakeReq(_State(reg), match={"id": "crew-1"}, body={"name": "   "})
+            )
+        )
+
+        assert response.status == 400
+        assert _body(response)["code"] == "instance_invalid"
+        assert InstancesRegistry(path=path).get("crew-1").name == "Keep me"
 
     def test_remove_success_and_404(self, tmp_path, monkeypatch):
         from kiro_crew.dashboard import handlers_instances as handlers
@@ -5678,6 +5731,7 @@ class TestSsmRegistry:
             aws_profile="dev",
             aws_region="eu-west-2",
             remote_port=7777,
+            provisioner_id="aws_ec2",
         )
         assert inst.connection_method == "ssm"
         assert inst.ssm_target == "i-0123456789abcdef0"
@@ -5686,6 +5740,7 @@ class TestSsmRegistry:
         reloaded = self._reg(tmp_path).get(inst.id)
         assert reloaded.connection_method == "ssm"
         assert reloaded.ssm_target == "i-0123456789abcdef0"
+        assert reloaded.provisioner_id == "aws_ec2"
 
     def test_ssm_requires_target_and_ssh_requires_host(self, tmp_path):
         from kiro_crew.instances.registry import InvalidInstanceError
