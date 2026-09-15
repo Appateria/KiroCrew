@@ -2738,10 +2738,14 @@ operator may confirm application in the dashboard, while the agent can inspect
 only from a later user/wake turn. `monitor_inspect` alone is a direct read: it
 requires a
 strict authenticated session key and reports unavailable rather than using
-ancestor fallback. Inspect, structured stop, its directive consumer, and the
-strict-internal session read all use the narrower structured binding resolver,
-so a Webex key that remains valid for finite legacy loops cannot reach a
-structured record. Internal read failures carry the MCP failure marker and are
+ancestor fallback. `monitor_inspect` and `monitor_stop` resolve the general
+nudge binding, so both reach whichever shape the session's loop holds and a
+Webex key valid for finite legacy loops reaches them too. Inspect returns the
+structured record when one exists and the legacy presence/cadence reading under
+`autonudge_loop` otherwise; stop routes by the resolved loop's shape. Only
+`monitor_watch`, `monitor_update`, and the strict-internal structured create/update
+path keep the narrower structured resolver, since structured wake delivery is
+unavailable on Webex. Internal read failures carry the MCP failure marker and are
 audited as failed rather than completed. Changing target/objective clears comparison, decision, and
 wake baselines and increments the durable configuration generation; a probe result is
 discarded if the captured generation no longer matches. Target/objective edits
@@ -2756,9 +2760,13 @@ credentials for the newly selected subject.
 Budget updates remain sparse through REST/directive authorization and merge with
 the current budget record only while holding the service lock, so independent
 concurrent edits cannot replace one another with values from stale snapshots.
-Terminal records are read-only. `monitor_stop` records `user_stop`; legacy
-`autonudge_stop` delegates to that durable outcome only when the record is
-structured. An optional stop reason is credential-redacted, bounded, and
+Terminal records are read-only. A stop routes by the resolved loop's shape, and
+`monitor_stop` and `autonudge_stop` share one resolve-and-route implementation so
+the two never diverge. A structured record is retained with a `user_stop`
+outcome for later inspection; a legacy timer loop is removed (a research-owned
+slot is deactivated with a tombstone reason) and leaves nothing behind, so a
+stop of a legacy loop cannot be inspected afterward and `monitor_inspect` then
+reports it as not armed. An optional stop reason is credential-redacted, bounded, and
 retained separately as `user_stop_reason`; it never replaces the stable
 machine-readable `stopped_reason`. When the directive is consumed by an in-flight structured action,
 the record becomes inactive and terminal immediately but retains that wake's

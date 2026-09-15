@@ -811,8 +811,9 @@ answers `tools/list` from):
   the tool is called when earlier facts or experiences are needed. Owner-selected copying is a dashboard action, not an MCP
   capability. The full contract is in
   [memory](../system-specs/modules/memory-skills-hooks.md#member-memory-experience-and-lifecycle).
-- **Structured monitor read:** `monitor_inspect` (strict authenticated session
-  identity only; no ancestor fallback)
+- **Monitor read:** `monitor_inspect` (strict authenticated session
+  identity only; no ancestor fallback; reports a structured monitor or a legacy
+  timer loop's presence reading, whichever the session holds)
 - **Crew routing:** `select_crew`
 - **Sessions and history:** `list_sessions`, `get_chat_session`,
   `search_chat_history`
