@@ -7406,9 +7406,13 @@ function ChatSidebar({
               <span id={bulkSkipRunningLabelId}>{i18nT('pages.chatSidebar.skip')} {i18nT('pages.chatSidebar.running_session', { count: bulkRunningCount })}</span>
             </label>
           )}
+          {/* No hand-off: the chosen bulkModel/skipRunning selection is unsaved,
+              and the navigation would discard it. Its own line, above the
+              Cancel/Switch pair: a third control in that row would break
+              max-two-buttons-per-row, and an inline notice sharing the row
+              collapses to one character per line at sidebar width. */}
+          <ErrorNotice message={bulkModelError} className="mb-2" testId="bulk-model-error" />
           <div className="flex items-center gap-2 justify-end">
-            {/* No hand-off: chosen bulkModel/skipRunning selection is unsaved */}
-            <ErrorNotice message={bulkModelError} variant="inline" className="flex-1" testId="bulk-model-error" />
             <Btn className="text-[12px] px-3 py-1" onClick={() => { setBulkModelOpen(false); setBulkModel(''); setBulkModelError('') }}>{i18nT('pages.chatSidebar.cancel')}</Btn>
             <Btn className="text-[12px] px-3 py-1 bg-accent text-accent-fg hover:bg-accent-hover" disabled={!bulkModel || bulkAffectedCount === 0 || bulkModelMutation.isPending} onClick={() => { setBulkModelError(''); bulkModelMutation.mutate({ model: bulkModel, skipRunning: bulkSkipRunning }) }}>{bulkModelMutation.isPending ? i18nT('pages.chatSidebar.switching') : i18nT('pages.chatSidebar.switch_session', { count: bulkAffectedCount })}</Btn>
           </div>
