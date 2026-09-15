@@ -50,6 +50,7 @@ from kiro_crew.hooks import FileTooLargeError, safe_read_file_bytes_nolink
 from kiro_crew.llm_helpers import run_bg_oneliner
 from kiro_crew.loop_lock import LoopBoundLock
 from kiro_crew.messaging.link import is_channel_session_key
+from kiro_crew.project_scope import scope_selector_is_inadmissible
 from kiro_crew.secrets import SecretVault
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.validation import (
@@ -2576,6 +2577,44 @@ async def api_lessons_delete(request: web.Request) -> web.Response:
     if not rule_sub:
         return web.json_response({"error": "rule substring required"}, status=400)
     scope = body.get("scope", "global")
+    # Optional repo_scope discriminator. A lesson's identity is the pair
+    # ``(rule, repo_scope)``: a scoped row and a same-rule global row are two
+    # distinct lessons, and this selector decides which of them the delete
+    # reaches. This is a DIFFERENT axis from the legacy ``scope`` selector
+    # above (global/workspace tier), so it is a distinct body field.
+    #
+    # Absent key -> not selective: scope stays out of the match and every
+    # substring hit is removed, so an existing client is unaffected and no
+    # stored row migrates. Present key -> selective, including an empty or
+    # whitespace-only string, which targets the unscoped (global) rows.
+    # ``sentinel`` distinguishes the two: ``body.get(..., sentinel)`` cannot
+    # collapse a present empty string into "absent" the way ``or None`` would.
+    #
+    # A present value is refused unless it is a string: coercing a JSON null
+    # to "" would silently turn "no selector" into "delete the global rows".
+    # A nonempty selector the write surface would refuse (a bare "/", an
+    # absolute path, a dot segment) is refused for the mirror reason -- no
+    # admissibly stored row carries it, so canonical folding would land the
+    # delete on rows the caller never named.
+    _no_scope_key = object()
+    _rs = body.get("repo_scope", _no_scope_key)
+    if _rs is _no_scope_key:
+        repo_scope = None
+    elif not isinstance(_rs, str):
+        return web.json_response(
+            {"error": "repo_scope must be a string", "code": "repo_scope_not_string"},
+            status=400,
+        )
+    elif scope_selector_is_inadmissible(_rs):
+        return web.json_response(
+            {
+                "error": "repo_scope does not name a usable scope",
+                "code": "repo_scope_inadmissible",
+            },
+            status=400,
+        )
+    else:
+        repo_scope = _rs
     # Delete from vector store if active, else JSONL
     # THE CALLER'S silo, not the global store. This is the agent's only durable
     # memory-write surface, so writing globally let a crew bound to one silo steer
@@ -2600,14 +2639,14 @@ async def api_lessons_delete(request: web.Request) -> web.Response:
     # and the store is a real union now that it is resolved per caller instead of
     # arriving untyped from the global getter.
     if vs and vs_lessons:
-        ok = await asyncio.to_thread(vs.delete_lesson, rule_sub)
+        ok = await asyncio.to_thread(vs.delete_lesson, rule_sub, repo_scope)
     else:
         store = _lesson_jsonl_store(state, _lesson_silo, scope, body.get("workspace"))
         # Off the loop. remove() now takes the store's shared lock, which a worker
         # thread can be holding across file I/O for a concurrent save_or_enrich --
         # so calling it inline would let one lessons write stall every task on the
         # event loop. Same reason api_lessons_create offloads its write.
-        ok = await asyncio.to_thread(store.remove, rule_sub)
+        ok = await asyncio.to_thread(store.remove, rule_sub, repo_scope)
     if ok:
         state.push_refresh("lessons")
     return web.json_response({"ok": ok})

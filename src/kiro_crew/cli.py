@@ -2495,6 +2495,18 @@ Examples:
     learn_sub.add_parser("list", help="List all lessons")
     learn_rm = learn_sub.add_parser("remove", help="Remove lessons matching a substring")
     learn_rm.add_argument("query", help="Substring to match against lesson rules")
+    learn_rm.add_argument(
+        "--repo-scope",
+        dest="repo_scope",
+        default=None,
+        help=(
+            "Only remove lessons carrying this repo scope. A lesson's "
+            "identity is (rule, repo_scope), so a scoped and a global lesson can "
+            "share rule text; without this flag a matching substring removes both. "
+            "Omit to match every scope (the default). Pass an empty string to "
+            'target only the unscoped (global) rows: --repo-scope "".'
+        ),
+    )
 
     # artifact
     art_parser = cli_help.add_command(
