@@ -377,26 +377,24 @@ round 0. Read it back with `gh api repos/<owner>/<repo>/issues/<n>/comments
 
 ### Phase 2 — Local review is THE GATE (inner loop, cap 10)
 
-Never push until this is locally green — no open Critical/High. Local-green is a
-cost and latency optimization, not a guarantee; the Phase 3 server poll stays the
-backstop.
+Never push until this is locally green — no open Critical/High. **Locally green
+means the static gates plus the change-RELATED tests, never the full suite.** The
+full suites are CI's job and the Phase 3 poll is the authority on them; a
+related-set miss costs one CI round trip, a full local suite an hour of a shared
+box.
 
 1. **Run `setup[]` once, then `gates[]` on every pass.** On the first Phase 2 pass
-   in a worktree, run the profile's `setup[]` in order. Setup may add prerequisites
-   to a per-user cache; it is not a verdict on the diff. A setup failure means the
-   environment is not ready: fix or report that environment problem before
-   evaluating the branch. Do not rerun setup unless the worktree or tool-cache state
-   was invalidated. Then run the profile's `gates[]` on every pass. Gates are pure
-   checks; a nonzero exit means the diff is not ready. For Kiro Crew that is the
-   diff-scoped test runner / isort / flake8 / mypy, plus `tsc -p tsconfig.app.json`
-   for frontend changes. All gates must exit 0 before review. While ITERATING in this
-   phase, `python3 scripts/local-gate.py` runs the change-scoped equivalent of
-   CI's own bucket classification (frontend / meta / backend, catch-all on
-   unrecognised paths), which avoids the full backend suite — roughly an hour at
-   16 workers — on a diff that cannot reach it. It narrows only when exactly one
-   of frontend/backend changed and meta did not. It is the iteration gate and
-   never the push gate: the complete resolved `gates[]` list must be green on the
-   pass you push.
+   in a worktree, run the profile's `setup[]` in order. Setup provisions a
+   per-user cache, not a verdict on the diff; a setup failure is an environment
+   problem to fix or report first. Do not rerun setup unless the worktree or
+   tool cache was invalidated. Then run `gates[]` on every pass: pure checks,
+   nonzero means not ready, all must exit 0 before review. For Kiro Crew that is
+   the related-test runner / isort / flake8 / mypy, plus `tsc -p tsconfig.app.json`
+   for frontend changes. `scripts/local-gate.py` runs both surfaces' related sets
+   at once; the per-surface `run_scoped_tests.py` gates are the same selection
+   (details: `references/gate-floor.md`). **There is no automatic path to a full
+   local suite** — not for `scripts/`, both surfaces, or a large set.
+   `local-gate.py --full` is for a human who asks; the agent never passes it.
 
    **The setup and gate lists are data.** Read them from
    `profiles/kirocrew.json` `setup[]` and `gates[]`: provisioning belongs in setup;
@@ -407,15 +405,17 @@ backstop.
    entry's shape is load-bearing and not guessable from the command, and that file
    also records which CI checks have no local entry point.
 
-   `scripts/run_scoped_tests.py` prints one of three verdicts and **all three are
-   normal**: `cross-surface: N file(s)`, `full suite: the diff touches this
-   surface`, or `full suite: <other reason>`. Do **not** narrow a full-suite verdict
-   by hand — the escalation is the invariant.
+   `run_scoped_tests.py` prints one verdict, `related: N test file(s) (full suite
+   deferred to CI)`; `related: 0` is normal. The only other outcome is **exit 2,
+   nothing run** (base missing, diff unreadable) — fix that, never reach for
+   `--full`. **When CI reports failing tests** (Phase 3 reason (a)): reproduce
+   EXACTLY the node ids from `gh run view <run-id> --log-failed`; fix; push.
+   Never answer a red CI with a full local suite; CI already named the failures.
 
-   Three conditional rules stay prose because they are not flat commands:
+   Three rules stay prose:
 
    - **Check exit codes, never piped output.** `cmd | tail` makes `$?` tail's status and reports a failing gate as green. Redirect to a file and test `$?`.
-   - **Assert the base is not stale.** CI builds `refs/pull/<N>/merge`, not your branch, so a behind-base branch runs a different suite. Compare your local test count to CI's last reported count; a mismatch means rebase first. Rebase **before the first push**, not as a reaction to `DIRTY`.
+   - **Assert the base is not stale.** CI builds `refs/pull/<N>/merge`, not your branch, so a behind-base branch is tested as code you never ran. Rebase **before the first push**, not as a reaction to `DIRTY`.
    - **Run the Playwright E2E suite when the diff adds a dashboard heading or tab label** — a new heading breaks existing `getByRole` locators with `strict mode violation`.
 
    **Every new guard or validator helper must have a non-test caller.** `grep`
@@ -561,7 +561,7 @@ re-runs them on the new head.
    and Phase 4 can arm auto-merge on a review that never happened.
 
    - **0** → Phase 4.
-   - **20** → run `pr_findings.py` and **TRIAGE before re-pushing**; one of its reasons needs no code change at all — an `unanswered CONCERNS from <LANE>` reason is cleared by POSTING the dispositions (one comment per item, each naming its span), not by pushing; re-pushing an unchanged diff against a failure just repeats it. **(a) CI/build/test failure** → read the failing log (`gh run view <run-id> --log-failed`), then — once the decision to fix is made — cancel the head's remaining in-flight runs per Phase 3's read → cancel → edit rule, and fix the **root cause** locally; or confirm a flake and re-run **only the failing job**, never the whole run — `gh run rerun <run-id> --failed` (or `--job <job-id>` for one of several reds), since a bare `gh run rerun <run-id>` replays the entire matrix to re-decide one shard, and no cancel applies here. **(b) Review finding** → read whole-design verdicts first and apply the three questions. For Kiro Crew Opus-family or GPT 5.6 findings that need code changes, MUST execute [Review repair routing](#review-repair-routing): delegate the minimal fix and self-review to the selected model-pinned subagent, then verify in the parent. Do not replace that delegation with a parent self-fix. Otherwise rebut with evidence (never dismiss a CodeQL alert merely to pass), or request a maintainer decision; resolve only addressed threads. **(c) Conflict / behind base** → Phase 1's re-sync handles it. Then **loop back to Phase 1** → 2 → 3 carrying those fixes.
+   - **20** → run `pr_findings.py` and **TRIAGE before re-pushing**; one of its reasons needs no code change at all — an `unanswered CONCERNS from <LANE>` reason is cleared by POSTING the dispositions (one comment per item, each naming its span), not by pushing; re-pushing an unchanged diff against a failure just repeats it. **(a) CI/build/test failure** → read the failing log (`gh run view <run-id> --log-failed`), then — once the decision to fix is made — cancel the head's remaining in-flight runs per Phase 3's read → cancel → edit rule, reproduce the **exact failing node ids** locally (never the full suite), and fix the **root cause**; or confirm a flake and re-run **only the failing job**, never the whole run — `gh run rerun <run-id> --failed` (or `--job <job-id>` for one of several reds), since a bare `gh run rerun <run-id>` replays the entire matrix to re-decide one shard, and no cancel applies here. **(b) Review finding** → read whole-design verdicts first and apply the three questions. For Kiro Crew Opus-family or GPT 5.6 findings that need code changes, MUST execute [Review repair routing](#review-repair-routing): delegate the minimal fix and self-review to the selected model-pinned subagent, then verify in the parent. Do not replace that delegation with a parent self-fix. Otherwise rebut with evidence (never dismiss a CodeQL alert merely to pass), or request a maintainer decision; resolve only addressed threads. **(c) Conflict / behind base** → Phase 1's re-sync handles it. Then **loop back to Phase 1** → 2 → 3 carrying those fixes.
    - **10** → reviewers or CI are still running. In a chat slot, load
      `kirocrew-core::monitor_start` through `tool_search`, request a finite
      same-session loop, then END THE TURN. Verify application on a later turn,
