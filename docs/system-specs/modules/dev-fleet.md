@@ -174,6 +174,80 @@ verification. Route names below are relative to that prefix.
 | `/apps/dev-fleet/api/restart-gateway` | — | Restart the live gateway through its service-manager backend; returns the pre-restart `start_id` for the restart handshake |
 | `/apps/dev-fleet/api/make-live` | `{path, dry_run?}` | Repoint the live gateway at another worktree (see Make Live); a real cutover returns `start_id` for the restart handshake |
 
+### Agent surface (gateway process, `/api/apps/dev-fleet/pod/*`)
+
+A second, deliberately small pod surface exists for AGENT sessions, served **in the
+gateway process** rather than by the backend subprocess (`agent_pod_api.py`).
+
+Why it is separate rather than a reuse of the proxied routes above: an agent session
+runs behind a sandbox with its own user namespace, so it cannot `connect(2)` the
+systemd user-bus socket that every pod verb needs, and `kirocrew pod up` in an agent
+shell fails with a bare `Permission denied`. The gateway is the process the sandbox
+launcher descends from, so it holds the host bus. The agent reaches these routes the
+way it reaches any tool — an MCP call, then loopback HTTP — with no D-Bus passthrough
+into the sandbox. The proxied `/apps/dev-fleet/api/*` routes cannot serve this: they
+require a dashboard cookie or token, which an agent does not hold, and admitting an
+internal-secret caller there would expose the app's whole backend surface.
+
+| Method | Route | Input | Description |
+|--------|-------|-------|-------------|
+| POST | `/api/apps/dev-fleet/pod/up` | `{worktree}` | Boot a pod; answers the CLI's `--json` handle (`base_url`, `token`, `port`, `ttl`). Provisioning is NOT reachable here: a cold venv + SPA build is minutes of work, and one blocking request for that dies to any timeout with no way to learn the outcome. An unbuilt worktree is refused with the CLI's own remedy; the dashboard's Provision button streams the same work under a run id |
+| POST | `/api/apps/dev-fleet/pod/down` | `{worktree}` | Stop the pod and reclaim its isolated HOME |
+| GET | `/api/apps/dev-fleet/pod/status?worktree=` | — | `{name, status, port, health}`, as `pod status --json` reports it |
+| GET | `/api/apps/dev-fleet/pod/list` | — | `{pods: [{name, port, health}]}` for every pod active on the host, unfiltered by repo |
+
+Contract:
+
+- **Gated on the app being enabled** (`_require_enabled`), since routes are
+  registered at startup and Dev Fleet ships `defaultEnabled: false`.
+- **No operator opt-in and no per-call approval, deliberately.** A pod runs the code
+  in a git worktree an agent can write, started by the user systemd manager, so it
+  executes outside the agent's sandbox. That reachability is Kiro Crew's DOCUMENTED
+  posture rather than something these routes introduce: `security.md`, under "Scoped
+  user-bus locator forward", records that sandboxed agent shells legitimately run
+  `systemctl --user` and the `kirocrew pod` CLI, and names the residual in the same
+  paragraph; the builtin `pod-e2e` skill has always told agents to boot pods. An
+  extra gate here would not close that residual — every other path to it stays open —
+  it would only stop the agent-driven QA loop these routes exist to restore. Agent
+  pod control is an intended capability, so it is not gated. State the residual
+  precisely rather than comfortably: on a host whose OUTER sandbox denies the user
+  bus, these routes are the one path from an agent-writable worktree to code running
+  unsandboxed as the user, so enabling Dev Fleet on such a host now carries that
+  surface. App admission policy can deny the app outright where that is unwanted.
+- **Named one by one in `server._STRICT_INTERNAL_API_PATHS`**, never as a
+  `/api/apps/dev-fleet/pod` prefix. That table is exact-or-prefix
+  (`path == entry or path.startswith(entry + "/")`), and this app's neighbourhood
+  includes worktree prune and the Make Live cutover, which must not become reachable
+  by holding the internal secret.
+- **STRICT, not mixed** — no browser calls them. Each handler re-asserts local origin
+  AND `internal_auth`, because a `local_only=False` deployment reclassifies strict
+  paths as mixed (same reason `/api/computer-use/frame` re-asserts both). Local origin
+  is the UNION of the AF_UNIX socket and a loopback address, mirroring the
+  middleware's own `_unix_sock is not None or is_loopback(...)`: `mcp_core` prefers
+  the gateway's unix socket whenever the file exists, and `request.remote` is empty
+  over AF_UNIX, so testing the loopback half alone would refuse every call on the
+  platform pods actually run on.
+- **No pod logic of its own.** Every handler delegates to the same `worktree_ops`
+  helpers the dashboard's buttons call, so "up" means one thing and a pod's status
+  has one definition.
+- **Refusals are 409 with a literal `code`** (`pod_up_failed`, `pod_down_failed`,
+  `pod_status_failed`, `pod_list_failed`); malformed input is 400
+  (`invalid_worktree`, `invalid_body`). A refused lifecycle op is a host-state
+  answer, not a gateway bug. `repository._repo()` raises when no main checkout is
+  configured, and the read verbs catch that rather than letting a setup problem
+  surface as a 500.
+- **Every lifecycle CHANGE and every guard denial is written to the Security Event
+  Log** under `dev_fleet.agent.*` (`pod_up`, `pod_down`, `machine_guard`): the caller
+  is unattended, so the trail is what makes the run reviewable. The read verbs are
+  not audited there — they change nothing, and the framework-level tool log already
+  records the call.
+
+The model-facing half is the `pod_up` / `pod_down` / `pod_status` / `pod_ls` tools on
+`kirocrew-core` (`mcp_tools/apps.py`). The pod token is returned to the agent
+verbatim — redacting it would hand back an unusable handle — which is safe because it
+is a 2h credential scoped to that pod's own gateway, minted server-side from the
+pod's `.local_secret` so the agent never touches the secret itself.
+
 ## Authorization
 
 All endpoints inherit gateway session auth. No additional RBAC — all authenticated users
