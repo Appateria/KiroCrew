@@ -48,6 +48,7 @@ import {
 } from '../store/chatSlice'
 import { confirmedDelivered } from '../utils/sendDelivery'
 import { sendTurn } from '../chat-core/transport/sendTurn'
+import { applySteerReceipt } from '../chat-core/transport/steerReceipt'
 import { useSelectionQuoteAsk } from '../chat-core/composer/selectionActions'
 import { addNotification, removeNotificationByTs } from '../store/notificationsSlice'
 import { onTerminalReady, sendToTerminalSession, getTerminalShell, getTerminalFenceShells } from '../utils/terminalRegistry'
@@ -1020,15 +1021,18 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     mutationFn: ({ text, sendId, slot }: { text: string; sendId?: string; slot: string }) =>
       sendTurn({ message: text, slot, steer: true, ...(sendId ? { meta: { sendId } } : {}) }),
     onSuccess: (receipt, { text, sendId, slot }) => {
-      // Receipt policy for a steer. The composer was cleared at submit and the
-      // optimistic bubble is NOT persisted -- the next transcript rebuild drops
-      // it -- so a steer that did not provably reach the gateway hands its text
-      // back. Everything below is addressed to the SENDING slot, not the
-      // active one: the user can switch sessions inside the deadline window,
-      // and this text and its rows belong to the transcript they were typed
-      // into (the same rule `send()`'s restore and steer-echo append follow).
+      // Receipt policy for a steer, owned once in chat-core (issue #9457):
+      // applySteerReceipt decides WHICH ruling applies; the adapter below is
+      // ChatPage's HOW. The composer was cleared at submit and the optimistic
+      // bubble is NOT persisted -- the next transcript rebuild drops it -- so a
+      // steer that did not provably reach the gateway hands its text back.
+      // Everything here is addressed to the SENDING slot, not the active one:
+      // the user can switch sessions inside the deadline window, and this text
+      // and its rows belong to the transcript they were typed into (the same
+      // rule send()'s restore and steer-echo append follow).
+      //
       // "On screen" means the LIVE composer state belongs to this slot --
-      // `composerSlotRef`, not `activeSlotRef`: during a slot switch the active
+      // composerSlotRef, not activeSlotRef: during a slot switch the active
       // slot has already flipped while the composer still holds (and is about
       // to flush) the outgoing slot's text. Writing only the persisted draft in
       // that window would be overwritten by that flush from the stale input;
@@ -1042,59 +1046,43 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
         if (onScreenNow) setInput(back)
       }
       const row = (message: ChatMessage) => dispatch(appendSlotMessage({ slot, message }))
-      // A confirmed echo is stronger evidence than a missing HTTP response,
-      // including when a steer raced onto a new turn and lost its steer flag.
-      if ((receipt.status === 'response-late' || receipt.status === 'transport-error')
-        && sendId && selectSendConfirmed(store.getState(), slot, sendId)) return
-      // - `refused` / unconfirmed `transport-error`: report the server's reason
-      //   or the connection error, and restore the draft. The reducer drops only
-      //   an optimistic bubble; left standing it would be
-      //   a third, false representation of the same text next to the error row
-      //   and the refilled composer.
-      if (receipt.status === 'refused' || receipt.status === 'transport-error') {
-        if (sendId) dispatch(resolveOptimisticSteer({ slot, sendId, outcome: 'queued' }))
-        row({
+      applySteerReceipt(receipt, {
+        // A confirmed echo is stronger evidence than a missing HTTP response,
+        // including when a steer raced onto a new turn and lost its steer flag.
+        echoReconciled: () => !!sendId && selectSendConfirmed(store.getState(), slot, sendId),
+        restore: handBack,
+        // The reducer drops only an optimistic bubble; left standing it would be
+        // a third, false representation of the same text next to the error row
+        // and the refilled composer. 'queued' is the reducer's DROP arm, 'turn'
+        // demotes. Guarded on sendId/slot exactly as before: with no sendId the
+        // reducer has no key and there is nothing to resolve (the old code's
+        // `if (sendId)` on the failure arms and its `if (!sendId || !slot)
+        // return` before the accepted arms both collapse to this guard).
+        resolveBubble: (outcome) => {
+          if (!sendId || !slot) return
+          dispatch(resolveOptimisticSteer({ slot, sendId, outcome: outcome === 'turn' ? 'turn' : 'queued' }))
+        },
+        reportFailure: (reason, status) => row({
           role: 'error',
-          content: receipt.reason
-            ? i18nT('pages.chatPage.send_failed_with_error', { error: receipt.reason })
-            : i18nT(receipt.status === 'transport-error' ? 'pages.chatPage.send_failed_connection' : 'pages.chatPage.send_failed'),
+          content: reason
+            ? i18nT('pages.chatPage.send_failed_with_error', { error: reason })
+            : i18nT(status === 'transport-error' ? 'pages.chatPage.send_failed_connection' : 'pages.chatPage.send_failed'),
           cls: '',
-        })
-        handBack()
-        return
-      }
-      // - `response-late`: the transport's deadline fired and aborted the POST.
-      //   It may have arrived (a slow answer) or not (a stalled socket the abort
-      //   killed) -- the steer never had a deadline before this transport, so
-      //   this window is new here. If the server's own echo already reconciled
-      //   the bubble, the steer landed: nothing to do. Otherwise the bubble is
-      //   removed (standing, it would read as delivered), the text goes back,
-      //   and a WARN-tone notice tells the user to check the transcript before
-      //   resending -- a duplicate is visible and deletable, a lost steer is not.
-      if (receipt.status === 'response-late') {
-        if (sendId) {
-          // `queued` is the reducer's DROP arm (its other arm, `turn`, demotes):
-          // an unconfirmed steer drops its bubble for the same reason a
-          // demoted-to-queue one does -- the server-side row, if any, is the
-          // representation, and a standing bubble would assert delivery.
-          dispatch(resolveOptimisticSteer({ slot, sendId, outcome: 'queued' }))
-        }
-        handBack()
+        }),
         // The lead glyph is NoticeCard's tone selector (parseNotice): \u26A0 =
         // warn, which also gives the row its "Warning" screen-reader label.
         // Kept out of the catalog string so the copy stays shared with the
         // surfaces that render it in their own strip.
-        row({ role: 'notice', content: '\u26A0\uFE0F ' + i18nT('pages.chatPage.delivery_unconfirmed'), cls: '' })
-        return
-      }
-      if (!sendId || !slot) return
-      // - `unknown`: a 2xx whose body would not parse. Accepted; `steered` is the
-      //   one shape the badge's claim is true for and an unreadable body
-      //   confirms nothing, so neither rewrites the bubble.
-      if (receipt.status === 'unknown') return
-      const body = receipt.body as { steered?: boolean }
-      if (body.steered) return
-      dispatch(resolveOptimisticSteer({ slot, sendId, outcome: receipt.status === 'queued' ? 'queued' : 'turn' }))
+        warnUnconfirmed: () => row({ role: 'notice', content: '\u26A0\uFE0F ' + i18nT('pages.chatPage.delivery_unconfirmed'), cls: '' }),
+        // ChatPage's steer is TEXT-ONLY and carries no raw/files split into the
+        // mutation (`text` is already the wire text; attachments are excluded
+        // from ChatPage steer by design, see steer()). It never stashed on a
+        // queued demotion and structurally cannot do so losslessly, so this arm
+        // stays a no-op -- the queue card falls to the parser fallback exactly
+        // as it did before #9457. resolveBubble('drop') still fires for the
+        // demotion via the helper's queued path.
+        stashDemoted: () => undefined,
+      })
     },
   })
   const [reasoningEffortDropdown, setReasoningEffortDropdown] = useState(false)
