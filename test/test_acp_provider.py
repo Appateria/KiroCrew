@@ -1083,6 +1083,62 @@ class TestLoadSessionWithRetry:
         assert rt.load_session.await_count == 1  # a genuine failure is not retried
         assert sleep_mock.await_count == 0
 
+    # The exact RPC error kiro-cli returns on the dashboard hard-stop path: the
+    # killed holder's exit handler unlinks the lock between the new holder's
+    # create and its confirming re-read.
+    _LOCK_FILE_RACE = (
+        "RPC error: {'code': -32603, 'message': 'Internal error', 'data': "
+        "'Failed to start session: failed to re-read lock file "
+        '"/home/u/.kiro/sessions/cli/ee21.lock": No such file or directory '
+        "(os error 2)'}"
+    )
+
+    @pytest.mark.asyncio
+    async def test_lock_file_race_is_retried_and_recovers(self):
+        """A missing-lock-file re-read failure is a transient race with the dying
+        holder, not a genuine load failure: retry, and resume losslessly once
+        the holder is gone instead of demoting the tab to conversation-log
+        replay for the rest of its life."""
+        provider = _build_provider(backend="")
+        handle = object()
+        rt = self._runtime(
+            AsyncMock(side_effect=[RuntimeError(self._LOCK_FILE_RACE), handle]),
+        )
+        with patch("kiro_crew.providers.acp.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            got = await provider._load_session_with_retry(rt, "/s.json", "sid", None, None)
+        assert got is handle
+        assert rt.load_session.await_count == 2
+        assert sleep_mock.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_lock_file_race_exhausts_and_falls_back(self):
+        from kiro_crew.providers.acp import _RESUME_MAX_ATTEMPTS
+
+        provider = _build_provider(backend="")
+        rt = self._runtime(AsyncMock(side_effect=RuntimeError(self._LOCK_FILE_RACE)))
+        with patch("kiro_crew.providers.acp.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            got = await provider._load_session_with_retry(rt, "/s.json", "sid", None, None)
+        assert got is None  # Phase 2 (fresh session + history replay) still applies
+        assert rt.load_session.await_count == _RESUME_MAX_ATTEMPTS
+        assert sleep_mock.await_count == _RESUME_MAX_ATTEMPTS - 1
+
+    def test_transient_classifier_is_narrow(self):
+        """Only the two known lock shapes are transient. An unrelated 'No such
+        file' (a missing session file) and a PERMANENT lock failure (permission
+        denied on the lock path) must both still fail fast: a wrong 'transient'
+        verdict there costs the whole 1s+2s+4s backoff before the identical
+        fresh-session fallback."""
+        from kiro_crew.providers.acp import _is_transient_resume_lock_error as transient
+
+        assert transient(RuntimeError("Session is ACTIVE in another process"))
+        assert transient(RuntimeError(self._LOCK_FILE_RACE))
+        assert transient(RuntimeError("Failed to Re-Read Lock File: gone"))
+        assert not transient(RuntimeError("failed to open lock file: Permission denied"))
+        assert not transient(RuntimeError("corrupt lock file"))
+        assert not transient(RuntimeError("session file not found: No such file or directory"))
+        assert not transient(RuntimeError("session/load parse error"))
+        assert not transient(RuntimeError(""))
+
     @pytest.mark.asyncio
     async def test_dead_runtime_stops_retry(self):
         provider = _build_provider(backend="")

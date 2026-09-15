@@ -1205,14 +1205,23 @@ explicit request rather than something the gateway does on its own.
 On restart / Make-Live cutover the previous gateway's kiro-cli is killed. If it
 died uncleanly (SIGKILL, crash, OOM, or a drain timeout), its per-session lock
 can stay held briefly, so the new gateway's `session/load` is rejected with an
-**"active in another process"** error. Recovery happens at the resume
+**"active in another process"** error. The dashboard's hard-stop path has a
+second shape of the same race: `stop_turn` resets the session and eagerly
+respawns it, and kiro-cli's `session/load` in the new holder creates its lock
+and re-reads it to confirm ownership — if the killed holder's exit handler
+unlinks the same path in that window the load fails with **"failed to re-read
+lock file ...: No such file or directory"**. Both are transient
+(`_RESUME_TRANSIENT_LOCK_MARKERS`: `"active in another process"`, `"re-read lock
+file"` — deliberately not a bare `"lock file"`, so a permanent failure such as
+`Permission denied` on the lock path still fails fast to Phase 2)
+and recovery happens at the resume
 chokepoint (`AcpProvider._load_session_with_retry`, `providers/acp.py`) and
 self-heals regardless of *why* the resume failed — it never depends on the dead
 holder cooperating (unlike cooperative drain), so it covers every kill mode:
 
 1. **Phase 1 — bounded retry (lossless).** Re-issue `session/load` up to
    `_RESUME_MAX_ATTEMPTS` (4) times with exponential backoff
-   (`_RESUME_BACKOFF_BASE_S` → 1s, 2s, 4s). If the stale lock releases, the
+   (`_RESUME_BACKOFF_BASE_S` → 1s, 2s, 4s). If the lock clears, the
    session resumes with full native history. A genuine (non-lock) load error is
    **not** retried, and a dead runtime aborts the loop immediately (the caller's
    respawn path takes over).

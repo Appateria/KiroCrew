@@ -293,6 +293,32 @@ def _read_cli_overlay(work_dir: Path) -> dict[str, str]:
 # to a fresh session + KiroCrew history replay (see _start_kiro_runtime_impl).
 _RESUME_MAX_ATTEMPTS = 4  # total session/load attempts before fresh fallback
 _RESUME_BACKOFF_BASE_S = 1.0  # backoff = base * 2**attempt → 1s, 2s, 4s between attempts
+# Substrings (matched case-insensitively) of a session/load error that name a
+# TRANSIENT native-lock condition — one that clears once the previous holder
+# finishes dying — as opposed to a genuine load failure. Two shapes are known:
+#
+# * "active in another process": the dead holder's lock is still held.
+# * "re-read lock file": kiro-cli creates its per-session lock, then re-reads
+#   it to confirm it won; when the previous holder's exit handler unlinks the
+#   SAME path in that window the load fails with "failed to re-read lock file
+#   ...: No such file or directory". Observed on the dashboard's hard-stop
+#   path, whose eager respawn issues session/load while the killed holder is
+#   still tearing down. Left un-retried this demoted a lossless resume to the
+#   lossy conversation-log replay for the rest of the tab's life.
+#
+# Deliberately the re-read phrase and not a bare "lock file": a permanent lock
+# failure ("failed to open lock file: Permission denied") must still fail fast
+# to the fresh-session fallback rather than spend the backoff budget first.
+_RESUME_TRANSIENT_LOCK_MARKERS: tuple[str, ...] = (
+    "active in another process",
+    "re-read lock file",
+)
+
+
+def _is_transient_resume_lock_error(exc: BaseException) -> bool:
+    """True when *exc* from ``session/load`` names a lock race worth retrying."""
+    text = str(exc).lower()
+    return any(marker in text for marker in _RESUME_TRANSIENT_LOCK_MARKERS)
 
 
 class AcpProvider(LLMProvider):
@@ -807,8 +833,9 @@ class AcpProvider(LLMProvider):
         resume LOSSLESSLY (full native history). Outcomes:
 
         * load succeeds            → return the handle (fast path: no sleep).
-        * "active in another        → retry up to ``_RESUME_MAX_ATTEMPTS`` with
-          process" lock held         backoff; return the handle if it clears.
+        * transient lock error     → retry up to ``_RESUME_MAX_ATTEMPTS`` with
+          (see _RESUME_TRANSIENT_     backoff; return the handle if it clears.
+          LOCK_MARKERS)
         * lock never clears        → return ``None`` (caller falls back to a
                                        fresh session + history replay — Phase 2).
         * any OTHER load error     → return ``None`` immediately (retrying a
@@ -835,7 +862,7 @@ class AcpProvider(LLMProvider):
                     )
                 return handle
             except Exception as exc:
-                if "active in another process" not in str(exc).lower():
+                if not _is_transient_resume_lock_error(exc):
                     # Genuine load failure — will not clear with time.
                     logger.warning(
                         "Failed to resume session %s, starting fresh",
@@ -852,9 +879,9 @@ class AcpProvider(LLMProvider):
                 if attempt + 1 < _RESUME_MAX_ATTEMPTS:
                     backoff = _RESUME_BACKOFF_BASE_S * (2**attempt)
                     logger.info(
-                        "Resume of kiro session %s refused (lock active in "
-                        "another process); retry %d/%d in %.1fs",
+                        "Resume of kiro session %s refused (%s); retry %d/%d in %.1fs",
                         resume_sid,
+                        str(exc).strip() or type(exc).__name__,
                         attempt + 1,
                         _RESUME_MAX_ATTEMPTS,
                         backoff,
@@ -863,10 +890,11 @@ class AcpProvider(LLMProvider):
         # Exhausted every attempt on a persistent lock. Loud, grep-able marker;
         # the caller migrates to a fresh session with KiroCrew history replay.
         logger.warning(
-            "Resume of kiro session %s failed after %d attempts (lock still "
-            "active in another process — a stale lock from an uncleanly-killed "
-            "holder, or a rare same-gateway session-key alias miss); migrating "
-            "to a fresh session with KiroCrew history replay",
+            "Resume of kiro session %s failed after %d attempts (native lock "
+            "still unavailable — a stale lock from an uncleanly-killed holder, a "
+            "lock-file race with a holder still tearing down, or a rare "
+            "same-gateway session-key alias miss); migrating to a fresh session "
+            "with Kiro Crew history replay",
             resume_sid,
             _RESUME_MAX_ATTEMPTS,
         )
