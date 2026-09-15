@@ -37,6 +37,8 @@ const {
  * exactly as this module's header promises.
  */
 const MACHINE_STORE_NAME = "mochi-machine";
+const pendingGlogs = [];
+let glog = (line) => pendingGlogs.push(line);
 
 // Carry Mochi's per-machine state across the npm `name` rename, exactly as main.js
 // does for the shell's config.json — the rename repoints userData, so this file is
@@ -51,7 +53,7 @@ const MACHINE_STORE_NAME = "mochi-machine";
 seedRenamedStore(app.getPath("userData"), {
   storeFileName: `${MACHINE_STORE_NAME}.json`,
   keys: [...new Set(Object.keys(MACHINE_STORE_DEFAULTS).map((k) => k.split(".")[0]))],
-  log: (m) => console.log(`mochi store migration: ${m}`),
+  log: (m) => glog(`mochi store migration: ${m}`),
 });
 
 const machineStore = new Store({ name: MACHINE_STORE_NAME, defaults: MACHINE_STORE_DEFAULTS });
@@ -59,7 +61,6 @@ const machineStore = new Store({ name: MACHINE_STORE_NAME, defaults: MACHINE_STO
 // Injected by initMochi(); placeholders keep every function definable at load.
 let BACKEND_URL = "";
 let fetchGatewayAuth = async () => ({ value: "" });
-let glog = () => {};
 
 /**
  * Open Mochi's pet overlay when the builtin is enabled.
@@ -88,7 +89,7 @@ function probeLog(outcome) {
   if (knownState) lastMochiProbeState = outcome;
   if (!stateChanged && recentMochiProbes.has(outcome)) return;
   recentMochiProbes.set(outcome, now);
-  console.log("Mochi pet probe:", outcome);
+  glog("Mochi pet probe: " + outcome);
 }
 
 // Cached because the reconcile loop runs every few seconds and a locally- or
@@ -1382,6 +1383,7 @@ function initMochi(deps) {
   BACKEND_URL = deps.backendUrl;
   fetchGatewayAuth = deps.fetchGatewayAuth;
   glog = deps.glog;
+  for (const line of pendingGlogs.splice(0)) glog(line);
   try {
     require("./panelWindow").setMainWindowGetter(deps.getMainWindow);
   } catch {
