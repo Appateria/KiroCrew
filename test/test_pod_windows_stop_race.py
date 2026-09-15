@@ -229,11 +229,12 @@ def test_stop_takes_the_exact_handle_path_on_every_host(cfg, monkeypatch, recycl
     monkeypatch.setattr(win, "IS_WINDOWS", False)
     monkeypatch.setattr(win, "handoff_in_progress", lambda *_a: False)
     active = {8001}
-    monkeypatch.setattr(win, "pid_exists", lambda pid: pid == 4242 and (8001 in active or recycled))
     monkeypatch.setattr(win, "supervised_pid", lambda *_a: 4242 if 8001 in active else None)
     # Answer liveness from this test's own handle state so a real host process
-    # at the invented PID cannot trip the reuse guard.
-    monkeypatch.setattr(win, "pid_exists", lambda pid: pid == 4242 and 8001 in active)
+    # at the invented PID cannot trip the reuse guard. The recycled arm keeps the
+    # pid ALIVE after the handle is gone, which is the unattributable shape the
+    # teardown must refuse on.
+    monkeypatch.setattr(win, "pid_exists", lambda pid: pid == 4242 and (8001 in active or recycled))
     monkeypatch.setattr(win, "process_start_time", lambda _pid: "100")
     monkeypatch.setattr(win, "_read_pid_record", lambda *_a: (4242, "100"))
     opened: list[tuple[int, str]] = []
@@ -438,12 +439,6 @@ def test_stop_terminally_scans_an_exited_root_before_reporting_zero_residue(
     child_handle = 9001
     active_handles = {root_handle, child_handle}
     supervised = {"pid": root_pid}
-    monkeypatch.setattr(
-        win,
-        "pid_exists",
-        lambda pid: (pid == root_pid and (root_handle in active_handles or recycled))
-        or (pid == child_pid and child_handle in active_handles),
-    )
     root_scans: list[bool] = []
     terminated: list[int] = []
     closed: list[int] = []
@@ -452,9 +447,14 @@ def test_stop_terminally_scans_an_exited_root_before_reporting_zero_residue(
     monkeypatch.setattr(win, "supervised_pid", lambda *_a: supervised["pid"])
     # Answer liveness from this test's own handle state -- False once the root
     # has exited -- so a real host process at the invented PID cannot trip the
-    # reuse guard.
+    # reuse guard. The recycled arm keeps the root pid ALIVE after its handle is
+    # gone, which is the unattributable shape the teardown must refuse on.
     handles = {root_pid: root_handle, child_pid: child_handle}
-    monkeypatch.setattr(win, "pid_exists", lambda pid: handles.get(pid) in active_handles)
+    monkeypatch.setattr(
+        win,
+        "pid_exists",
+        lambda pid: (pid == root_pid and recycled) or handles.get(pid) in active_handles,
+    )
     monkeypatch.setattr(win, "process_start_time", lambda pid: "100" if pid == root_pid else None)
     monkeypatch.setattr(win, "_read_pid_record", lambda *_a: (root_pid, "100"))
     monkeypatch.setattr(

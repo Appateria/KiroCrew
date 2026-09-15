@@ -439,8 +439,6 @@ def test_stop_waits_for_the_supervised_pid_before_deleting_anything(cfg, monkeyp
     monkeypatch.setattr(win, "schtasks", lambda *a: _cp())
     monkeypatch.setattr(win, "time", _FakeClock())
     seen = {"n": 0}
-    # Numeric liveness must follow the fixture, never a real host PID collision.
-    monkeypatch.setattr(win, "pid_exists", lambda pid: pid == 4242 and (seen["n"] < 4 or recycled))
 
     def _active(_handle):
         seen["n"] += 1
@@ -453,8 +451,9 @@ def test_stop_waits_for_the_supervised_pid_before_deleting_anything(cfg, monkeyp
     )
     # Answer liveness from the same poll counter so the liveness view and the
     # handle view flip together, and a real host process at the invented PID
-    # cannot trip the reuse guard.
-    monkeypatch.setattr(win, "pid_exists", lambda pid: pid == 4242 and seen["n"] < 4)
+    # cannot trip the reuse guard. The recycled arm keeps the pid ALIVE past the
+    # poll, which is the unattributable shape the teardown must refuse on.
+    monkeypatch.setattr(win, "pid_exists", lambda pid: pid == 4242 and (seen["n"] < 4 or recycled))
     monkeypatch.setattr(win, "process_start_time", lambda _pid: "1000")
     monkeypatch.setattr(win, "_read_pid_record", lambda *_a: (4242, "1000"))
     monkeypatch.setattr(
