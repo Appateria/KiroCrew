@@ -14638,6 +14638,7 @@
       "thread_repair_failed": "이 대화에 다시 연결할 수 없습니다. 멤버를 다시 열어 다시 시도하세요.",
       "title": "크루 멤버",
       "unread_message": "읽지 않은 메시지",
+      "stopped_indicator": "중지됨",
       "workspace": "워크스페이스",
       "drawer_working": "작업 중",
       "stat_today": "오늘",

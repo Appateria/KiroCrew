@@ -14638,6 +14638,7 @@
       "thread_repair_failed": "この会話に再接続できませんでした。メンバーを再度開いてやり直してください。",
       "title": "クルーメンバー",
       "unread_message": "未読メッセージ",
+      "stopped_indicator": "停止済み",
       "workspace": "ワークスペース",
       "drawer_working": "作業中",
       "stat_today": "今日",

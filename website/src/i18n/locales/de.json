@@ -14831,6 +14831,7 @@
       "thread_repair_failed": "Diese Unterhaltung konnte nicht wieder verbunden werden. Öffne das Mitglied erneut, um es noch einmal zu versuchen.",
       "title": "Crew-Mitglieder",
       "unread_message": "Ungelesene Nachricht",
+      "stopped_indicator": "Gestoppt",
       "workspace": "Arbeitsbereich",
       "drawer_working": "Arbeitet",
       "stat_today": "Heute",

@@ -2987,7 +2987,7 @@ class ConversationLog:
     def last_message_preview(self, key: str, sanitize=None) -> str:
         return self._read_projection.last_message_preview(key, sanitize=sanitize)
 
-    def last_message_info(self, key: str, sanitize=None) -> tuple[str, float]:
+    def last_message_info(self, key: str, sanitize=None) -> tuple[str, float, bool]:
         return self._read_projection.last_message_info(key, sanitize=sanitize)
 
     @staticmethod

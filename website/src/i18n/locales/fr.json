@@ -15025,6 +15025,7 @@
       "thread_repair_failed": "Impossible de reconnecter cette conversation. Rouvrez le membre pour réessayer.",
       "title": "Membres de l'équipe",
       "unread_message": "Message non lu",
+      "stopped_indicator": "Arrêté",
       "workspace": "Espace de travail",
       "drawer_working": "En cours",
       "stat_today": "Aujourd'hui",

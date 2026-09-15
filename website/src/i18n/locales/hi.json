@@ -14832,6 +14832,7 @@
       "thread_repair_failed": "इस बातचीत को फिर से कनेक्ट नहीं किया जा सका। फिर से कोशिश करने के लिए सदस्य को दोबारा खोलें।",
       "title": "क्रू सदस्य",
       "unread_message": "अपठित संदेश",
+      "stopped_indicator": "रोका गया",
       "workspace": "वर्कस्पेस",
       "drawer_working": "काम कर रहा है",
       "stat_today": "आज",

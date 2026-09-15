@@ -15025,6 +15025,7 @@
       "thread_repair_failed": "No se pudo volver a conectar esta conversación. Vuelve a abrir el miembro para intentarlo de nuevo.",
       "title": "Miembros del equipo",
       "unread_message": "Mensaje sin leer",
+      "stopped_indicator": "Detenido",
       "workspace": "Espacio de trabajo",
       "drawer_working": "Trabajando",
       "stat_today": "Hoy",

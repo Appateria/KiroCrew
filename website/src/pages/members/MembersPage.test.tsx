@@ -1185,6 +1185,31 @@ describe('MembersPage side panel (Crew summary tab) and edit jump', () => {
     expect(screen.queryByText(/^(idle|working)$/i)).toBeNull()
   })
 
+  it('a just-stopped thread shows a Stopped chip; a later real message takes it down', async () => {
+    // #9708: after PR #9689 the roster preview is the last CONVERSATIONAL line
+    // (the stop card's JSON is skipped), so a thread the user just stopped
+    // reads as ongoing work ("Running the analysis now."). The server flags the
+    // thread whose newest event is a stop with `last_message_stopped`, and the
+    // page renders a LOCALIZED chip beside the preview — the word is never sent
+    // from the server. The other row (no flag) is the cleared state: the moment
+    // a newer real message lands the server drops the flag and the chip is gone.
+    await renderPage([
+      row({ last_message: 'Running the analysis now.', last_message_stopped: true }),
+      row({ name: 'talker', slug: 'talker', last_message: 'On it — pushing the fix.' }),
+    ])
+    await rosterRow('oncall')
+    // The stopped member's row carries the chip, with the localized label…
+    const chip = roster().getByTestId('member-stopped-indicator')
+    expect(chip).toBeTruthy()
+    expect(chip).toHaveTextContent('Stopped')
+    // …and the conversational preview still shows beside it.
+    expect(roster().getByText('Running the analysis now.')).toBeTruthy()
+    // The un-flagged member (a newer real message replaced the stop) shows no
+    // chip — exactly one chip on the whole roster.
+    expect(roster().getAllByTestId('member-stopped-indicator')).toHaveLength(1)
+    expect(roster().getByText('On it — pushing the fix.')).toBeTruthy()
+  })
+
   it('the presence dot renders only on running members — idle rows show no dot', async () => {
     await renderPage([
       row({ name: 'busy', slug: 'busy', running: true, bound: true, slot_key: 'member-busy' }),

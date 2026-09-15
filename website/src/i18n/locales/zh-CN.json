@@ -14638,6 +14638,7 @@
       "thread_repair_failed": "无法重新连接该对话。重新打开该成员以重试。",
       "title": "团队成员",
       "unread_message": "未读消息",
+      "stopped_indicator": "已停止",
       "workspace": "工作区",
       "drawer_working": "工作中",
       "stat_today": "今日动态",

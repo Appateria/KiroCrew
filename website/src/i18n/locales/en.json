@@ -7028,6 +7028,7 @@
       "thread_repair_failed": "Couldn't reconnect this conversation. Reopen the member to try again.",
       "title": "Crew Members",
       "unread_message": "Unread message",
+      "stopped_indicator": "Stopped",
       "workspace": "Workspace",
       "drawer_working": "Working",
       "stat_today": "Today",
