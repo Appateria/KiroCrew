@@ -62,6 +62,7 @@ import { performSlotSwitch } from '../lib/slotSwitch'
 import { drainPendingChunks } from '../lib/pendingChunkDrain'
 import { performAgentSlotSwitch } from '../lib/agentSwitch'
 import { api } from '../api/client'
+import { slotMessagesQueryKey } from '../api/slotMessagesQuery'
 import { resolveAskAfterSend } from '../lib/resolveAskAfterSend'
 import { classifyDrop } from '../utils/dropClassify'
 import { prepareSendPayload, serializeDirTokens, spliceDirTokens, VIDEO_EXT } from '../utils/fileTokens'
@@ -521,7 +522,7 @@ export default function ChatPane({
   }
   const hydrateLimit = limitRef.current
   const { data: slotDetail, isError: slotDetailFailed, refetch: refetchSlotDetail } = useQuery({
-    queryKey: ['slot-messages', slotKey, hydrateLimit],
+    queryKey: slotMessagesQueryKey(slotKey, hydrateLimit),
     queryFn: () => api.chatSlotDetail(slotKey, hydrateLimit),
     staleTime: Infinity,
   })

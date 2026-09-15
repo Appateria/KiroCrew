@@ -6506,13 +6506,51 @@ const chatSlice = createSlice({
           && warmSeq < priorSeq
         const serverShrank = typeof priorTotal === 'number' && typeof total === 'number'
           && total < priorTotal && !staleTotal
+        const anchorIds = anchorIdx >= 0 ? rowIdentities(prior[anchorIdx]) : []
+        const warmAnchorIdx = warmed.findIndex(m => rowIdentities(m).some(id => anchorIds.includes(id)))
+        // A `streaming` row is minted client-side by the first chunk and carries
+        // no identity — and stays identity-less when a snapshot idles the slot
+        // and finalizes it to `assistant` (syncSlotRunningFromServer), because
+        // only the server's own assistant frame brings the `mid`. The rescue
+        // keeps identity-less rows as "newer than the page". This one is not
+        // when the page carries the same reply AT LEAST as far as the client
+        // has it: the page's row IS that row, and keeping the copy renders the
+        // reply twice — after a reconnect mid-turn, live chunks would then append
+        // to the stale copy ("0..19 | 0..5 | 20..") until the end-of-turn warm;
+        // after a turn that ended offline, the stale copy would sit under the
+        // final reply for good. "At least as far" is proven, never assumed: a
+        // final `assistant` row (no streaming row left on the page) folds every
+        // chunk of the reply, and a page streaming row supersedes a client
+        // streaming row only when its `seq` is at or past the client's replay
+        // floor (same generation). A client copy the page cannot vouch for — a
+        // chunk raced the fetch, the page carries no `seq`, the page has no reply
+        // row past the anchor yet, or a client-finalized copy meets a page that
+        // still says streaming — is kept: decline, not guess. Kept copies keep
+        // the pre-existing behavior (the end-of-turn warm reconciles them).
+        const pageTail = warmAnchorIdx >= 0 ? warmed.slice(warmAnchorIdx + 1) : warmed
+        const pageStreamSeq = snapshotChunkSeq(warmed)
+        const pageFinalReply = !warmed.some(m => m.role === 'streaming') && pageTail.some(m => m.role === 'assistant')
+        const priorRun = state.slotRun[safeKey(key)]
+        const clientSeq = floorForGen(priorRun?.lastChunkSeq, priorRun?.lastChunkGen, snapshotChunkGen(warmed))
+        const pageStreamCoversClient = pageStreamSeq !== undefined
+          && (clientSeq === undefined || pageStreamSeq >= clientSeq)
+        const supersededByPage = (m: ChatMessage) => rowIdentities(m).length === 0 && (
+          (m.role === 'streaming' && (pageFinalReply || pageStreamCoversClient))
+          || (m.role === 'assistant' && pageFinalReply))
+        // The page's reply row answers the page's LAST turn, so only the copy
+        // that sits before the next turn boundary in the prior tail can be a
+        // copy of it. A user or inject row past the anchor starts a turn the
+        // page predates (a send that landed while the fetch was in flight): that
+        // turn's live streaming row is not on the page at all and is kept
+        // whole, whatever the page says about the earlier reply.
+        const tail = prior.slice(anchorIdx + 1)
+        const nextTurnAt = tail.findIndex(m => m.role === 'user' || m.role === 'inject')
+        const beforeNextTurn = new Set(tail.slice(0, nextTurnAt >= 0 ? nextTurnAt : tail.length))
         const rescuable = anchorIdx >= 0 && !serverShrank
-          ? tailNotInPage(prior.slice(anchorIdx + 1), warmed)
+          ? tailNotInPage(tail, warmed).filter(m => !(beforeNextTurn.has(m) && supersededByPage(m)))
           : []
         // A rewrite REPLACES a reply, so the count holds while the post-anchor rows
         // differ. Equal tail LENGTH is what separates that from a real newer row.
-        const anchorIds = anchorIdx >= 0 ? rowIdentities(prior[anchorIdx]) : []
-        const warmAnchorIdx = warmed.findIndex(m => rowIdentities(m).some(id => anchorIds.includes(id)))
         const sameCountRewrite = rescuable.length > 0 && warmAnchorIdx >= 0 && !staleTotal
           && typeof priorTotal === 'number' && typeof total === 'number' && total === priorTotal
           && prior.length - anchorIdx === warmed.length - warmAnchorIdx
