@@ -356,6 +356,8 @@ _CAP_REGISTER: dict[str, tuple[str, str]] = {
     "handlers/files.py::api_workspaces_create": ("<default>", _BOUNDED_CONTROL_FIELDS),
     "handlers/files.py::api_workspaces_update": ("<default>", _BOUNDED_CONTROL_FIELDS),
     "handlers/files.py::api_file_write": ("None", _UNBOUNDED_USER_CONTENT),
+    # a root path and a query the handler caps at 200 characters
+    "handlers/files.py::api_file_grep": ("<default>", _BOUNDED_CONTROL_FIELDS),
     "handlers/files.py::api_dashboard_config": ("<default>", _BOUNDED_CONTROL_FIELDS),
 }
 
