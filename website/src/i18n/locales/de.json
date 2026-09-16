@@ -6378,6 +6378,7 @@
     },
     "folderConfigModal": {
       "agent_not_installed": "{{agent}} (nicht installiert)",
+      "agent_not_installed_notice": "Dieser Agent ist nicht installiert, daher wird er von Chats hier nicht verwendet. Wähle einen installierten Agenten.",
       "browse": "Durchsuchen",
       "cancel": "Abbrechen",
       "color": "Farbe",
