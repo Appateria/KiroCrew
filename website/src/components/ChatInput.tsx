@@ -145,6 +145,7 @@ import { i18nT } from '../i18n/t'
 import { fmtDateFields, fmtPercent } from '../i18n/format'
 import SessionRefStrip from './SessionRefStrip'
 import type { SessionRef } from '../utils/sessionRefs'
+import { activeElementIsEditable, isEditableTarget } from '../utils/editableTarget'
 const INPUT_MIN_H = 44
 const INPUT_DEFAULT_MAX_H = 140
 const INPUT_PREFILL_MAX_H = 320
@@ -2119,8 +2120,7 @@ function ChatInput({
     const control = composerControl()
     if (!control) return
     prevAutoFocusKeyRef.current = autoFocusKey
-    const ae = document.activeElement as HTMLElement | null
-    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) return
+    if (activeElementIsEditable()) return
     control.focus()
   }, [autoFocusKey, disabled, isMobile, composerControl, lexicalControlRevision])
 
@@ -2132,8 +2132,7 @@ function ChatInput({
     if (!typedCommandMenus) return
     const onSlashFocus = (e: KeyboardEvent) => {
       if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return
-      const tag = (e.target as HTMLElement)?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement)?.isContentEditable) return
+      if (isEditableTarget(e)) return
       e.preventDefault()
       // `/` is an explicit "I want to type" gesture, so it outranks the collapse
       // and brings the box back (expandComposer focuses it on the next frame).
