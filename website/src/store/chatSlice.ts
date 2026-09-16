@@ -4,7 +4,7 @@ import { emitSlotRead } from '../lib/slotReadRelay'
 import { api } from '../api/client'
 import { resolveDefaultMemoryMode } from '../api/queryClient'
 import { devLog, inspectorOn } from '../dev/scrollInspector'
-import { addSlotOptimistic, updateSlot, removeSlotOptimistic, markSlotRead, fetchSlots, slotSurfaceKey, slotIsRemoteBound, sseSlots, sseConnected } from './dashboardSlice'
+import { addSlotOptimistic, updateSlot, removeSlotOptimistic, releaseCloseHold, confirmCloseHold, markSlotRead, fetchSlots, slotSurfaceKey, slotIsRemoteBound, sseSlots, sseConnected } from './dashboardSlice'
 import { resolveDefaultColor } from '../utils/sessionColors'
 import { isChatPageSurface } from '../utils/channelOrigin'
 import { isSystemNoticeKind } from '../lib/systemNotice'
@@ -3309,7 +3309,7 @@ export const createSlot = createAsyncThunk<
 
 export const deleteSlot = createAsyncThunk(
   'chat/deleteSlot',
-  async (key: string, { dispatch, getState }) => {
+  async (key: string, { dispatch, getState, requestId }) => {
     const root = getState() as RootState
     const deletedSlot = root.dashboard.slots.find(s => s.key === key)
     // Use the surface key (forward-compat alias for `mode`) so a future
@@ -3345,8 +3345,16 @@ export const deleteSlot = createAsyncThunk(
     dispatch(removeSlotOptimistic(key))
     try {
       await api.deleteChatSlot(key)
+      // Confirm the close hold NOW, not on `fulfilled`: that action trails the
+      // `await navigation` below, and a peer transcript load that outlasts the
+      // in-flight cap would otherwise expire a hold whose close succeeded.
+      dispatch(confirmCloseHold({ key, requestId }))
       gcSessionStorage(key)
     } catch {
+      // Release the close hold BEFORE refetching: this thunk's `rejected` (which
+      // also releases it) fires only after the `await navigation` below, and
+      // the refetch reply must not be filtered out by the hold it exists to undo.
+      dispatch(releaseCloseHold({ key, requestId }))
       dispatch(fetchSlots())
       throw new Error('save failed')
     } finally {
