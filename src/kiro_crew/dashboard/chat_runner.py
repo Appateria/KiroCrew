@@ -211,6 +211,7 @@ from kiro_crew.hooks import (
     FileTooLargeError,
     ToolHookResult,
     fire_tool_hooks,
+    hook_gate_kwargs,
     identity_grant_covers_child,
     safe_read_file,
     safe_read_file_bytes_nolink,
@@ -9933,14 +9934,7 @@ async def _run_chat(
                         session_key=session_key,
                         agent=slot.agent or "",
                         app=slot._app or "",
-                        tool_kind=event.tool_kind,
-                        raw_params=event.raw_tool_params,
-                        diff_path=event.diff_path,
-                        command=event.shell_command,
-                        is_shell=event.is_shell,
-                        mcp_server_name=event.mcp_server_name,
-                        mcp_tool_name=event.tool_name,
-                        mcp_identity_trusted=event.mcp_identity_trusted,
+                        **hook_gate_kwargs(event),
                         # The RESOLVED agent (what actually served the turn), not
                         # slot.agent — that is an alias resolve_agent_bindings
                         # maps to a concrete kiro agent, so it must never decide

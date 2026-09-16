@@ -74,6 +74,7 @@ from kiro_crew.hooks import (
     TOOL_AUTO_APPROVE,
     TOOL_DENY,
     event_is_spawn_run,
+    hook_gate_kwargs,
     safe_read_file_bytes,
     validate_file_path,
 )
@@ -3828,8 +3829,15 @@ async def handle_message(
                 # NOT arm deny-by-default here (is_shell omitted): a shell tool
                 # with an unrecoverable command would otherwise render a
                 # misleading "blocked" message while the tool actually runs.
-                # A genuine deny-list / sensitive-path match still surfaces a
-                # (best-effort, non-enforcing) warning + audit.
+                # For the same reason this site deliberately does NOT use
+                # ``hook_gate_kwargs`` (the shared extraction every enforcing
+                # permission-request site threads): the params/diff-path tiers
+                # it would arm can also deny a call that is already executing,
+                # and this warning must never claim to have blocked one. The
+                # structural test in test_hooks.py names this site as the one
+                # informational exception. A genuine deny-list / sensitive-path
+                # match still surfaces a (best-effort, non-enforcing) warning +
+                # audit.
                 if context_builder:
                     tool_result = context_builder.hooks.on_tool_call(
                         event.title,
@@ -3969,14 +3977,7 @@ async def handle_message(
                         event.title,
                         session_key=session_key,
                         agent=_agent or "",
-                        tool_kind=event.tool_kind,
-                        raw_params=event.raw_tool_params,
-                        diff_path=event.diff_path,
-                        command=event.shell_command,
-                        is_shell=event.is_shell,
-                        mcp_server_name=event.mcp_server_name,
-                        mcp_tool_name=event.tool_name,
-                        mcp_identity_trusted=event.mcp_identity_trusted,
+                        **hook_gate_kwargs(event),
                     )
                     if tool_result.action == TOOL_AUTO_APPROVE:
                         # The hook granted this by NAME (its `auto_approve_tools`

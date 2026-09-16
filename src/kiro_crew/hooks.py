@@ -26,6 +26,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from dataclasses import replace as dataclasses_replace
 from pathlib import Path
+from typing import Any
 
 from kiro_crew import platform_compat, security, webhooks
 
@@ -523,6 +524,58 @@ def event_is_spawn_run(event: object) -> bool:
         and bool(getattr(event, "mcp_identity_trusted", False))
         and (getattr(event, "mcp_server_name", "") or "") == CORE_MCP_SERVER
     )
+
+
+def hook_gate_kwargs(event: object, **overrides: Any) -> dict[str, Any]:
+    """The event-derived keyword arguments for ``HookManager.on_tool_call``.
+
+    One extraction, used by every permission-path dispatcher
+    (``...hooks.on_tool_call(event.title, session_key=..., **hook_gate_kwargs(event))``)
+    so an enforcement-relevant event field is threaded ONCE. A dispatcher that
+    hand-copies the fields it happens to know about drops the ones it does not
+    — the edit gate's ``diff_path``, or the trusted MCP identity a per-tool
+    deny / governance ``@server/tool`` rule keys on — and the drop is SILENT:
+    the gate never sees that signal on that surface. That is why the threading
+    lives here and not at the sites. ``test_hooks.py`` pins the helper's output
+    against the gate's own keyword signature (a new gate parameter must be
+    extracted here) and scans the package so no site hand-copies a field.
+
+    Reads the event duck-typed (``getattr`` with the gate's own defaults),
+    exactly as the channel dispatchers already did: an ``AcpEvent`` yields its
+    fields verbatim, a provider event or test double missing a field yields the
+    gate default for it, and a ``None`` in a string/bool slot is normalised to
+    that default. ``command`` comes from ``AcpEvent.shell_command`` (None for a
+    non-shell tool or an unrecoverable command, which the gate then denies by
+    default when ``is_shell`` is set); ``mcp_tool_name`` is the event's
+    ``tool_name`` (the ``_meta.kiro`` identity, not the model-authored
+    ``title``).
+
+    ``overrides`` let a surface with a genuinely different event shape replace
+    an extracted value (the auto-improvement runner recovers the command
+    provider-agnostically and falls back from ``tool_kind`` to ``tool_purpose``).
+    An override key the helper does not emit is refused: a misspelt override
+    would otherwise add a stray kwarg the gate rejects — or worse, one a future
+    gate accepts with a meaning the site never intended — so the failure is
+    loud and at the site. The structural test pins which sites override which
+    keys, so a new override is a reviewed change, never drift.
+    """
+    kwargs: dict[str, Any] = {
+        "tool_kind": getattr(event, "tool_kind", "") or "",
+        "raw_params": getattr(event, "raw_tool_params", None),
+        "diff_path": getattr(event, "diff_path", "") or "",
+        "command": getattr(event, "shell_command", None),
+        "is_shell": bool(getattr(event, "is_shell", False)),
+        "mcp_server_name": getattr(event, "mcp_server_name", "") or "",
+        "mcp_tool_name": getattr(event, "tool_name", "") or "",
+        "mcp_identity_trusted": bool(getattr(event, "mcp_identity_trusted", False)),
+    }
+    unknown = set(overrides) - set(kwargs)
+    if unknown:
+        raise TypeError(
+            "hook_gate_kwargs: override of a key it does not extract: " + ", ".join(sorted(unknown))
+        )
+    kwargs.update(overrides)
+    return kwargs
 
 
 # ── HookManager ──

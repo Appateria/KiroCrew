@@ -16,7 +16,13 @@ from kiro_crew import git_coord, name_grant, platform_compat, shutdown_event
 from kiro_crew.acp.client import AcpProcessDied
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.executors import run_in_embed_pool
-from kiro_crew.hooks import TOOL_AUTO_APPROVE, TOOL_DENY, fire_tool_hooks, get_global_hook_store
+from kiro_crew.hooks import (
+    TOOL_AUTO_APPROVE,
+    TOOL_DENY,
+    fire_tool_hooks,
+    get_global_hook_store,
+    hook_gate_kwargs,
+)
 from kiro_crew.llm_helpers import provider_last_turn_usage, stream_and_collect_json
 from kiro_crew.messaging.link import telemetry_channel_of
 from kiro_crew.providers.base import (
@@ -383,14 +389,7 @@ async def execute_task(
                             event.title,
                             session_key=session_key,
                             agent=agent,
-                            tool_kind=event.tool_kind,
-                            raw_params=event.raw_tool_params,
-                            diff_path=event.diff_path,
-                            command=event.shell_command,
-                            is_shell=event.is_shell,
-                            mcp_server_name=event.mcp_server_name,
-                            mcp_tool_name=event.tool_name,
-                            mcp_identity_trusted=event.mcp_identity_trusted,
+                            **hook_gate_kwargs(event),
                         )
                         if tool_result.action == TOOL_DENY:
                             await client.reject_tool(event.request_id)

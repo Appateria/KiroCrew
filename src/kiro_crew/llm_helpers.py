@@ -24,7 +24,12 @@ from kiro_crew.acp.types import EVENT_STEER_CONSUMED, TurnUsage
 from kiro_crew.agent_sdk.drivers.acp import resolve_pin_spelling
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.credential_errors import is_credential_propagation_delay
-from kiro_crew.hooks import _EDIT_TOOL_KIND, fire_tool_hooks, get_global_hook_store
+from kiro_crew.hooks import (
+    _EDIT_TOOL_KIND,
+    fire_tool_hooks,
+    get_global_hook_store,
+    hook_gate_kwargs,
+)
 from kiro_crew.platform.tool_paths import (
     command_shaped_strings,
     edit_target_candidates,
@@ -2520,14 +2525,7 @@ async def _resolve_permission(
             session_key=session_key,
             agent=agent,
             app=app,
-            tool_kind=event.tool_kind,
-            raw_params=event.raw_tool_params,
-            diff_path=event.diff_path,
-            command=event.shell_command,
-            is_shell=event.is_shell,
-            mcp_server_name=event.mcp_server_name,
-            mcp_tool_name=event.tool_name,
-            mcp_identity_trusted=event.mcp_identity_trusted,
+            **hook_gate_kwargs(event),
             # READ_ONLY asks for the classifier's verdict alone: the gate skips
             # its grant tiers (`auto_approve_tools`, app-own-server), which vouch
             # for the caller rather than for the call's effect, so a grant that

@@ -62,6 +62,7 @@ if TYPE_CHECKING:
         evict_completed_agents,
         extract_options,
         fire_tool_hooks,
+        hook_gate_kwargs,
         identity_grant_covers_child,
         logger,
         name_grant,
@@ -1430,14 +1431,7 @@ class RunEventCoordinator(ManagerComponent):
                     session_key=session_key,
                     agent=info.agent or "",
                     app=info.app or "",
-                    tool_kind=event.tool_kind,
-                    raw_params=event.raw_tool_params,
-                    diff_path=event.diff_path,
-                    command=event.shell_command,
-                    is_shell=event.is_shell,
-                    mcp_server_name=event.mcp_server_name,
-                    mcp_tool_name=event.tool_name,
-                    mcp_identity_trusted=event.mcp_identity_trusted,
+                    **hook_gate_kwargs(event),
                 )
                 if tool_result.action == TOOL_DENY:
                     await self._manager._reject_and_log(
