@@ -6512,7 +6512,7 @@
     },
     "folderSuggestionCard": {
       "folder_suggestion": "Sugestão de pasta",
-      "move_to_folder_question": "Mover esta sessão para a pasta “{{folder}}”?",
+      "move_to_folder_prompt": "Mover esta sessão para esta pasta?",
       "no_thanks": "Agora não",
       "yes_move_it": "Mover"
     },

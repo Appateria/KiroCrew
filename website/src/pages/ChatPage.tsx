@@ -3170,10 +3170,12 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // (row menu, drag-to-folder, new-chat-in-folder) already funnels through, so
   // the optimistic update and its guarded rollback are inherited rather than
   // re-implemented here. Both answers clear the card by the ts it rendered with,
-  // for the same reason the follow-up actions do.
-  const folderSuggestionAccept = useCallback(() => {
+  // for the same reason the follow-up actions do. The card passes the folder id
+  // its dropdown currently shows — the suggestion by default, or whatever the
+  // user picked instead.
+  const folderSuggestionAccept = useCallback((folderId: string) => {
     if (!activeSlot || !folderSuggestion) return
-    moveSlotToFolder(activeSlot, folderSuggestion.folderId)
+    moveSlotToFolder(activeSlot, folderId)
     dispatch(clearFolderSuggestion({ slot: activeSlot, ts: folderSuggestion.ts }))
   }, [activeSlot, folderSuggestion, moveSlotToFolder, dispatch])
 
@@ -7344,9 +7346,20 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   <AnimatePresence>
                     {folderSuggestion && activeSlot ? (
                       <div className="pt-1.5" key="folder-suggestion">
+                        {/* Keyed by the suggestion's ts: a replacement card
+                            remounts the component, so its dropdown re-prefills
+                            and a selection made against the previous suggestion
+                            cannot leak onto the new one. `chatFolders` is the
+                            sidebar's own ['chat-folders'] cache (normalized to
+                            [] on error above), so the dropdown costs no extra
+                            request and degrades to a suggestion-only option
+                            list when folders are unavailable. */}
                         <FolderSuggestionCard
-                          folderName={folderSuggestion.folderName}
-                          breadcrumb={folderSuggestion.breadcrumb}
+                          key={folderSuggestion.ts}
+                          suggestedFolderId={folderSuggestion.folderId}
+                          suggestedFolderName={folderSuggestion.folderName}
+                          suggestedFolderBreadcrumb={folderSuggestion.breadcrumb}
+                          folders={chatFolders}
                           onAccept={folderSuggestionAccept}
                           onDecline={folderSuggestionDecline}
                         />

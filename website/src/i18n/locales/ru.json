@@ -6612,7 +6612,7 @@
     },
     "folderSuggestionCard": {
       "folder_suggestion": "Предложение папки",
-      "move_to_folder_question": "Переместить эту сессию в папку «{{folder}}»?",
+      "move_to_folder_prompt": "Переместить эту сессию в эту папку?",
       "no_thanks": "Не сейчас",
       "yes_move_it": "Переместить"
     },

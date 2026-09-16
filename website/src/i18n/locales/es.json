@@ -6512,7 +6512,7 @@
     },
     "folderSuggestionCard": {
       "folder_suggestion": "Sugerencia de carpeta",
-      "move_to_folder_question": "¿Mover esta sesión a la carpeta “{{folder}}”?",
+      "move_to_folder_prompt": "¿Mover esta sesión a esta carpeta?",
       "no_thanks": "Ahora no",
       "yes_move_it": "Mover"
     },
