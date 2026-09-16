@@ -6263,6 +6263,7 @@
       "null": "null",
       "office_download_hint": "此文件无法预览。请下载后用 Word、Excel、PowerPoint 或兼容的查看器打开。",
       "office_download_original": "下载原文件",
+      "office_structure_unavailable": "正在显示纯文本 — 标题、列表和表格失去了版式。下载原文件以查看带格式的版本。",
       "office_open_hint": "此文件无法预览。请用相应的应用打开，或下载一份副本。",
       "office_preview_loading": "正在加载预览…",
       "office_preview_truncated": "预览仅显示文档开头部分。下载原文件以查看完整内容。",

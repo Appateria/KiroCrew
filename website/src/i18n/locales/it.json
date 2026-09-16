@@ -6463,6 +6463,7 @@
       "null": "null",
       "office_download_hint": "L'anteprima non è disponibile per questo file. Scaricalo per aprirlo in Word, Excel, PowerPoint o un visualizzatore compatibile.",
       "office_download_original": "Scarica l'originale",
+      "office_structure_unavailable": "Visualizzazione in testo semplice: titoli, elenchi e tabelle hanno perso il layout. Scarica l'originale per vederlo formattato.",
       "office_open_hint": "L'anteprima non è disponibile per questo file. Aprilo nella sua applicazione o scarica una copia.",
       "office_preview_loading": "Caricamento anteprima…",
       "office_preview_truncated": "L'anteprima mostra solo l'inizio di questo documento. Scarica l'originale per vedere il contenuto completo.",
