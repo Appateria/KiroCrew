@@ -73,6 +73,8 @@ from kiro_crew.security import (
     is_sensitive_bash_command,
     is_sensitive_path,
     is_sensitive_write_path,
+    is_unverifiable_path_refusal,
+    sensitive_path_refusal,
 )
 from kiro_crew.security.readonly_bash import is_read_only_bash
 from kiro_crew.sel import sel
@@ -922,8 +924,12 @@ class HookManager:
         ctx = current_context()
         enabled_ids = security.enabled_rule_ids(self._effective_denied(ctx))
         for target in security_targets:
-            if is_sensitive_path(target):
-                return ToolHookResult.deny(f"Blocked: access to sensitive path: {target}")
+            # Reason-or-None, like the two tiers below: a stall is refused with its
+            # own wording (unverifiable, not a match) instead of being reported as
+            # a credential hit on whatever the target happened to be.
+            reason = sensitive_path_refusal(target)
+            if reason:
+                return ToolHookResult.deny(reason)
             # execute_bash (prefixed or bare) — IMDS reach, env-credential leaks,
             # and the scan-size ceiling.
             reason = is_sensitive_bash_command(target, enabled_ids=enabled_ids)
@@ -963,8 +969,9 @@ class HookManager:
                     "paths (deny-by-default)"
                 )
             for real_path in real_paths:
-                if is_sensitive_path(real_path):
-                    return ToolHookResult.deny(f"Blocked: access to sensitive path: {real_path}")
+                reason = sensitive_path_refusal(real_path)
+                if reason:
+                    return ToolHookResult.deny(reason)
         # Config files are WRITE-protected (reads stay allowed): block the agent's
         # file-EDIT tool from modifying config.json / config.local.json so a
         # prompt-injected agent cannot rewrite its own resource ceilings
@@ -2826,12 +2833,17 @@ def safe_read_file(path: str) -> str:
     unchanged so callers surface accurate messages.
     """
     resolved = os.path.realpath(os.path.expanduser(path))
-    if is_sensitive_path(resolved):
+    refusal = sensitive_path_refusal(resolved)
+    if refusal:
         # {resolved!r}, not {resolved}: the resolved target is caller/attacker
         # influenced (a symlink target is chosen by whoever wrote the link) and
         # this text reaches log records via ``exc_info`` — a raw newline in it
-        # would forge a second record.
-        raise PermissionError(f"Blocked: access to sensitive path: {resolved!r}")
+        # would forge a second record. The unverifiable wording is recognised by
+        # its fixed prefix, which no path spelling can produce, and already
+        # quotes the path; anything else is re-spelled here with the repr.
+        if not is_unverifiable_path_refusal(refusal):
+            refusal = f"Blocked: access to sensitive path: {resolved!r}"
+        raise PermissionError(refusal)
     try:
         fd = platform_compat.open_file_no_reparse(resolved, nonblocking=True)
     except OSError as exc:

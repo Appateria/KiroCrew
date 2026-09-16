@@ -328,6 +328,7 @@ from .paths import (
     DENIED_ROOT_PARTS,
     MAX_SCANNABLE_COMMAND_CHARS,
     MAX_SCANNABLE_SOURCE_BODY_CHARS,
+    UNVERIFIABLE_PATH_PREFIX,
     PathResolutionStalled,
     _candidate_forms,
     _expanded_env_root,
@@ -359,9 +360,11 @@ from .paths import (
     is_sensitive_bash_command,
     is_sensitive_path,
     is_sensitive_write_path,
+    is_unverifiable_path_refusal,
     path_contains_sensitive,
     sandbox_credential_targets,
     sensitive_home_dirs,
+    sensitive_path_refusal,
     write_protected_home_paths,
 )
 from .redaction import (
