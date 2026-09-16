@@ -705,15 +705,44 @@ applier — a raised turn budget is in force on the next prompt.
 
 ## Stop Orchestration
 
-`stop_turn()` is the shared orchestration layer for both dashboard and Slack stop surfaces. Sequence:
+`stop_turn()` is the shared orchestration layer for every stop surface (dashboard Stop button, Slack `/kirocrew stop`, transport stop verbs). Sequence:
 
-1. `clear_queue(key)` — queue drop is unconditional on first press.
-2. If `force=True`: skip cancel, go straight to hard kill (step 4).
-3. Send `session/cancel` via `provider.cancel(wait_ack_timeout=budget)`:
+1. Record the Stop: `stop_requests[key] += 1` (per folded key, on
+   `SessionLifecycleState`). This runs BEFORE anything is awaited so the
+   dashboard runner's end-of-turn gates -- which may run the moment the
+   provider's cancel lands -- already see it; `prev_turn_cancelled` is set only
+   after the ack and is too late for them.
+2. `clear_queue(key)` — queue drop is unconditional on first press (skipped
+   with `preserve_queue=True`).
+3. If `force=True`: skip cancel, go straight to hard kill (step 5).
+4. Send `session/cancel` via `provider.cancel(wait_ack_timeout=budget)`:
    - `"acked"` → set `session.prev_turn_cancelled = True`, call `on_soft` callback, return `"soft"`.
    - `"no_turn"` → return `"idle"`.
    - `"timeout"` or `"error"` → fall through to hard kill.
-4. Hard kill: `reset(key)` → fire-and-forget `_eager_respawn(key)` task → call `on_hard` callback → return `"hard"`.
+5. Hard kill: `reset(key)` → fire-and-forget `_eager_respawn(key)` task → call `on_hard` callback → return `"hard"`.
+
+### Session-scoped Stop record
+
+`SessionManager.stop_generation(key)` reads the count from step 1 (0 for a key
+never stopped). It exists because a channel-born dashboard slot runs its turns
+on the channel's session (`effective_session_key` returns
+`linked_session_key`), so a stop issued on the channel side reaches
+`stop_turn()` and the provider cancel but never the slot's own `_stop_state`.
+The dashboard runner snapshots the count at turn entry and its live Stop
+signal (`_stop_pressed()`) treats any later change as a user Stop, next to the
+slot's in-flight state and the slot's own `_stop_generation`; every
+end-of-turn continuation gate (refusal recovery, Stop-hook continuation,
+promise-only recovery, post-compaction continuation) reads that one signal.
+
+Lifetime: the record is keyed by session key rather than stored on the
+`_Session` object, so it survives the `reset()` a hard stop performs (a flag on
+the session would vanish with the very turn it stopped). It is popped on the
+teardown paths that end the key's conversation for good -- `remove()`,
+`remove_if_unclaimed()`, `destroy()`, and the identity-sweep retirement --
+beside the sibling per-key dicts. `cancel_current()` does NOT record a stop: it
+is the host's own best-effort abort (queue drain, injection retry, run
+teardown), not a person pressing Stop, and must not suppress a continuation
+the way a Stop does.
 
 ### Cancelled-turn context restore
 

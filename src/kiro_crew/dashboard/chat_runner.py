@@ -5887,6 +5887,28 @@ def _drop_stale_admissions(state: DashboardState, slot: _ChatSlot) -> None:
         )
 
 
+def _session_stop_generation_for(sessions: Any, session_key: str) -> int:
+    """The session manager's Stop count for *session_key*, read defensively.
+
+    ``SessionManager.stop_turn`` bumps it before the provider cancel is
+    awaited, on every surface that can stop the session: the dashboard's own
+    Stop handler, a linked channel's stop command, a transport's stop verb.
+    Test doubles for ``state.sessions`` may lack the method or answer with a
+    non-int; both read as 0 so the slot's own Stop signal still decides.
+    """
+    reader = getattr(sessions, "stop_generation", None)
+    if not callable(reader):
+        return 0
+    try:
+        value = reader(session_key)
+    except Exception:  # pragma: no cover - a broken double, not a stop
+        return 0
+    if inspect.iscoroutine(value):
+        value.close()
+        return 0
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
 async def _start_next_queued_turn(state: DashboardState, slot: _ChatSlot) -> bool:
     """Dequeue and start one ready Kiro turn, preserving queue semantics."""
 
@@ -5950,8 +5972,17 @@ async def _start_next_queued_turn(state: DashboardState, slot: _ChatSlot) -> boo
     # against its value AT ENQUEUE (`_promise_only_stop_gen`): any increment means a
     # Stop happened while the continuation waited, and the announced action must not
     # be dispatched.
+    # Same comparison for the session-scoped count: a stop issued on a linked
+    # channel surface moves only that one.
     _cur_stop_gen = getattr(slot, "_stop_generation", 0)
-    _stop_since_enqueue = _cur_stop_gen != getattr(slot, "_promise_only_stop_gen", _cur_stop_gen)
+    _cur_session_stop_gen = _session_stop_generation_for(
+        getattr(state, "sessions", None), effective_session_key(slot)
+    )
+    _stop_since_enqueue = _cur_stop_gen != getattr(
+        slot, "_promise_only_stop_gen", _cur_stop_gen
+    ) or _cur_session_stop_gen != getattr(
+        slot, "_promise_only_session_stop_gen", _cur_session_stop_gen
+    )
     _user_input = bool(getattr(slot, "_pending_steers", None)) or _has_user_queued_followup(slot)
     if _should_suppress_requeue(slot) or slot._stopping or _stop_since_enqueue or _user_input:
         # Both auto-continuations carry the same hazard and the same fix: the
@@ -5979,6 +6010,7 @@ async def _start_next_queued_turn(state: DashboardState, slot: _ChatSlot) -> boo
             slot._promise_only_retries = 0
             slot._compaction_continue_retries = 0
             slot._promise_only_stop_gen = _cur_stop_gen
+            slot._promise_only_session_stop_gen = _cur_session_stop_gen
             # The earlier "auto-continuing once" notice and the card's "continuing
             # automatically" detail now stand uncorrected; append a one-line
             # correction so the transcript matches what actually ran.
@@ -6619,13 +6651,27 @@ async def _run_chat(
         ):
             _current_replay_message = None
 
+    session_key = effective_session_key(slot)
+    sessions = getattr(state, "sessions", None)
+
+    def _session_stop_generation() -> int:
+        """The session manager's Stop count for this turn's session key."""
+        return _session_stop_generation_for(sessions, session_key)
+
+    _session_stop_gen_at_entry = _session_stop_generation()
+
     def _stop_pressed() -> bool:
         """The user's Stop signal for this turn, read LIVE at the call site.
 
-        True when a stop is in flight OR the monotonic stop generation moved since
+        True when a stop is in flight OR a monotonic stop generation moved since
         entry -- a Stop that pressed and already resolved back to idle is invisible
-        to ``_stopping`` but not to the counter. The two end-of-turn continuation
-        gates (Stop-hook and refusal recovery) read THIS, never the backend's wire
+        to ``_stopping`` but not to the counters. Two counters are read: the slot's
+        own (moved by the dashboard Stop handler) and the session manager's for
+        this turn's session key (moved by ``stop_turn`` on any surface). A
+        channel-born slot runs its turns on the channel's session, so a stop
+        issued from that channel never touches the slot's state -- only the
+        session-scoped count sees it. The two end-of-turn continuation gates
+        (Stop-hook and refusal recovery) read THIS, never the backend's wire
         stop reason: a backend that aborts a policy-denied turn (codex answers its
         only reject option, ``cancel``, that way) reports ``cancelled`` with no
         Stop pressed, and the continuation is owed there. A function rather than a
@@ -6633,8 +6679,10 @@ async def _run_chat(
         hook and the credential-hint lookup both suspend between the turn's end
         and the queue write.
         """
-        return bool(getattr(slot, "_stopping", False)) or (
-            getattr(slot, "_stop_generation", _stop_gen_at_entry) != _stop_gen_at_entry
+        return (
+            bool(getattr(slot, "_stopping", False))
+            or getattr(slot, "_stop_generation", _stop_gen_at_entry) != _stop_gen_at_entry
+            or _session_stop_generation() != _session_stop_gen_at_entry
         )
 
     # Who caused this turn, for the session ledger. Bound COMPLETELY here, before
@@ -6652,9 +6700,6 @@ async def _run_chat(
     # turn no dispatch claimed is a user turn -- never a guess read off the
     # message, which the user writes.
     _ledger_actor = _turn_actor or ("autonudge" if _directive_self_wake else "user")
-
-    session_key = effective_session_key(slot)
-    sessions = getattr(state, "sessions", None)
 
     # Append-only session ledger identity, declared HERE rather than only where
     # it is filled in below: the mid-turn steer cut flushes a segment from a
@@ -8762,12 +8807,13 @@ async def _run_chat(
         # so nothing downstream would ever honor it and the turn would open and
         # stream to completion behind a card that says stopped. The
         # point-in-time _stop_state is useless here (the idle resolution has
-        # already snapped it back), so compare _stop_generation, which counts
-        # stop INITIATIONS and never rewinds, against the turn-entry snapshot —
-        # the same durable signal the stop-hook suppression uses. Synchronous,
-        # beside the begin_turn gate, so no await separates the read from the
-        # stream's turn registration.
-        if getattr(slot, "_stop_generation", 0) != _stop_gen_turn_start:
+        # already snapped it back), so read the live Stop signal, which compares
+        # the monotonic stop generations (slot-scoped and session-scoped, so a
+        # stop issued on a linked channel surface counts) against their
+        # turn-entry snapshots — the same durable signal the stop-hook
+        # suppression uses. Synchronous, beside the begin_turn gate, so no await
+        # separates the read from the stream's turn registration.
+        if _stop_pressed():
             logger.info(
                 "Aborting dispatch for %s — Stop was pressed while the turn "
                 "was still being prepared (no session existed to cancel yet)",
@@ -11833,8 +11879,7 @@ async def _run_chat(
                 # counter sees it), a pending steer, or a user-authored queue
                 # entry each mean the turn must stay abandoned.
                 and not _should_suppress_requeue(slot)
-                and not slot._stopping
-                and getattr(slot, "_stop_generation", _stop_gen_turn_start) == _stop_gen_turn_start
+                and not _stop_pressed()
                 and not bool(getattr(slot, "_pending_steers", None))
                 and not _has_user_queued_followup(slot)
             ):
@@ -12178,9 +12223,10 @@ async def _run_chat(
             # end_turn, and a user follow-up already queued must win over a
             # synthetic continuation rather than be jumped ahead of.
             stop_in_progress=_should_suppress_requeue(slot),
-            stop_generation_unchanged=(
-                getattr(slot, "_stop_generation", _stop_gen_turn_start) == _stop_gen_turn_start
-            ),
+            # The live Stop signal every end-of-turn gate shares: the slot's own
+            # counter AND the session-scoped one, so a stop issued on a linked
+            # channel surface is seen here too.
+            stop_generation_unchanged=not _stop_pressed(),
             queue_empty=not _has_user_queued_followup(slot),
             no_pending_steers=(not getattr(slot, "_pending_steers", None)),
         ):
@@ -12209,6 +12255,7 @@ async def _run_chat(
             # catches a Stop that pressed AND resolved back to idle while the
             # continuation sat in the queue.
             slot._promise_only_stop_gen = getattr(slot, "_stop_generation", 0)
+            slot._promise_only_session_stop_gen = _session_stop_generation()
             _recovering_compaction = True
         elif (
             _stop_reason != STOP_REASON_CANCELLED
@@ -12560,9 +12607,10 @@ async def _run_chat(
             # sub-agent event is orchestration, NOT a user intervention, so it does
             # not count — see `_has_user_queued_followup`.
             stop_in_progress=_should_suppress_requeue(slot),
-            stop_generation_unchanged=(
-                getattr(slot, "_stop_generation", _stop_gen_turn_start) == _stop_gen_turn_start
-            ),
+            # The live Stop signal every end-of-turn gate shares: the slot's own
+            # counter AND the session-scoped one, so a stop issued on a linked
+            # channel surface is seen here too.
+            stop_generation_unchanged=not _stop_pressed(),
             queue_empty=not _has_user_queued_followup(slot),
             # Mid-turn steers live in _pending_steers (a separate channel from
             # _queue) and are only degraded into queue cards in the finally BELOW,
@@ -12636,6 +12684,7 @@ async def _run_chat(
                 # waited in the queue (invisible to _should_suppress_requeue) — see the
                 # purge block in `_start_next_queued_turn`.
                 slot._promise_only_stop_gen = getattr(slot, "_stop_generation", 0)
+                slot._promise_only_session_stop_gen = _session_stop_generation()
                 _recovering_promise = True
         elif (
             not _armed_final
@@ -12903,9 +12952,7 @@ async def _run_chat(
         # (streaming, completion persistence, or the hook _fire above) may have
         # resolved already -- stop_turn() reporting "idle" resets _stop_state --
         # and only the generation counter still says it happened.
-        if should_queue_hook_continuation(
-            slot._stopping, needs_session_reset, user_stopped=_stop_pressed()
-        ):
+        if should_queue_hook_continuation(needs_session_reset, user_stopped=_stop_pressed()):
             _hook_reasons = parse_hook_continuations(_stop_hook_out)
             # No block decision -> nothing to queue; skip the cap load and
             # arithmetic on the common empty path (also what the old
@@ -12918,7 +12965,7 @@ async def _run_chat(
                 # boundary before mutating the queue so a Stop that lands during
                 # that await cannot be bypassed by the stale outer guard.
                 if not should_queue_hook_continuation(
-                    slot._stopping, needs_session_reset, user_stopped=_stop_pressed()
+                    needs_session_reset, user_stopped=_stop_pressed()
                 ):
                     _hook_reasons = []
             else:
@@ -13009,7 +13056,6 @@ async def _run_chat(
         # this continuation is the only channel that still reaches its model.
         if should_queue_refusal_recovery(
             _refusal_reasons,
-            slot._stopping,
             needs_session_reset,
             user_stopped=_stop_pressed(),
             notices_sent=len(_refusal_notices) + _refusal_notices_settled,
@@ -13465,14 +13511,12 @@ async def _run_chat(
             # pressed during this backoff resolves while no prompt is active,
             # so without this check the cancelled prompt would be requeued and
             # execute on the fallback anyway. Same two signals the sibling
-            # requeue paths use: live suppress state, plus the monotonic stop
-            # generation vs. its turn-start snapshot (catches a Stop that
-            # already resolved back to "idle" during the sleep). Skips ONLY the
+            # requeue paths use: live suppress state, plus the live Stop signal
+            # (monotonic stop generations, slot- and session-scoped, vs. their
+            # turn-entry snapshots -- catches a Stop that already resolved back
+            # to "idle" during the sleep, from any surface). Skips ONLY the
             # insert — the branch's fall-through bookkeeping is unchanged.
-            if (
-                _should_suppress_requeue(slot)
-                or getattr(slot, "_stop_generation", 0) != _stop_gen_turn_start
-            ):
+            if _should_suppress_requeue(slot) or _stop_pressed():
                 logger.info(
                     "model fallback: dropping re-queue on slot %s — stop during backoff",
                     slot.key,
@@ -13688,6 +13732,7 @@ async def _run_chat(
                 # the race documented in chat_handlers._make_stop_resolver);
                 # the generation only ever counts up on initiations.
                 _stop_gen_before_canary = slot._stop_generation
+                _session_stop_gen_before_canary = _session_stop_generation()
                 # The canary must run on the SAME served model as the failing
                 # session — a success on any other model (the cheap background
                 # default, or a rejected-model fallback) says nothing about
@@ -13732,7 +13777,10 @@ async def _run_chat(
                     )
             else:
                 _canary_ok = False
-            if _canary_ok and slot._stop_generation != _stop_gen_before_canary:
+            if _canary_ok and (
+                slot._stop_generation != _stop_gen_before_canary
+                or _session_stop_generation() != _session_stop_gen_before_canary
+            ):
                 # A Stop was initiated while the canary ran (even if it already
                 # resolved and _stop_state is back to "idle"): the user
                 # cancelled this work mid-probe, so a positive canary must not
