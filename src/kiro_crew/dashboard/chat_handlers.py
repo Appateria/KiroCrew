@@ -6151,6 +6151,46 @@ class _CommitToken(str):
 _slot_switch_session_lock = slot_switch_session_lock
 
 
+def _slot_replaced_while_queued(
+    state: DashboardState, slot: _ChatSlot, name: str, request: web.Request, operation: str
+) -> bool:
+    """Whether ``name`` registers a different object than *slot* -- checked after a lock await.
+
+    Every switch handler (and reload) reads ``state._slots.get(name)`` before
+    its first await, then queues on ``slot._lock``, the session-keyed switch
+    lock and, on the model paths, ``slot._model_pick_lock``. Slot removal and
+    same-name re-registration take NONE of those locks (a client reconnecting,
+    or a different app claiming the name), so by the time a queued request
+    resumes, ``name`` can belong to a different slot object. Everything the
+    handler does next -- the app-isolation check, the busy probe, the reset --
+    reads the STALE object, and an unlinked replacement resolves to the very
+    same ``dashboard:<name>`` session key, so the stale request's authorization
+    lands its teardown on the replacement's session. Same cross-slot-identity
+    gap ``chat_tags.py`` and ``_reauthorize_after_await`` close with this exact
+    ``is not slot`` test; reload and its five switch siblings share it here.
+
+    Call it immediately after EVERY lock-acquisition await and before any
+    read of ``slot`` that feeds an authorization or a teardown -- not once at
+    the end, because each await is its own window. A mismatch is audited as an
+    ``api_access`` denial (an app caller's under ``app_isolation``, a dashboard
+    caller's like the tags handler's) and the caller answers the same 404 a
+    missing slot gets, so a denial cannot be told from a name that never
+    existed (``_slot_not_found``).
+    """
+    if state._slots.get(name) is slot:
+        return False
+    request_app = request.get("app", "")
+    sel().log_api_access(
+        caller=request_app or "dashboard",
+        operation=operation,
+        outcome="denied",
+        source="app_isolation" if request_app else "dashboard",
+        resources=f"slot={name}",
+        error="slot was replaced while the request queued on the switch locks",
+    )
+    return True
+
+
 async def api_chat_slot_agent(request: web.Request) -> web.Response:
     """POST /api/chat/slots/{slot}/agent — set agent for a chat slot."""
     state: DashboardState = request.app["state"]
@@ -6200,6 +6240,11 @@ async def api_chat_slot_agent(request: web.Request) -> web.Response:
     # any earlier read could leave this holding the wrong session lock.
     async with contextlib.AsyncExitStack() as _stack:
         await _stack.enter_async_context(slot._lock)
+        # Re-authorize after the await above (see _slot_replaced_while_queued):
+        # ``name`` can be recreated for a different app while this request
+        # queued, and every read of ``slot`` below would be of the stale one.
+        if _slot_replaced_while_queued(state, slot, name, request, "chat.slot_agent"):
+            return _slot_not_found()
         # The session the switch resets — ``effective_session_key``, never
         # ``_history_key_for`` (see api_chat_slot_model): a channel- or
         # cron-born slot runs its turns under its linked key, and the
@@ -6215,6 +6260,10 @@ async def api_chat_slot_agent(request: web.Request) -> web.Response:
         # a binding landed while this request waited on slot._lock (see
         # _slot_switch_session_lock).
         await _stack.enter_async_context(_slot_switch_session_lock(session_key))
+        # Second lock-acquisition await, second re-check: a same-name
+        # recreate lands during this wait just as easily as during the first.
+        if _slot_replaced_while_queued(state, slot, name, request, "chat.slot_agent"):
+            return _slot_not_found()
         # App isolation on the SESSION, not just the slot (the cancel routes'
         # policy): slot ownership does not imply ownership of a linked
         # channel session, so an app caller may not switch the agent a
@@ -7062,6 +7111,11 @@ async def api_chat_slot_model(request: web.Request) -> web.Response:
     # rolled back.
     async with contextlib.AsyncExitStack() as _stack:
         await _stack.enter_async_context(slot._lock)
+        # Re-authorize after the await above (see _slot_replaced_while_queued):
+        # ``name`` can be recreated for a different app while this request
+        # queued, and every read of ``slot`` below would be of the stale one.
+        if _slot_replaced_while_queued(state, slot, name, request, "chat.slot_model"):
+            return _slot_not_found()
         # The session the switch will probe and, on the reset path, tear
         # down. ``effective_session_key``, never ``_history_key_for`` (the
         # reload handler's rule): a channel- or cron-born slot runs its turns
@@ -7081,6 +7135,10 @@ async def api_chat_slot_model(request: web.Request) -> web.Response:
         # _slot_switch_session_lock).
         await _stack.enter_async_context(_slot_switch_session_lock(session_key))
         await _stack.enter_async_context(slot._model_pick_lock)
+        # Two more lock-acquisition awaits, one re-check: nothing reads
+        # ``slot`` between them, so a check after the last one covers both.
+        if _slot_replaced_while_queued(state, slot, name, request, "chat.slot_model"):
+            return _slot_not_found()
         # App isolation on the SESSION, not just the slot (the cancel
         # routes' policy): slot ownership does not imply ownership of a
         # linked channel session, so an app caller may not switch the model
@@ -7742,6 +7800,15 @@ async def api_chat_slots_model(request: web.Request) -> web.Response:
         # alias could reset this same session concurrently.
         async with contextlib.AsyncExitStack() as _stack:
             await _stack.enter_async_context(slot._lock)
+            # Re-authorize after the await above (see
+            # _slot_replaced_while_queued): the ownership check ran on the
+            # snapshot's object, and ``name`` may now register a different
+            # slot -- another app's, or a reconnect. Reported like the
+            # rebound case below: skipped, so the caller retries against
+            # whatever the name resolves to now, never switched or failed.
+            if _slot_replaced_while_queued(state, slot, name, request, "chat.slots_model"):
+                skipped_running.append(name)
+                continue
             # The session this slot's turns run on — effective_session_key,
             # never _history_key_for (see api_chat_slot_model), resolved
             # INSIDE the lock so a binding that lands while this iteration
@@ -7755,6 +7822,11 @@ async def api_chat_slots_model(request: web.Request) -> web.Response:
             # re-entering the same lock.
             await _stack.enter_async_context(_slot_switch_session_lock(session_key))
             await _stack.enter_async_context(slot._model_pick_lock)
+            # Two more lock-acquisition awaits, one re-check: nothing reads
+            # ``slot`` between them, so a check after the last one covers both.
+            if _slot_replaced_while_queued(state, slot, name, request, "chat.slots_model"):
+                skipped_running.append(name)
+                continue
             if not is_dashboard_user and session_key != _history_key_for(name):
                 # Slot ownership does not imply ownership of a linked channel
                 # session (the cancel routes' second condition): an app caller
@@ -7935,6 +8007,11 @@ async def api_chat_slot_reasoning_effort(request: web.Request) -> web.Response:
     # any earlier read could leave this holding the wrong session lock.
     async with contextlib.AsyncExitStack() as _stack:
         await _stack.enter_async_context(slot._lock)
+        # Re-authorize after the await above (see _slot_replaced_while_queued):
+        # ``name`` can be recreated for a different app while this request
+        # queued, and every read of ``slot`` below would be of the stale one.
+        if _slot_replaced_while_queued(state, slot, name, request, "chat.slot_reasoning_effort"):
+            return _slot_not_found()
         # The session the switch will probe and, on the fallback path, reset —
         # ``effective_session_key``, never ``_history_key_for`` (see
         # api_chat_slot_model): a channel- or cron-born slot runs its turns
@@ -7951,6 +8028,10 @@ async def api_chat_slot_reasoning_effort(request: web.Request) -> web.Response:
         # a binding landed while this request waited on slot._lock (see
         # _slot_switch_session_lock).
         await _stack.enter_async_context(_slot_switch_session_lock(session_key))
+        # Second lock-acquisition await, second re-check: a same-name
+        # recreate lands during this wait just as easily as during the first.
+        if _slot_replaced_while_queued(state, slot, name, request, "chat.slot_reasoning_effort"):
+            return _slot_not_found()
         # App isolation on the SESSION, not just the slot (the cancel routes'
         # policy), BEFORE the same-value fast path so the denial is
         # indistinguishable from a missing slot for every request shape.
@@ -8228,8 +8309,8 @@ async def api_chat_slot_reload(request: web.Request) -> web.Response:
         # cross-slot-identity gap the tags/folders/regenerate handlers close
         # with this exact re-check (e.g. chat_tags.py's ``is not slot`` guard).
         # A mismatch here is indistinguishable from a missing slot.
-        if state._slots.get(name) is not slot:
-            return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+        if _slot_replaced_while_queued(state, slot, name, request, "chat.slot_reload"):
+            return _slot_not_found()
         # The session the reload will tear down. ``effective_session_key``,
         # never ``_history_key_for``: a channel- or cron-born slot runs its
         # turns under its linked key, and the dashboard-prefixed spelling
@@ -8251,8 +8332,8 @@ async def api_chat_slot_reload(request: web.Request) -> web.Response:
         # above. Without this, the 7396 check would guard only the first
         # await and leave the exact gap it exists to close open on the
         # second.
-        if state._slots.get(name) is not slot:
-            return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+        if _slot_replaced_while_queued(state, slot, name, request, "chat.slot_reload"):
+            return _slot_not_found()
         # Re-derive rather than trust the captured session_key: it names a
         # MUTABLE attribute (slot.linked_session_key), so a cron/channel
         # rebind landing on the SAME slot object during the session-lock wait
@@ -8330,8 +8411,8 @@ async def api_chat_slot_reload(request: web.Request) -> web.Response:
         # cross-slot-identity gap the two earlier checks close, just moved to
         # this last await. Same response as those checks: a mismatch here is
         # indistinguishable from a missing slot.
-        if state._slots.get(name) is not slot:
-            return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+        if _slot_replaced_while_queued(state, slot, name, request, "chat.slot_reload"):
+            return _slot_not_found()
         if effective_session_key(slot) != session_key:
             return web.json_response(
                 {"error": "slot session was rebound during the switch", "code": "session_rebound"},
@@ -8407,6 +8488,11 @@ async def api_chat_slot_workspace(request: web.Request) -> web.Response:
     # any earlier read could leave this holding the wrong session lock.
     async with contextlib.AsyncExitStack() as _stack:
         await _stack.enter_async_context(slot._lock)
+        # Re-authorize after the await above (see _slot_replaced_while_queued):
+        # ``name`` can be recreated for a different app while this request
+        # queued, and every read of ``slot`` below would be of the stale one.
+        if _slot_replaced_while_queued(state, slot, name, request, "chat.slot_workspace"):
+            return _slot_not_found()
         # The session the reset tears down — effective_session_key, never
         # _history_key_for (see api_chat_slot_model), resolved INSIDE the lock
         # so a binding that lands while this request waits on it is what the
@@ -8420,6 +8506,10 @@ async def api_chat_slot_workspace(request: web.Request) -> web.Response:
         # a binding landed while this request waited on slot._lock (see
         # _slot_switch_session_lock).
         await _stack.enter_async_context(_slot_switch_session_lock(session_key))
+        # Second lock-acquisition await, second re-check: a same-name
+        # recreate lands during this wait just as easily as during the first.
+        if _slot_replaced_while_queued(state, slot, name, request, "chat.slot_workspace"):
+            return _slot_not_found()
         denied = _app_cancel_denied(request, slot, "chat.slot_workspace", session_key)
         if denied is not None:
             return denied
