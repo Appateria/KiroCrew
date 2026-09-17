@@ -5551,7 +5551,7 @@
       "new_sketch": "New sketch",
       "confirm_discard": "Discard drawing",
       "already_attached": "Attached — edit the canvas to sketch again",
-      "load_failed": "Couldn't load the sketch pad — check your connection and reopen"
+      "load_failed": "Couldn't load the sketch pad — check your connection and reload the page"
     }
   },
   "hooks": {

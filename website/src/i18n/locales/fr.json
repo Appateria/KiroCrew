@@ -8516,7 +8516,7 @@
       "new_sketch": "Nouveau croquis",
       "confirm_discard": "Abandonner le dessin",
       "already_attached": "Joint — modifiez le canevas pour dessiner à nouveau",
-      "load_failed": "Impossible de charger le bloc de croquis — vérifiez votre connexion et rouvrez-le"
+      "load_failed": "Impossible de charger le bloc de croquis — vérifiez votre connexion et rechargez la page"
     },
     "pinSurfaceButton": {
       "pin_limit_reached": "Maximum {{n}} éléments épinglés à la barre latérale : détachez-en un d'abord"

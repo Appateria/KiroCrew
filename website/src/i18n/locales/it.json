@@ -8516,7 +8516,7 @@
       "new_sketch": "Nuovo schizzo",
       "confirm_discard": "Elimina disegno",
       "already_attached": "Allegato — modifica la tela per disegnare di nuovo",
-      "load_failed": "Impossibile caricare il blocco schizzi: controlla la connessione e riapri"
+      "load_failed": "Impossibile caricare il blocco schizzi: controlla la connessione e ricarica la pagina"
     },
     "pinSurfaceButton": {
       "pin_limit_reached": "Massimo {{n}} elementi fissati alla barra laterale: rimuovine uno prima"

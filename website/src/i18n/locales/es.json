@@ -8516,7 +8516,7 @@
       "new_sketch": "Nuevo boceto",
       "confirm_discard": "Descartar dibujo",
       "already_attached": "Adjuntado: edita el lienzo para volver a dibujar",
-      "load_failed": "No se pudo cargar el bloc de bocetos: revisa tu conexión y vuelve a abrirlo"
+      "load_failed": "No se pudo cargar el bloc de bocetos: revisa tu conexión y recarga la página"
     },
     "pinSurfaceButton": {
       "pin_limit_reached": "Máximo {{n}} elementos fijados en la barra lateral: quita uno primero"
