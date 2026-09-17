@@ -149,6 +149,34 @@ describe('client transport', () => {
     expect(call(1).body).toEqual({ rule: 'never force push' })
   })
 
+  it('deleteLesson sends the repo_scope selector only when it is a string (#10651)', async () => {
+    // A lesson's identity is (rule, repo_scope). The route reads the selector by
+    // presence: "" names the global row, a fragment names that scope's row, and
+    // an ABSENT key deletes every scope's same-rule row.
+    await api.deleteLesson('never force push', 'src/pkg')
+    expect(call().body).toEqual({ rule: 'never force push', repo_scope: 'src/pkg' })
+    await api.deleteLesson('never force push', '')
+    expect(call(1).body).toEqual({ rule: 'never force push', repo_scope: '' })
+    // null marks a row whose stored scope is unusable: the route refuses a null
+    // selector (400), so the client must send none -- the unselective delete is
+    // the only path that reaches such a row.
+    await api.deleteLesson('never force push', null)
+    expect(call(2).body).toEqual({ rule: 'never force push' })
+    expect(call(2).body).not.toHaveProperty('repo_scope')
+    // The row's JSONL tier rides along when the list reported one, so the route
+    // deletes from the file the row was read from rather than its global default.
+    await api.deleteLesson('never force push', '', { scope: 'workspace', workspace: 'ws-1' })
+    expect(call(3).body).toEqual({ rule: 'never force push', repo_scope: '', scope: 'workspace', workspace: 'ws-1' })
+    await api.deleteLesson('never force push', '', { scope: undefined, workspace: undefined })
+    expect(call(4).body).toEqual({ rule: 'never force push', repo_scope: '' })
+    // `exact` is sent only when true: the route's default is the substring match
+    // the CLI relies on, and a table row that holds the whole rule opts out of it.
+    await api.deleteLesson('never force push', '', { exact: true })
+    expect(call(5).body).toEqual({ rule: 'never force push', repo_scope: '', exact: true })
+    await api.deleteLesson('never force push', '', { exact: false })
+    expect(call(6).body).not.toHaveProperty('exact')
+  })
+
   it('POST omits the body entirely when none is given', async () => {
     await api.mcpProbe()
     expect(call().init?.body).toBeUndefined()

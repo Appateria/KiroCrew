@@ -456,6 +456,19 @@ export interface CronJob {
 
 export interface Lesson {
   rule: string; category: string; ts: string
+  /** The `DELETE /api/lessons` selector that names exactly this row. A lesson's
+   *  identity is `(rule, repo_scope)`, so two same-rule rows in two scopes are
+   *  two lessons: `""` is the global row, a fragment is that scope's row, and
+   *  `null` is a row whose stored scope is unusable -- send NO selector for it,
+   *  the unselective delete is the only path that reaches such a row. */
+  repo_scope?: string | null
+  /** Which JSONL file the row was read from, when the list is the JSONL union of
+   *  the global file and the active workspace's. `DELETE /api/lessons` defaults to
+   *  the global file, so a workspace row's delete must carry these back or it
+   *  removes a same-text global row and leaves this one. Absent on vector rows,
+   *  where the delete reaches the store whatever `scope` says. */
+  scope?: 'global' | 'workspace'
+  workspace?: string
 }
 
 /** One row of `GET /api/memory/stores` — a declared memory store.
