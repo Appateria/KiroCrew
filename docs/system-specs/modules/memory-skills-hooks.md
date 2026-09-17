@@ -4724,6 +4724,12 @@ and Kiro Crew resets its context-usage accounting at that chokepoint. Separately
 consecutive turn FAILURES for a session key and resets the session; that counter
 tracks failures, not compactions.
 
+On the dashboard, confirmed provider-native and manual `/compact` completion
+arms `SessionManager.mark_needs_reinjection` for the effective session key.
+The next dashboard turn consumes that one-shot flag to restore the skills
+context. Failed deferred compaction does not arm it. This completion hook does
+not add skills reinjection to messaging surfaces or the task runner.
+
 #### Dynamic budget scaling (per active model context window)
 
 The `_CONTEXT_BUDGET_BASE` (165k) and its derived per-section caps above are the **1M-reference** values — the base was hand-tuned for a 1M-token window, so each section has a fixed *share of that window*. When a session runs on a **smaller-window** model (e.g. Opus 4.8 200K), injecting the same absolute char counts would consume ~5× the proportional share and accelerate compaction. `build_session_context()` / `build_message()` / `compress_thread_history()` / `build_session_replay()` therefore take an optional `model_window` (tokens); `_resolve_caps(window)` re-derives every cap against a base scaled linearly to that window (`base = _CONTEXT_BUDGET_BASE × window / _REFERENCE_WINDOW_TOKENS`, `_REFERENCE_WINDOW_TOKENS`=1,000,000). This keeps each section's **share of the window invariant across models** — a section that is 20% of a 1M window stays 20% of a 200K window (i.e. one-fifth the chars). Results are `functools.lru_cache`d per distinct window; `_ResolvedCaps.max_context` is a computed property, and the module constant `_MAX_CONTEXT_CHARS` is *derived* from `_resolve_caps(_REFERENCE_WINDOW_TOKENS)` so the section-sum lives in one place.
