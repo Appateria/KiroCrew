@@ -807,10 +807,12 @@ def _apply_document_migrations(
     #   the one failure that can override a value the operator restored. A failing
     #   record therefore propagates and aborts the whole migration write;
     # * every key it records is reported back through *recorded_adoptions*, because
-    #   writing the ledger first creates the mirror hazard: if the config write then
+    #   writing the ledger first leaves a known residual: if the config write then
     #   fails, the key is marked adopted while the stale value is still stored, and
-    #   the one-shot filter would never revisit it. The caller rolls those entries
-    #   back when the write does not land, which restores the pre-load state exactly;
+    #   the one-shot filter never revisits it. Nothing rolls the ledger back -- see
+    #   ``record_adoptions`` for why that residual is the one chosen -- so the caller
+    #   uses the list only to decide which keys the IN-MEMORY half may apply: those
+    #   whose removal it saw land, and no others;
     # * ``drop_drifted_keys`` REMOVES the key rather than writing the new number, so
     #   the field resolves through ``data.get(key, DEFAULT)`` until the next full
     #   rewrite of the document re-materializes it.
@@ -947,10 +949,11 @@ def _persist_config_migration(
     # ``applied`` means the delta was computed and the backup taken; ``wrote`` means
     # the ATOMIC WRITE returned. They are separate because the write happens AFTER
     # ``_mutate`` returns -- ``update_config_locked`` performs it -- so a flag set
-    # inside the callback would report a write that had not happened yet, and a
-    # failing write would then skip the ledger rollback below and strand the key as
-    # adopted-but-stale. Neither call site guards ``write_config_atomically``, so a
-    # failed write propagates and ``wrote`` correctly stays False.
+    # inside the callback would report a write that had not happened yet, and the
+    # ``finally`` below would then confirm an adoption whose removal never reached
+    # disk, letting the in-memory half run ahead of the stored document. Neither
+    # call site guards ``write_config_atomically``, so a failed write propagates and
+    # ``wrote`` correctly stays False.
     applied = False
 
     def _mutate(current: dict) -> dict | None:
@@ -4738,10 +4741,20 @@ class KiroCrewConfig:
             # so a read-and-skip that left its document cached would have every
             # later load serve the stale value and never retry -- the ceiling the
             # operator upgraded to fix would come back and stay. In a ``finally``
-            # rather than beside the write, because the write is skipped by three
-            # different paths (a contended lock, a degraded load, an exception) and
-            # all three leave the same stale cache entry.
-            if adopt_keys and not adoption_landed:
+            # rather than beside the write, because the write is skipped by more
+            # than one path (a contended lock, an exception) and each leaves the
+            # same stale cache entry.
+            #
+            # The degraded-sections branch is the exception, and it is excluded on
+            # purpose. Its retry condition is not "the next load" but "the operator
+            # fixes the file and restarts the gateway" -- degradation observations
+            # are sticky for the life of a process (``_OBSERVED_DEGRADED_SECTIONS``),
+            # so until then the write is refused every time, and dropping the cache
+            # buys nothing except a full re-read and re-parse of config.json on
+            # EVERY load for as long as the two conditions coexist. After the
+            # restart the fixed file's fingerprint misses the (empty) cache and the
+            # adoption retries on that first load -- no invalidation needed.
+            if adopt_keys and not adoption_landed and not cfg._degraded_sections:
                 _invalidate_config_cache()
 
         return cfg, ticket

@@ -474,13 +474,20 @@ per-key provenance the config layer still lacks:
 - **An adoption that did not reach disk drops the validated-data cache.** Only a load
   that READS the base document can decide an adoption (`adoptable` is empty on a cache
   hit, by design), so a read-and-skip that left its document cached would have every
-  later load serve the stale value and never retry. Three paths skip the write -- a
-  contended lock, the degraded-sections branch, an exception caught by the
-  best-effort handler -- so `_load_resolved` tracks `adoption_landed` separately from
-  `persisted` (which starts True so the `connections_ui` marker still lands on a load
-  that needed no migration) and invalidates in a `finally` all three share. Both
-  variables are bound before the `try`, or an early exception would turn a logged
-  write-back failure into a `NameError` out of `load()`.
+  later load serve the stale value and never retry. A contended lock and an exception
+  caught by the best-effort handler both skip the write, so `_load_resolved` tracks
+  `adoption_landed` separately from `persisted` (which starts True so the
+  `connections_ui` marker still lands on a load that needed no migration) and
+  invalidates in a `finally` both share. Both variables are bound before the `try`,
+  or an early exception would turn a logged write-back failure into a `NameError`
+  out of `load()`. The **degraded-sections branch is deliberately excluded**: its
+  retry condition is "the operator fixes the file and restarts the gateway" (a
+  degradation observation is sticky for the life of a process), not "the next
+  load", so an invalidation there would only re-read and re-parse `config.json` on
+  every load for as long as a malformed section coexists with a stored stale
+  timeout. After the restart the fixed file's fingerprint misses the cache and the
+  adoption retries on that first load
+  (`test_a_degraded_load_keeps_its_document_cached_instead_of_re_reading_forever`).
 - **An unreadable ledger adopts nothing.** `_read_ack_document_status` returns
   `(document, readable)`, and `auto_adoptable` returns `[]` when a sidecar exists but
   cannot be parsed: reading it as empty would re-arm the one-shot over a value the
@@ -518,6 +525,34 @@ After the config write succeeds, the loader warns at the default log level for e
 adopted key, naming the removed value and the `kirocrew config set` command that
 restores it. A deferred or failed write emits no adoption notice. The warning
 describes the stored value without claiming to know whether the operator chose it.
+
+That warning is one line in one gateway log, so the same two facts are replayed on
+demand: `kirocrew doctor`'s `Stored Defaults` section and a bare `kirocrew config
+defaults` both render the sidecar's `adopted` map through `adoption_summary` -- one
+`adopted:` line per key, naming the value removed from `config.json` and the exact
+restore command -- and both render it BEFORE opening `config.json`, so a missing or
+unreadable config does not hide what an earlier load removed from it. The line says
+"removed from `config.json`", not "the default now applies", because
+`config.local.json` may still carry the key; and it allows for the marker-first
+window (an entry whose config write failed describes a value that is still stored
+and still listed as drift). Both fields come from the sidecar, a file the agent
+sandbox can write, so they are untrusted output: every character is rendered
+terminal-safe (control characters escaped, never executed), and the pasteable
+restore command is built only from `SUPERSEDED_DEFAULTS` literals after matching the
+entry by key and exact value -- no quoting scheme is portable across every shell an
+operator might paste into, so an entry the registry does not vouch for is shown,
+escaped, with no command. An adopted key holds no stored value any more, so it is
+neither drift nor an `--adopt`/`--keep` target; naming one there is refused like any
+other non-drifted key.
+
+**Downgrade residual.** A build older than the adoption ledger serializes the
+sidecar as `{"acked": ...}` only. Running that build's `--keep` or `--adopt` after a
+downgrade therefore rewrites the file WITHOUT the `adopted` map, which re-arms the
+one-shot: on the next upgrade a value the operator restored to the old default is
+adopted a second time. Current builds carry both maps through every write
+(`_update_map`) and refuse to rewrite a sidecar they cannot parse, so the window
+exists only across that specific downgrade-then-write sequence, and the second
+adoption still announces itself at WARNING with the restore command.
 
 `stt.provider` is deliberately absent from `SUPERSEDED_DEFAULTS` even though its
 default moved to `local`: `_validated_stt_provider` coerces a retired value at
