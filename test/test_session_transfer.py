@@ -2100,6 +2100,28 @@ async def test_import_reports_session_load_when_layer_b_landed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_carried_bundle_resumes_and_its_tab_is_not_marked_transcript_only(monkeypatch):
+    """The import-side invariant the file export now depends on.
+
+    A file export that carries Layer B produces a v2 bundle WITH ``layer_b`` and
+    WITHOUT ``layer_b_skipped``. When that context materialises, the tab resumes
+    through ``session/load`` and must NOT wear the "transcript only" suffix -- the
+    suffix is for a degraded copy, and a carried export is not degraded.
+    """
+    from kiro_crew.dashboard import session_transfer as st
+
+    monkeypatch.setattr(st, "_write_layer_b_files", lambda *_a, **_k: "new-sid")
+    monkeypatch.setattr(st, "_join_layer_b", lambda *_a, **_k: True)
+
+    bundle = _valid(layer_b={"envelope": {}, "events": "e"})
+    assert "layer_b_skipped" not in bundle, "a carried export never sets the skip flag"
+
+    slot = await _run_import(st, monkeypatch, bundle, return_slot=True)
+
+    assert "transcript only" not in slot.title, slot.title
+
+
+@pytest.mark.asyncio
 async def test_import_reports_prefix_when_layer_b_failed(monkeypatch):
     from kiro_crew.dashboard import session_transfer as st
 

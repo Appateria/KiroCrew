@@ -740,17 +740,25 @@ async def build_transfer_bundle_async(
     on, because a file outlives the tab it came from and a reader of one has
     nothing else to tell them what the session ran under.
 
-    *include_layer_b* is the DESTINATION gate on the model's context window, and
-    the one caller that turns it off is the file export. Layer B ships byte-exact
-    and unredacted (see :func:`_read_layer_b`), which is forced rather than
-    chosen — the thinking-block signatures inside it are validated on replay, so
-    redacting and transplanting cannot both hold. What makes byte-exact
-    acceptable is therefore the DESTINATION, not the payload: a tunnel send goes
-    to the operator's own authenticated peer, which stores it 0600. A file has no
-    such destination — it goes to a download, a bucket, a USB stick — so that
-    justification does not carry over, and the export ships Layer A only. The
-    resulting bundle sets ``layer_b_skipped``, so the lost resume fidelity is
-    stated rather than inferred from an absent key.
+    *include_layer_b* is the gate on the model's context window; it defaults to
+    carrying Layer B. The tunnel send uses that default, so a copy pushed between
+    two live gateways RESUMES rather than replaying a lossy prefix. The file
+    export does NOT use the default: it passes ``True`` only when the operator has
+    opted in both at the config layer (``dashboard.export_include_layer_b``, off by
+    default) and on the specific request, because a downloaded file can be shared
+    with another person and unredacted context must not ride along unasked (the
+    RFC's conjunctive minimum bar, rfc-s3-backup.md:317-319; the risk is the
+    operator's per O1). Layer B ships byte-exact and unredacted (see
+    :func:`_read_layer_b`), which is forced rather than chosen -- the thinking-block
+    signatures inside it are validated on replay, so redacting and transplanting
+    cannot both hold, and there is no redacted variant. A caller passing ``False``
+    withholds it and the bundle sets ``layer_b_skipped``, so the lost resume
+    fidelity is stated rather than inferred from an absent key. Even when a caller
+    asks to carry Layer B, this builder still withholds it for a mid-turn snapshot
+    (see below), using the same ``layer_b_skipped`` flag; that consistency decision
+    is independent of the caller's gate. A session that never opened a kiro-cli
+    context sets neither ``layer_b`` nor ``layer_b_skipped``, because there is no
+    context to lose.
 
     The un-flushed tail is a ``_disk_window_len`` boundary slice, which is valid
     only because the flush below runs first: the save folds a durable injector's
@@ -930,8 +938,14 @@ async def build_transfer_bundle_async(
             getattr(slot, "_in_stage_execution", False)
         )
         if not include_layer_b:
-            # Refused by DESTINATION, not by state: this bundle is going somewhere
-            # byte-exact unredacted context must not go.
+            # Withheld because this caller's policy gate resolved false -- the
+            # decision belongs to the call site, not this builder. The file
+            # export withholds Layer B by default and carries it only for a
+            # dashboard operator's twofold opt-in: standing config permission plus
+            # an explicit per-invocation flag. The tunnel send requests Layer B
+            # by default, but this builder still withholds it for a mid-turn snapshot.
+            # Do not restate more destination policy here: the caller decided, and
+            # the decision (and its rationale) lives at the call site.
             #
             # The sid is still resolved first, and ONLY to answer whether there was
             # anything to withhold. ``layer_b_skipped`` means "this session HAD
@@ -940,7 +954,7 @@ async def build_transfer_bundle_async(
             # session that never opened a kiro-cli context gave up nothing, so
             # flagging it would label an undegraded copy as degraded -- the
             # cry-wolf case ``_assemble_bundle`` warns about, on every such
-            # export.
+            # withheld export.
             layer_b_withheld = bool(_resolve_layer_b_sid(getattr(state, "sessions", None), sm_key))
             layer_b_sid = ""
         elif mid_turn:

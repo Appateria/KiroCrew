@@ -1627,18 +1627,27 @@ on purpose.
 
 Three properties worth stating because they are easy to lose:
 
-- **Layer A only — the context window does not travel in a file.** §14.1a's
-  byte-exact, unredacted Layer B is justified by its DESTINATION, not by its
-  payload: a send reaches the operator's own authenticated peer, which stores it
-  `0600`, so the context never leaves their trust boundary. A file has no
-  destination — it can sit in a download, a bucket or on a USB stick — so that
-  justification does not carry over: an export withholds Layer B and sets
-  `layer_b_skipped`, so the loss is stated rather than inferred from an absent
-  key. Redacting it instead is not available, because the thinking-block
-  signatures inside it are validated on replay (§14.1a) and redacting and
-  transplanting cannot both hold. The cost is real and accepted — a session
-  installed from a file resumes from its transcript rather than through
-  `session/load`.
+- **Layer B leaves in an export only on an explicit operator opt-in, and is
+  withheld by default.** An export CAN carry §14.1a's byte-exact, unredacted
+  Layer B so an installed file RESUMES through `session/load` rather than
+  replaying a lossy prefix. Byte-exact is forced, not chosen: the thinking-block
+  signatures inside Layer B are validated on replay (§14.1a), so redacting and
+  transplanting cannot both hold and there is no redacted variant. Because an
+  export can be shared with another person, unredacted context must not ride
+  along unasked: `rfc-s3-backup.md` O1 assigns that risk to the operator, not the
+  exporter, and its minimum bar for a sensitive payload in a bundle is
+  conjunctive (`rfc-s3-backup.md`:317-319) -- a config key OFF by default AND an
+  explicit per-invocation flag. So Layer B travels only when BOTH
+  `dashboard.export_include_layer_b` is enabled (standing permission, default
+  `false`) AND the request carries `?include_layer_b=true` (this export asked).
+  A default-on would ship the implementer's decision to everyone who never chose,
+  the opposite of what O1 assigns, so the default withholds: the export sets
+  `layer_b_skipped`, the loss is stated rather than inferred from an absent key,
+  and the importer marks the arriving tab "transcript only". Layer B is also
+  withheld with the same flag for a mid-turn snapshot (its context would lag the
+  visible transcript); a session that never opened a kiro-cli context sets neither
+  key (it had nothing to carry). When both conditions hold and Layer B is carried,
+  `layer_b_skipped` is absent and the tab is not marked.
 - **The filename is an egress surface, not decoration.** A name is displayed by
   whatever holds the file — a share, a bucket listing, a chat attachment — so the
   slug is built from the bundle's **already-redacted** title and never from

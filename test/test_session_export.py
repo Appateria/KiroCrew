@@ -101,10 +101,11 @@ def _state(messages, *, sessions=None, slots=None):
     return state
 
 
-def _request(state, slot_key="slot-1", app=""):
+def _request(state, slot_key="slot-1", app="", query=None):
     return SimpleNamespace(
         app={"state": state},
         match_info={"slot": slot_key},
+        query=query or {},
         get=lambda k, default="": app if k == "app" else default,
     )
 
@@ -480,27 +481,30 @@ async def test_any_other_build_failure_is_an_audited_500(monkeypatch):
     assert json.loads(resp.body)["code"] == "export_failed"
 
 
-# ── Layer B does not travel in a file ────────────────────────────────────
+# ── Layer B leaves only for an operator's explicit twofold opt-in ─────────
 
 
 @pytest.mark.asyncio
-async def test_an_export_carries_no_layer_b_and_says_so(monkeypatch):
+async def test_the_export_withholds_layer_b_by_default(monkeypatch):
     """The destination rule, as a gate.
 
-    Layer B ships byte-exact and UNREDACTED, which is forced: the thinking-block
-    signatures inside it are validated on replay, so redacting and transplanting
-    cannot both hold. What makes byte-exact acceptable is the destination -- the
-    operator's own authenticated peer, stored 0600. A file has no destination, so
-    the context stays behind, and the bundle must SAY it withheld context rather
-    than leave a reader to infer it from an absent key.
+    An export can be shared with another person, so unredacted context must NOT
+    ride along unless the operator asked for it. The RFC's minimum bar for a
+    sensitive payload in a bundle is conjunctive (rfc-s3-backup.md:317-319): a
+    config key OFF by default AND an explicit per-invocation flag. With neither
+    supplied, the export ships the transcript alone, SAYS it withheld context via
+    ``layer_b_skipped`` so a reader is told, and the resolved sid never rides
+    along.
+
+    REVERSE-VERIFY: flip ``_export_layer_b_permitted``'s default to ``True`` and
+    drop the ``and _export_layer_b_requested(...)`` conjunct at the call site and
+    this test goes red -- ``layer_b`` appears and ``layer_b_skipped`` disappears.
     """
     import kiro_crew.dashboard.session_transfer as st
 
-    # A session that genuinely HAS resumable context; the refusal must be by
-    # destination, not by there being nothing to carry.
+    # A session that genuinely HAS resumable context; a withhold is a real choice.
     monkeypatch.setattr(st, "_resolve_layer_b_sid", lambda *_a, **_k: "a-real-sid")
-    # Faithful to the real reader, which returns None for an empty sid -- a stub
-    # that answered for "" would hide the very gate under test.
+    # Faithful to the real reader, which returns None for an empty sid.
     monkeypatch.setattr(
         st,
         "_read_layer_b",
@@ -508,17 +512,171 @@ async def test_an_export_carries_no_layer_b_and_says_so(monkeypatch):
     )
 
     over_tunnel = await build_transfer_bundle_async(_state(MSGS), _slot(MSGS), origin="mac")
-    assert "layer_b" in over_tunnel, "the tunnel must still carry context"
+    assert "layer_b" in over_tunnel, "the tunnel still carries context by default"
 
     slot = _slot(MSGS)
     state = _state(MSGS, slots={"slot-1": slot})
+    # No config permission and no request flag -- the default path.
     resp = await se.api_chat_slot_export(_request(state))
+    assert resp.status == 200
+
+    document = json.loads(gzip.decompress(resp.body))
+    assert "layer_b" not in document, "the export must withhold context by default"
+    assert document["layer_b_skipped"] is True
+    assert "a-real-sid" not in json.dumps(document)
+
+
+@pytest.mark.asyncio
+async def test_an_export_carries_layer_b_on_explicit_opt_in(monkeypatch):
+    """The opt-in path, as a ratchet.
+
+    When the caller is the dashboard operator and BOTH opt-ins hold -- the
+    operator enabled ``dashboard.export_include_layer_b`` AND this request asked
+    with ``?include_layer_b=true`` -- Layer B rides along byte-exact so a session
+    installed from the file resumes through ``session/load`` rather than replaying
+    a lossy prefix. A carried bundle must NOT set ``layer_b_skipped``, or the
+    importer would mark an undegraded copy "transcript only".
+
+    REVERSE-VERIFY: drop either conjunct at the call site (permitted-only, or
+    requested-only) and this test goes red -- ``layer_b`` disappears.
+    """
+    import kiro_crew.dashboard.session_transfer as st
+
+    monkeypatch.setattr(st, "_resolve_layer_b_sid", lambda *_a, **_k: "a-real-sid")
+    monkeypatch.setattr(
+        st,
+        "_read_layer_b",
+        lambda sid: {"sid": sid, "envelope": {}, "events": "{}"} if sid else None,
+    )
+    # The sensitive payload is available only to the dashboard operator.
+    monkeypatch.setattr(se, "is_owner_dashboard_request", lambda *_a, **_k: True)
+    # Standing permission ON...
+    monkeypatch.setattr(se, "_export_layer_b_permitted", lambda: True)
+
+    slot = _slot(MSGS)
+    state = _state(MSGS, slots={"slot-1": slot})
+    # ...and THIS request asks for it.
+    resp = await se.api_chat_slot_export(_request(state, query={"include_layer_b": "true"}))
+    assert resp.status == 200
+
+    document = json.loads(gzip.decompress(resp.body))
+    assert "layer_b" in document, "an explicit opt-in must carry the context window"
+    # ``_assemble_bundle`` keeps only the envelope + events on the wire; the sid is
+    # resolved locally and never rides along.
+    assert set(document["layer_b"]) == {"envelope", "events"}
+    assert document["layer_b"]["events"] == "{}"
+    assert "layer_b_skipped" not in document, "a carried export must not be flagged as degraded"
+
+
+@pytest.mark.asyncio
+async def test_an_export_withholds_layer_b_for_a_non_operator_caller(monkeypatch):
+    """An app cannot turn the operator's twofold opt-in into its own authority."""
+    import kiro_crew.dashboard.session_transfer as st
+
+    monkeypatch.setattr(st, "_resolve_layer_b_sid", lambda *_a, **_k: "a-real-sid")
+    monkeypatch.setattr(
+        st,
+        "_read_layer_b",
+        lambda sid: {"sid": sid, "envelope": {}, "events": "{}"} if sid else None,
+    )
+    monkeypatch.setattr(se, "_export_layer_b_permitted", lambda: True)
+    monkeypatch.setattr(se, "is_owner_dashboard_request", lambda *_a, **_k: False)
+
+    slot = _slot(MSGS, app="test-app")
+    state = _state(MSGS, slots={"slot-1": slot})
+    resp = await se.api_chat_slot_export(
+        _request(state, app="test-app", query={"include_layer_b": "true"})
+    )
     assert resp.status == 200
 
     document = json.loads(gzip.decompress(resp.body))
     assert "layer_b" not in document
     assert document["layer_b_skipped"] is True
-    assert "a-real-sid" not in json.dumps(document)
+
+
+@pytest.mark.asyncio
+async def test_an_export_withholds_when_permitted_but_not_requested(monkeypatch):
+    """The conjunction, not one lever.
+
+    The standing config permission ON is not enough on its own: an export that
+    does NOT carry the ``?include_layer_b=true`` flag still withholds. This pins
+    that the RFC's two conditions are not collapsed to one.
+
+    REVERSE-VERIFY: drop the ``and _export_layer_b_requested(...)`` conjunct at
+    the call site and this test goes red -- ``layer_b`` appears.
+    """
+    import kiro_crew.dashboard.session_transfer as st
+
+    monkeypatch.setattr(st, "_resolve_layer_b_sid", lambda *_a, **_k: "a-real-sid")
+    monkeypatch.setattr(
+        st,
+        "_read_layer_b",
+        lambda sid: {"sid": sid, "envelope": {}, "events": "{}"} if sid else None,
+    )
+    # Permission ON, but the request does NOT ask.
+    monkeypatch.setattr(se, "_export_layer_b_permitted", lambda: True)
+
+    slot = _slot(MSGS)
+    state = _state(MSGS, slots={"slot-1": slot})
+    resp = await se.api_chat_slot_export(_request(state))  # no query flag
+    assert resp.status == 200
+
+    document = json.loads(gzip.decompress(resp.body))
+    assert "layer_b" not in document, "permission alone must not carry without a per-export ask"
+    assert document["layer_b_skipped"] is True
+
+
+def test_the_export_layer_b_permission_defaults_to_off(monkeypatch):
+    """The standing permission is OFF by default: an absent or garbage key reads
+    False, and only an explicit true grants it. Read through the same
+    ``_raw_config`` route the other dashboard tunables use."""
+    import kiro_crew.dashboard.session_export as se_mod
+
+    monkeypatch.setattr(se_mod, "_raw_config", lambda: {})
+    assert se_mod._export_layer_b_permitted() is False
+
+    monkeypatch.setattr(se_mod, "_raw_config", lambda: {"dashboard": {}})
+    assert se_mod._export_layer_b_permitted() is False
+
+    monkeypatch.setattr(
+        se_mod, "_raw_config", lambda: {"dashboard": {"export_include_layer_b": ""}}
+    )
+    assert se_mod._export_layer_b_permitted() is False
+
+    monkeypatch.setattr(se_mod, "_raw_config", lambda: {"dashboard": {"export_include_layer_b": 1}})
+    assert se_mod._export_layer_b_permitted() is False
+
+    monkeypatch.setattr(
+        se_mod, "_raw_config", lambda: {"dashboard": {"export_include_layer_b": True}}
+    )
+    assert se_mod._export_layer_b_permitted() is True
+
+    monkeypatch.setattr(
+        se_mod, "_raw_config", lambda: {"dashboard": {"export_include_layer_b": False}}
+    )
+    assert se_mod._export_layer_b_permitted() is False
+
+    # Unreadable config falls back to WITHHOLDING (the safe default), not failing.
+    def _boom():
+        raise RuntimeError("config unreadable")
+
+    monkeypatch.setattr(se_mod, "_raw_config", _boom)
+    assert se_mod._export_layer_b_permitted() is False
+
+
+def test_the_export_layer_b_request_flag_needs_an_explicit_yes():
+    """The per-invocation flag reads truthy strings only; absent or anything else
+    is "did not ask"."""
+    import kiro_crew.dashboard.session_export as se_mod
+
+    for yes in ("true", "True", "1", "yes", "on", " TRUE "):
+        assert se_mod._export_layer_b_requested(_request(None, query={"include_layer_b": yes}))
+
+    for no in ("", "false", "0", "no", "off", "maybe"):
+        assert not se_mod._export_layer_b_requested(_request(None, query={"include_layer_b": no}))
+
+    # Absent flag == did not ask.
+    assert not se_mod._export_layer_b_requested(_request(None))
 
 
 @pytest.mark.asyncio
