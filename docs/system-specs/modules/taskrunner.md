@@ -165,6 +165,21 @@ before the execution task is registered, and rollback deletes the linked workflo
 before removing the placeholder. Cancellation at that persistence await cannot leave
 an active workflow with no TaskRunner task capable of driving it.
 
+The placeholder's `spec_content` is a bounded prefix of the spec (`_read_spec_prefix`,
+4000 characters, on a worker thread). The spec path passes `hooks.validate_file_path`
+first, but that judges the NAME, so the prefix is read through
+`hooks.safe_read_file_bytes_nolink` rather than by re-opening the validated name: the
+gate opens first (refusing a link at the final component), `fstat`s that one descriptor
+and refuses `st_nlink > 1`, a non-regular inode, and a sensitive or out-of-root real
+path, then reads the same descriptor — so a hardlink alias of a protected file planted
+under an innocent spec name yields no bytes. `within_root` is the spec's own directory,
+which is what carries the guarantee onto Windows, where `O_NOFOLLOW` does not exist.
+The byte cap is `4 * max_chars` with truncation allowed (a UTF-8 code point is at most
+four bytes), the decode is strict — an incomplete sequence at EOF raises like any other malformed UTF-8 and the caller maps it to the empty prefix — except that a full-length result, the one case the byte cap itself may have cut mid code point, holds the dangling tail back (every complete character before such a cut already lies past `max_chars`), and newlines
+are normalized as the text-mode read they replace did. Every refusal, like every read
+error, becomes an empty prefix, so admission is no oracle for whether a path is
+protected.
+
 Saved definitions whose immutable `format` is `task-plan` are invoked through
 `TaskRunner.start_workflow_definition`. The saved YAML is parsed exactly; it is
 not re-decomposed by an LLM. The resulting project then follows the normal

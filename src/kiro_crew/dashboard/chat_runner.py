@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import re
 import stat as stat_module
 import time
@@ -1845,29 +1846,57 @@ def _truncate_snapshot(content: str) -> str:
     return content
 
 
+# Bytes the snapshot read pulls before ``_truncate_snapshot`` caps it. A UTF-8
+# code point is at most four bytes, so ``_MAX_SNAPSHOT`` characters never span
+# more than ``4 * _MAX_SNAPSHOT`` bytes — reading one code point's worth beyond
+# that keeps the marker honest: a file longer than the cap always decodes to
+# MORE than ``_MAX_SNAPSHOT`` characters, whether it was cut here or read whole,
+# so the truncation marker is appended exactly when the file exceeds the cap.
+_SNAPSHOT_READ_BYTES = 4 * _MAX_SNAPSHOT + 4
+
+
 def _safe_read_snapshot(path: str) -> str | None:
     """Read a file's content for snapshot purposes, refusing sensitive paths.
 
-    Routes path validation through ``hooks.validate_file_path`` (the same
-    helper hooks.py uses for its own file ops) so the sensitive-path check
-    has a single enforcement point — if the security policy gains additional
-    checks in the future, both the LLM-tool intercept layer and the snapshot
-    layer pick them up automatically.
+    Reads through ``hooks.safe_read_file_bytes_nolink`` — the same descriptor
+    gate the prompt and skill readers use — rather than validating the name and
+    then re-opening it. A hardlink alias shares its target's inode but carries
+    its own innocent name: ``realpath`` yields the alias, ``is_symlink()`` is
+    False, and every name-based check passes while the bytes belong to whatever
+    it aliases. The gate opens FIRST (refusing a link at the final component),
+    then ``fstat``s that one descriptor and refuses ``st_nlink > 1``, a
+    non-regular inode, and a sensitive or out-of-root real path, so the inode
+    validated is exactly the inode whose bytes reach the diff chips.
+    ``within_root`` is the canonical path's own parent, which also pins the
+    opened inode on Windows where ``O_NOFOLLOW`` does not exist.
 
     Returns the (possibly truncated) text content, or None if the path is
-    sensitive / not a regular file / unreadable.
+    sensitive / not a regular file / aliased / unreadable — one shape for every
+    refusal, so a caller cannot tell a protected target from a missing file.
     """
     try:
         validated = validate_file_path(path)
         if validated is None:
             return None
-        p = Path(validated)
-        if not p.is_file():
+        raw = safe_read_file_bytes_nolink(
+            validated,
+            within_root=os.path.dirname(validated),
+            max_bytes=_SNAPSHOT_READ_BYTES,
+            allow_truncate=True,
+        )
+        if raw is None:
             return None
         # Git and agent-authored files are UTF-8 regardless of the host's
-        # preferred code page. Passing the encoding matters on Windows, where
-        # Path.read_text() otherwise defaults to a legacy locale such as cp1252.
-        return _truncate_snapshot(p.read_text(encoding="utf-8", errors="replace"))
+        # preferred code page; decoding the bytes explicitly matters on Windows,
+        # where a text-mode read otherwise defaults to a legacy locale such as
+        # cp1252. ``errors="replace"`` also absorbs a code point the byte cap
+        # above may have cut in half. Newlines are normalized as the text-mode
+        # read did: the strReplace "before" comes from ``hooks.safe_read_file``,
+        # a text-mode read, so a CRLF "after" that kept its ``\r`` would show
+        # every unchanged line as modified in the diff chip.
+        text = raw.decode("utf-8", errors="replace")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        return _truncate_snapshot(text)
     except Exception:
         return None
 
