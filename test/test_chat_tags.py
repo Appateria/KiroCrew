@@ -180,6 +180,164 @@ class TestTagVocabulary:
             assert [t["name"] for t in tags] == ["A", "B"]
 
     @pytest.mark.asyncio
+    async def test_list_survives_a_hand_edited_order(self, tmp_path, monkeypatch):
+        """``tags.json`` is loaded verbatim, so a row whose ``order`` is not a number
+        must sort as 0 rather than turn every reader of the vocabulary into a 500."""
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state._tags = [
+            {"id": "b", "name": "B", "color": "#000000", "order": 1, "status": False},
+            {"id": "x", "name": "X", "color": "#000000", "order": "invalid", "status": False},
+            {"id": "f", "name": "F", "color": "#000000", "order": 0.5, "status": False},
+            {"id": "m", "name": "M", "color": "#000000", "status": False},
+        ]
+        app = _make_tags_app(state)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/chat/tags")
+            assert resp.status == 200
+            names = [t["name"] for t in await resp.json()]
+            assert names[-1] == "B" and set(names) == {"B", "X", "F", "M"}
+
+    def test_tag_order_never_raises(self):
+        from kiro_crew.dashboard.chat_tags import _order_key
+
+        assert _order_key({"order": 3}) == 3
+        assert _order_key({"order": 2.9}) == 2
+        for bad in ("invalid", None, True, [1], float("nan"), float("inf"), -float("inf")):
+            assert _order_key({"order": bad}) == 0
+        assert _order_key({}) == 0
+
+    @pytest.mark.asyncio
+    async def test_create_refuses_an_app_caller(self, tmp_path, monkeypatch):
+        """Tags have no owner, so an app may not add to the person's shared list.
+
+        Decided at the route on the middleware's validated claim, which is what
+        makes the ``chat_tag_create`` MCP tool's refusal the endpoint's rule and
+        not a tool-layer copy of it.
+        """
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        app = _make_tags_app(state)
+
+        from aiohttp import web as _web
+
+        @_web.middleware
+        async def _as_app(request, handler):
+            request["app"] = "some-app"
+            return await handler(request)
+
+        app.middlewares.append(_as_app)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/chat/tags", json={"name": "Coined"})
+            assert resp.status == 403
+            assert (await resp.json())["code"] == "app_forbidden"
+            listed = await (await client.get("/api/chat/tags")).json()
+        assert all(t["name"] != "Coined" for t in listed)
+        assert all(t.get("name") != "Coined" for t in state._tags)
+
+    @pytest.mark.asyncio
+    async def test_create_rate_limits_an_internal_caller(self, tmp_path, monkeypatch):
+        """Same budget as folder create, so an agent loop cannot grow tags.json unbounded.
+
+        Mutation guard: drop the ``allow_create`` call and the whole burst is 201.
+        """
+        from kiro_crew.dashboard import create_rate_limit
+
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        create_rate_limit.reset_for_tests()
+        try:
+            state = _make_state(tmp_path)
+            app = _make_tags_app(state)
+            headers = {"X-Internal-Secret": "s3cret", "X-Internal-Caller": "kirocrew-dashboard"}
+            async with TestClient(TestServer(app)) as client:
+                allowed = 0
+                for i in range(create_rate_limit.MAX_TAG_CREATES_PER_WINDOW + 3):
+                    resp = await client.post(
+                        "/api/chat/tags", json={"name": f"T{i}"}, headers=headers
+                    )
+                    if resp.status == 201:
+                        allowed += 1
+                    else:
+                        assert resp.status == 429
+                        assert (await resp.json())["code"] == "create_rate_limited"
+            assert allowed == create_rate_limit.MAX_TAG_CREATES_PER_WINDOW
+        finally:
+            create_rate_limit.reset_for_tests()
+
+    @pytest.mark.asyncio
+    async def test_create_does_not_rate_limit_the_browser(self, tmp_path, monkeypatch):
+        """A person seeding a board can legitimately outpace the agent budget."""
+        from kiro_crew.dashboard import create_rate_limit
+
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        create_rate_limit.reset_for_tests()
+        try:
+            state = _make_state(tmp_path)
+            app = _make_tags_app(state)
+            async with TestClient(TestServer(app)) as client:
+                for i in range(create_rate_limit.MAX_TAG_CREATES_PER_WINDOW + 3):
+                    resp = await client.post("/api/chat/tags", json={"name": f"B{i}"})
+                    assert resp.status == 201
+        finally:
+            create_rate_limit.reset_for_tests()
+
+    @pytest.mark.asyncio
+    async def test_update_refuses_an_app_caller_and_a_gone_slot(self, tmp_path, monkeypatch):
+        """PATCH is a vocabulary write too: same two refusals as POST, before any edit."""
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state._tags = [
+            {"id": "t1", "name": "Keep", "color": "#000000", "order": 0, "status": False}
+        ]
+        app = _make_tags_app(state)
+
+        from aiohttp import web as _web
+
+        @_web.middleware
+        async def _as_app(request, handler):
+            if request.headers.get("X-As-App"):
+                request["app"] = request.headers["X-As-App"]
+            return await handler(request)
+
+        app.middlewares.append(_as_app)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.patch(
+                "/api/chat/tags/t1", json={"name": "Renamed"}, headers={"X-As-App": "some-app"}
+            )
+            assert resp.status == 403
+            assert (await resp.json())["code"] == "app_forbidden"
+            resp = await client.patch(
+                "/api/chat/tags/t1",
+                json={"name": "Renamed"},
+                headers={"X-Session-Key": "dashboard:gone-slot"},
+            )
+            assert resp.status == 403
+            assert (await resp.json())["code"] == "caller_unattributable"
+        assert state._tags[0]["name"] == "Keep"
+
+    @pytest.mark.asyncio
+    async def test_create_refuses_a_caller_whose_slot_is_gone(self, tmp_path, monkeypatch):
+        """A ``dashboard:`` key naming a popped slot is the closed-tab race.
+
+        The app that slot belonged to is exactly what got popped, so the app
+        derivation answers "" and would read as the person — the same refusal
+        the folder writes apply.
+        """
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        assert "gone-slot" not in state._slots
+        app = _make_tags_app(state)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/chat/tags",
+                json={"name": "Coined"},
+                headers={"X-Session-Key": "dashboard:gone-slot"},
+            )
+            assert resp.status == 403
+            assert (await resp.json())["code"] == "caller_unattributable"
+        assert all(t.get("name") != "Coined" for t in state._tags)
+
+    @pytest.mark.asyncio
     async def test_create_tag(self, tmp_path, monkeypatch):
         monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
         state = _make_state(tmp_path)
@@ -1041,9 +1199,7 @@ class TestSlotTags:
 
             state.push_slots_update = MagicMock()
             with patch("kiro_crew.dashboard.chat_tags.save_slot_off_loop", _refuse):
-                resp = await client.put(
-                    "/api/chat/slots/s1/tags", json={"tags": [tag["id"]]}
-                )
+                resp = await client.put("/api/chat/slots/s1/tags", json={"tags": [tag["id"]]})
 
             assert resp.status == 409
             assert slot.tags == ["existing"]
@@ -1223,6 +1379,250 @@ class TestSlotTags:
             resp = await client.put("/api/chat/slots/s1/tags", json={"tags": "not-a-list"})
             assert resp.status == 400
 
+    @pytest.mark.asyncio
+    async def test_assign_app_token_denied_on_foreign_slot(self, tmp_path, monkeypatch):
+        """An app caller gets the indistinguishable 404 and writes nothing.
+
+        Tagging is a write to a session's own state, the same class as filing
+        (``api_chat_slot_folder``), and the ``chat_tag_assign`` MCP tool reaches
+        this route on behalf of app agents whose visibility is only scoped
+        client-side — so the boundary must hold here. Both an UNSCOPED slot and
+        another app's slot answer ``slot_not_found``: a distinct code per reason
+        would make the route an existence oracle.
+        """
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        unscoped = _ChatSlot("s1")
+        foreign = _ChatSlot("s2")
+        foreign._app = "other-app"
+        state._slots["s1"] = unscoped
+        state._slots["s2"] = foreign
+        app = _make_tags_app(state)
+
+        from aiohttp import web as _web
+
+        @_web.middleware
+        async def _as_app(request, handler):
+            request["app"] = "attacker-app"
+            return await handler(request)
+
+        app.middlewares.append(_as_app)
+        async with TestClient(TestServer(app)) as client:
+            # Seeded directly: an app caller may not POST a tag (see
+            # test_create_refuses_an_app_caller), and this test is about the PUT.
+            tag = {"id": "t1", "name": "T1", "color": "#000000", "order": 0, "status": False}
+            state._tags.append(tag)
+            with patch("kiro_crew.dashboard.chat_tags.save_slot_off_loop") as save:
+                for key in ("s1", "s2"):
+                    resp = await client.put(
+                        f"/api/chat/slots/{key}/tags", json={"tags": [tag["id"]]}
+                    )
+                    assert resp.status == 404
+                    assert (await resp.json())["code"] == "slot_not_found"
+            save.assert_not_called()
+        assert unscoped.tags == [] and foreign.tags == []
+
+    @pytest.mark.asyncio
+    async def test_assign_app_token_denied_when_slot_is_linked_to_a_foreign_transcript(
+        self, tmp_path, monkeypatch
+    ):
+        """``_app`` alone is not ownership: the write lands on the LINKED transcript.
+
+        An app-owned slot whose ``linked_session_key`` names another owner's
+        session would pass an ``_app`` check and persist the app's tags into a
+        conversation it does not own. Both identities must resolve to the app.
+        """
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        mine = _ChatSlot("s1")
+        mine._app = "my-app"
+        theirs = _ChatSlot("s2")
+        theirs._app = "other-app"
+        theirs.linked_session_key = "taskrunner:t1:chat:abc"
+        mine.linked_session_key = "taskrunner:t1:chat:abc"  # rebound onto the other app's session
+        state._slots["s1"] = mine
+        state._slots["s2"] = theirs
+        state._tags.append(
+            {"id": "t1", "name": "T1", "color": "#000000", "order": 0, "status": False}
+        )
+        app = _make_tags_app(state)
+
+        from aiohttp import web as _web
+
+        @_web.middleware
+        async def _as_app(request, handler):
+            request["app"] = "my-app"
+            return await handler(request)
+
+        app.middlewares.append(_as_app)
+        async with TestClient(TestServer(app)) as client:
+            with patch("kiro_crew.dashboard.chat_tags.save_slot_off_loop") as save:
+                resp = await client.put("/api/chat/slots/s1/tags", json={"tags": ["t1"]})
+            assert resp.status == 404
+            assert (await resp.json())["code"] == "slot_not_found"
+            save.assert_not_called()
+        assert mine.tags == []
+
+    def test_app_owns_transcript_is_unanimous_and_fails_closed(self):
+        """Own file and own linked session pass; shared, foreign, unclaimed or empty keys do not."""
+        from kiro_crew.dashboard.token_auth import app_owns_transcript
+
+        mine = _ChatSlot("s1")
+        mine._app = "my-app"
+        theirs = _ChatSlot("s2")
+        theirs._app = "other-app"
+        slots = {"s1": mine, "s2": theirs}
+        assert app_owns_transcript(slots, "", "anything") is True  # the person
+        assert app_owns_transcript(slots, "my-app", "dashboard:s1") is True
+        assert app_owns_transcript(slots, "my-app", "dashboard:s2") is False
+        mine.linked_session_key = "taskrunner:t9:chat:xyz"
+        assert app_owns_transcript(slots, "my-app", "taskrunner:t9:chat:xyz") is True
+        theirs.linked_session_key = "taskrunner:t9:chat:xyz"  # now shared with another owner
+        assert app_owns_transcript(slots, "my-app", "taskrunner:t9:chat:xyz") is False
+        # An unbound channel-origin slot's transcript is claimed by no slot.
+        assert app_owns_transcript(slots, "my-app", "slack:C1.unbound") is False
+        # A channel transcript is the person's even when only app slots are bound
+        # to it — the app's own slots cannot vouch for it.
+        mine.linked_session_key = "slack:C7.700"
+        assert app_owns_transcript(slots, "my-app", "slack:C7.700") is False
+        assert app_owns_transcript(slots, "my-app", "") is False
+
+    @pytest.mark.asyncio
+    async def test_assign_app_token_denied_when_a_foreign_slot_binds_mid_request(
+        self, tmp_path, monkeypatch
+    ):
+        """Ownership is re-asked under the write lock, not only before the awaits.
+
+        The pre-await check passes (the app's slot is the only claimant); a
+        foreign slot then binds to the same transcript while the body is being
+        read. The under-lock re-check must see the new claimant and refuse
+        with nothing saved — otherwise the earlier answer is stale by the time
+        the write lands.
+        """
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        mine = _ChatSlot("s1")
+        mine._app = "my-app"
+        mine.linked_session_key = "taskrunner:t1:chat:abc"
+        theirs = _ChatSlot("s2")
+        theirs._app = "other-app"
+        state._slots["s1"] = mine
+        state._slots["s2"] = theirs
+        state._tags.append(
+            {"id": "t1", "name": "T1", "color": "#000000", "order": 0, "status": False}
+        )
+        app = _make_tags_app(state)
+
+        from aiohttp import web as _web
+
+        from kiro_crew.dashboard import chat_tags as _ct
+
+        real_read = _ct.read_bounded_json
+
+        async def _bind_then_read(request):
+            theirs.linked_session_key = "taskrunner:t1:chat:abc"  # lands during the body await
+            return await real_read(request)
+
+        @_web.middleware
+        async def _as_app(request, handler):
+            request["app"] = "my-app"
+            return await handler(request)
+
+        app.middlewares.append(_as_app)
+        async with TestClient(TestServer(app)) as client:
+            with (
+                patch(
+                    "kiro_crew.dashboard.chat_tags.read_bounded_json", side_effect=_bind_then_read
+                ),
+                patch("kiro_crew.dashboard.chat_tags.save_slot_off_loop") as save,
+            ):
+                resp = await client.put("/api/chat/slots/s1/tags", json={"tags": ["t1"]})
+            assert resp.status == 409
+            assert (await resp.json())["code"] == "session_gone"
+            save.assert_not_called()
+        assert mine.tags == []
+
+    @pytest.mark.asyncio
+    async def test_assign_refuses_a_caller_whose_slot_is_gone(self, tmp_path, monkeypatch):
+        """The closed-tab race on the per-slot write, same guard as the vocabulary writes.
+
+        A ``dashboard:`` key naming a popped slot derives app "" and would read
+        as the person, passing both ownership checks. Refused before either.
+        """
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        target = _ChatSlot("s1")
+        state._slots["s1"] = target
+        state._tags.append(
+            {"id": "t1", "name": "T1", "color": "#000000", "order": 0, "status": False}
+        )
+        app = _make_tags_app(state)
+        async with TestClient(TestServer(app)) as client:
+            with patch("kiro_crew.dashboard.chat_tags.save_slot_off_loop") as save:
+                resp = await client.put(
+                    "/api/chat/slots/s1/tags",
+                    json={"tags": ["t1"]},
+                    headers={"X-Session-Key": "dashboard:gone-slot"},
+                )
+            assert resp.status == 403
+            assert (await resp.json())["code"] == "caller_unattributable"
+            save.assert_not_called()
+        assert target.tags == []
+
+    @pytest.mark.asyncio
+    async def test_assign_app_token_allowed_on_its_own_linked_transcript(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        own = _ChatSlot("s1")
+        own._app = "my-app"
+        own.linked_session_key = "taskrunner:t9:chat:xyz"
+        state._slots["s1"] = own
+        state._tags.append(
+            {"id": "t1", "name": "T1", "color": "#000000", "order": 0, "status": False}
+        )
+        app = _make_tags_app(state)
+
+        from aiohttp import web as _web
+
+        @_web.middleware
+        async def _as_app(request, handler):
+            request["app"] = "my-app"
+            return await handler(request)
+
+        app.middlewares.append(_as_app)
+        async with TestClient(TestServer(app)) as client:
+            with patch("kiro_crew.dashboard.chat_tags.save_slot_off_loop"):
+                resp = await client.put("/api/chat/slots/s1/tags", json={"tags": ["t1"]})
+            assert resp.status == 200
+        assert own.tags == ["t1"]
+
+    @pytest.mark.asyncio
+    async def test_assign_app_token_allowed_on_own_slot(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        own = _ChatSlot("s1")
+        own._app = "my-app"
+        state._slots["s1"] = own
+        app = _make_tags_app(state)
+
+        from aiohttp import web as _web
+
+        @_web.middleware
+        async def _as_app(request, handler):
+            request["app"] = "my-app"
+            return await handler(request)
+
+        app.middlewares.append(_as_app)
+        async with TestClient(TestServer(app)) as client:
+            tag = {"id": "t1", "name": "T1", "color": "#000000", "order": 0, "status": False}
+            state._tags.append(tag)
+            with patch("kiro_crew.dashboard.chat_tags.save_slot_off_loop"):
+                resp = await client.put("/api/chat/slots/s1/tags", json={"tags": [tag["id"]]})
+            assert resp.status == 200
+        assert own.tags == [tag["id"]]
+
 
 # ── Sidebar columns ──
 
@@ -1237,6 +1637,23 @@ class TestColumns:
             resp = await client.get("/api/chat/tag-columns")
             assert resp.status == 200
             assert await resp.json() == []
+
+    @pytest.mark.asyncio
+    async def test_list_columns_survives_a_hand_edited_order(self, tmp_path, monkeypatch):
+        """``tag_boards.json`` is loaded verbatim like ``tags.json``; same key, same rule."""
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state._tag_boards = [
+            {"id": "b", "name": "B", "tag_ids": [], "mode": "any", "order": 1},
+            {"id": "x", "name": "X", "tag_ids": [], "mode": "any", "order": "invalid"},
+            {"id": "m", "name": "M", "tag_ids": [], "mode": "any"},
+        ]
+        app = _make_tags_app(state)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/chat/tag-columns")
+            assert resp.status == 200
+            names = [c["name"] for c in await resp.json()]
+            assert names[-1] == "B" and set(names) == {"B", "X", "M"}
 
     @pytest.mark.asyncio
     async def test_create_column(self, tmp_path, monkeypatch):
@@ -1723,7 +2140,15 @@ class TestLoadTagsSafety:
         )
         (tmp_path / "tag_boards.json").write_text(
             _json.dumps(
-                [{"id": "c1", "name": "L", "tag_ids": ["live1", "ghost"], "mode": "any", "order": 0}]
+                [
+                    {
+                        "id": "c1",
+                        "name": "L",
+                        "tag_ids": ["live1", "ghost"],
+                        "mode": "any",
+                        "order": 0,
+                    }
+                ]
             ),
             encoding="utf-8",
         )

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import uuid
 import weakref
@@ -31,8 +32,15 @@ from kiro_crew.dashboard.chat_tag_grants import (
     revoke_grant,
 )
 from kiro_crew.dashboard.chat_utils import slot_history_key
+from kiro_crew.dashboard.create_rate_limit import TAG_CREATE, allow_create
 from kiro_crew.dashboard.handlers._shared import read_bounded_json
 from kiro_crew.dashboard.state import DashboardState, mint_tags_revision
+from kiro_crew.dashboard.token_auth import (
+    app_owns_transcript,
+    effective_request_app,
+    refuse_unattributable_caller,
+    request_origin,
+)
 from kiro_crew.loop_lock import LoopBoundLock
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
@@ -358,18 +366,93 @@ async def create_tag_definition_off_loop(
         return tag
 
 
+def _order_key(row: dict) -> int:
+    """A tag's or column's stored position as a sort key; a non-number is 0.
+
+    ``tags.json`` and ``tag_boards.json`` are loaded verbatim (only ``id`` is
+    checked), and the product's own writers only ever store an int — so a
+    non-numeric ``order`` is a hand edit. A sort key that raises on it takes
+    down every reader of that file (the sidebar's tag list and columns, the MCP
+    tag tools) for one bad row.
+    """
+    value = row.get("order", 0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    if isinstance(value, float) and not math.isfinite(value):
+        return 0
+    return int(value)
+
+
 # ── Tag vocabulary ─────────────────────────────────────────────────────────
 
 
 async def api_chat_tags(request: web.Request) -> web.Response:
     """GET /api/chat/tags — list all tag definitions."""
     state: DashboardState = request.app["state"]
-    return web.json_response(sorted(state._tags, key=lambda t: t.get("order", 0)))
+    return web.json_response(sorted(state._tags, key=_order_key))
+
+
+def _refuse_vocabulary_write(
+    state: DashboardState, request: web.Request, operation: str
+) -> web.Response | None:
+    """The two refusals every write to the SHARED tag vocabulary applies first.
+
+    Tags are one vocabulary with no owner: a folder an app creates is the app's
+    own (``chat_folders._folder_owner_app``), but a tag an app coins or renames
+    lands in the person's list with nothing to tell it apart. So an app-scoped
+    caller may not write the vocabulary. Decided HERE, on the middleware's
+    validated claim, so the rule holds for every transport — the
+    ``chat_tag_create`` / ``chat_tag_update`` MCP tools included — rather than
+    only where a tool layer chooses to restate it. The unattributable-caller
+    refusal (:func:`token_auth.refuse_unattributable_caller`) runs first, for the
+    reason its docstring gives.
+
+    Returns the refusal response, or ``None`` when the write may proceed.
+    """
+    refused = refuse_unattributable_caller(state, request, operation)
+    if refused is not None:
+        return refused
+    request_app = effective_request_app(state, request)
+    if request_app:
+        sel().log_api_access(
+            caller=request_app,
+            operation=operation,
+            outcome="denied",
+            source="app_isolation",
+            error="apps cannot write shared tags",
+        )
+        return web.json_response(
+            {"error": "apps cannot write shared tags", "code": "app_forbidden"}, status=403
+        )
+    return None
 
 
 async def api_chat_tag_create(request: web.Request) -> web.Response:
     """POST /api/chat/tags — create a new tag."""
     state: DashboardState = request.app["state"]
+    refused = _refuse_vocabulary_write(state, request, "chat.tag_create")
+    if refused is not None:
+        return refused
+    # Rate is the property that matters for a verb an agent may call in a loop:
+    # the same per-caller budget ``api_chat_folder_create`` applies, keyed by the
+    # validated component name so it cannot be varied to escape the bucket.
+    # The browser is exempt — a person clicking is not the loop this bounds.
+    rl_source, rl_caller = request_origin(request, what="tag write", log=logger)
+    if rl_source != "dashboard" and not allow_create(TAG_CREATE, rl_caller):
+        sel().log_api_access(
+            caller=rl_caller,
+            operation="chat.tag_create",
+            outcome="denied",
+            source=rl_source,
+            error="create rate limited",
+        )
+        return web.json_response(
+            {
+                "error": "too many tags created recently; retry shortly",
+                "code": "create_rate_limited",
+            },
+            status=429,
+        )
     body, body_err = await read_bounded_json(request)
     if body_err is not None:
         return body_err
@@ -417,6 +500,9 @@ async def api_chat_tag_update(request: web.Request) -> web.Response:
     """
     state: DashboardState = request.app["state"]
     tid = request.match_info["id"]
+    refused = _refuse_vocabulary_write(state, request, "chat.tag_update")
+    if refused is not None:
+        return refused
     # Early unlocked check for fast 404 on obviously invalid ids (avoids
     # JSON parse + lock contention for non-existent tags).
     if not _tag_by_id(state, tid):
@@ -848,6 +934,34 @@ async def api_chat_slot_tags(request: web.Request) -> web.Response:
     slot = state._slots.get(name)
     if not slot:
         return web.json_response({"error": "not found", "code": "not_found"}, status=404)
+    # App ownership (App Kit §5.2) — the same deny-by-default rule
+    # ``chat_folders.api_chat_slot_folder`` applies to filing, and for the same
+    # reason: tagging is a write to a session's own state, and the
+    # ``chat_tag_assign`` MCP tool reaches this route on behalf of an app agent
+    # that scopes what it can SEE client-side — the boundary has to hold here,
+    # where the authoritative slot table is. Same 404 for both reasons so the
+    # route is not an existence oracle for slots the caller cannot see. The
+    # identity comes from the middleware's claim, re-derived through the shared
+    # rule when absent — never from the body. A caller whose tab closed mid-call
+    # is refused first: its derived app would be "" and read as the person.
+    refused = refuse_unattributable_caller(state, request, "chat.slot_tags")
+    if refused is not None:
+        return refused
+    request_app = effective_request_app(state, request)
+    if request_app and getattr(slot, "_app", "") != request_app:
+        sel().log_api_access(
+            caller=request_app,
+            operation="chat.slot_tags",
+            outcome="denied",
+            source="app_isolation",
+            resources=f"slot={slot.key}",
+            error=(
+                "app cannot access unscoped slots"
+                if not getattr(slot, "_app", "")
+                else "app does not own this slot"
+            ),
+        )
+        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
     # Capture the transcript key the lookup above just covered, BEFORE the
     # body-parse and lock awaits: ``linked_session_key`` is rebound on
     # already-live slots with no ``running`` gate (cron completions, workflow
@@ -856,6 +970,21 @@ async def api_chat_slot_tags(request: web.Request) -> web.Response:
     # save's expected_history_key pin together keep this request's write on
     # the transcript it was authorized against.
     authorized_history_key = slot_history_key(slot)
+    # The slot's ``_app`` says who owns the slot OBJECT; the write persists into
+    # the TRANSCRIPT that key names, which a linked slot can point at another
+    # owner's session. Both must resolve to the caller's app, or the write would
+    # carry an app's tags into a conversation it cannot be shown to own. Same
+    # indistinguishable 404, for the same reason.
+    if not app_owns_transcript(state._slots, request_app, authorized_history_key):
+        sel().log_api_access(
+            caller=request_app,
+            operation="chat.slot_tags",
+            outcome="denied",
+            source="app_isolation",
+            resources=f"slot={slot.key}",
+            error="app does not own this slot's transcript",
+        )
+        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
     body, body_err = await read_bounded_json(request)
     if body_err is not None:
         return body_err
@@ -889,8 +1018,14 @@ async def api_chat_slot_tags(request: web.Request) -> web.Response:
         # the same slot OBJECT must still be registered under the name, and
         # its routing must still resolve to the transcript captured before
         # the first await — a rebind in either window means this request's
-        # authorization no longer covers the write target.
-        if state._slots.get(name) is not slot or slot_history_key(slot) != authorized_history_key:
+        # authorization does not cover the write target. Ownership of the
+        # transcript is re-asked too: a foreign slot binding to it during the
+        # awaits would make the earlier answer stale.
+        if (
+            state._slots.get(name) is not slot
+            or slot_history_key(slot) != authorized_history_key
+            or not app_owns_transcript(state._slots, request_app, authorized_history_key)
+        ):
             sel().log_api_access(
                 caller="dashboard",
                 operation="chat.slot_tags",
@@ -1078,7 +1213,7 @@ def _normalize_column(
 async def api_chat_tag_columns(request: web.Request) -> web.Response:
     """GET /api/chat/tag-columns — list sidebar column layout."""
     state: DashboardState = request.app["state"]
-    return web.json_response(sorted(state._tag_boards, key=lambda c: c.get("order", 0)))
+    return web.json_response(sorted(state._tag_boards, key=_order_key))
 
 
 def _state_lane_owner(
@@ -1271,7 +1406,7 @@ async def api_chat_tag_columns_reorder(request: web.Request) -> web.Response:
             else:
                 col["order"] = next_order
                 next_order += 1
-        state._tag_boards.sort(key=lambda c: c.get("order", 0))
+        state._tag_boards.sort(key=_order_key)
         boards_snap = [dict(c) for c in state._tag_boards]
         try:
             await asyncio.to_thread(state.save_tag_boards_snapshot, boards_snap)
@@ -1282,7 +1417,7 @@ async def api_chat_tag_columns_reorder(request: web.Request) -> web.Response:
                     if col.get("id") == cid:
                         col["order"] = order
                         break
-            state._tag_boards.sort(key=lambda c: c.get("order", 0))
+            state._tag_boards.sort(key=_order_key)
             logger.warning("tag columns reorder failed to persist")
             return web.json_response(
                 {"error": "persist failed", "code": "persist_failed"}, status=500

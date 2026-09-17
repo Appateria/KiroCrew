@@ -30,6 +30,33 @@ def _mock_state(slot: _ChatSlot | None = None) -> DashboardState:
 
 class TestChatSlotMode:
     @pytest.mark.asyncio
+    async def test_an_app_cannot_change_mode_through_a_slot_linked_to_a_foreign_transcript(self):
+        """``_app`` passes; the transcript the write lands on belongs to another app."""
+        mine = _ChatSlot("s1")
+        mine._app = "my-app"
+        mine.linked_session_key = "slack:C1.100"
+        theirs = _ChatSlot("s2")
+        theirs._app = "other-app"
+        theirs.linked_session_key = "slack:C1.100"
+        state = _mock_state(mine)
+        state._slots["s2"] = theirs
+        app = _make_app(state)
+
+        @web.middleware
+        async def _as_app(request, handler):
+            request["app"] = "my-app"
+            return await handler(request)
+
+        app.middlewares.append(_as_app)
+        with patch("kiro_crew.dashboard.chat_folders.save_slot_off_loop") as save:
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.patch("/api/chat/slots/s1/mode", json={"mode": "orchestrator"})
+                assert resp.status == 404
+                assert (await resp.json())["code"] == "slot_not_found"
+        save.assert_not_called()
+        assert mine.mode == ""
+
+    @pytest.mark.asyncio
     async def test_switch_to_orchestrator(self):
         slot = _ChatSlot("test")
         assert slot.mode == ""

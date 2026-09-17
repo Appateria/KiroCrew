@@ -18,7 +18,13 @@ from kiro_crew.dashboard.chat_tags import tags_write_lock, validate_folder_tag_i
 from kiro_crew.dashboard.chat_utils import effective_session_key, slot_history_key
 from kiro_crew.dashboard.create_rate_limit import FOLDER_CREATE, allow_create
 from kiro_crew.dashboard.state import DashboardState
-from kiro_crew.dashboard.token_auth import caller_names_a_missing_slot, derive_caller_app
+from kiro_crew.dashboard.token_auth import (
+    KNOWN_INTERNAL_CALLERS,
+    app_owns_transcript,
+    effective_request_app,
+    refuse_unattributable_caller,
+    request_origin,
+)
 from kiro_crew.executors import subprocess_executor
 from kiro_crew.llm_helpers import run_bg_oneliner
 from kiro_crew.loop_lock import LoopBoundLock
@@ -246,53 +252,20 @@ async def _unhide_folder(state: DashboardState, folder_id: str) -> bool:
     return await state.mutate_folders(_clear)
 
 
-# The internal callers this module recognizes on ``X-Internal-Caller``.
-# Exact-listed and ratcheted in ``test_chat_folder_audit_origin.py``: adding a
-# caller here must be a conscious edit paired with a test, never a silent
-# widen — the point of the header is that a NEW internal caller surfaces as
-# ``unknown-internal`` in the audit until someone decides what to call it,
-# instead of silently inheriting another component's label.
-_KNOWN_INTERNAL_CALLERS = frozenset({"kirocrew-dashboard"})
+# The internal callers this module recognizes on ``X-Internal-Caller`` — the
+# shared set, ratcheted in ``test_chat_folder_audit_origin.py`` under this name.
+_KNOWN_INTERNAL_CALLERS = KNOWN_INTERNAL_CALLERS
 
 
 def _audit_origin(request: web.Request) -> tuple[str, str]:
     """SEL ``(source, caller)`` for a folder mutation.
 
-    ``source`` stays in SEL's documented *interface* vocabulary (``dashboard``,
-    ``mcp``, ...) so operator queries like ``source == "mcp"`` keep matching
-    every MCP-driven event uniformly; the validated component identity rides
-    in ``caller``, which SEL already carries for exactly this purpose.
-
-    These endpoints are driven by BOTH the browser and the ``chat_folder_*``
-    MCP tools (``/api/chat`` is a mixed-internal path). A request without
-    ``X-Internal-Secret`` is the browser: ``("dashboard", "dashboard")``. An
-    internal request names its component in ``X-Internal-Caller`` (attached by
-    the MCP stdio servers' shared loopback request helpers — see
-    ``mcp_shared.set_internal_caller``), validated against
-    ``_KNOWN_INTERNAL_CALLERS``. Inferring the identity from the secret alone
-    was correct only while exactly one internal caller existed, and would
-    silently mislabel every write the moment a second one is added.
-
-    Trust model: the secret is verified by the token-auth middleware before
-    this handler runs, so authentication is settled here. The caller header is
-    ATTRIBUTION on top of that — it grants nothing (a browser sending the
-    header without the secret still audits as ``dashboard``), and an
-    unrecognized or missing value on an authenticated internal request is
-    recorded as ``caller="unknown-internal"`` with a warning rather than
-    trusted into the audit log.
+    The rule is :func:`token_auth.request_origin`, shared with the tag routes so
+    a new internal caller is classified once. The warning for an unrecognized
+    caller is emitted under this module's logger, where the folder audit tests
+    listen for it.
     """
-    if request.headers.get("X-Internal-Secret") is None:
-        return "dashboard", "dashboard"
-    caller = (request.headers.get("X-Internal-Caller") or "").strip()
-    if caller in _KNOWN_INTERNAL_CALLERS:
-        return "mcp", caller
-    logger.warning(
-        "internal folder write without a recognized X-Internal-Caller (got %r) — "
-        "audited as unknown-internal; a new internal caller must be added to "
-        "_KNOWN_INTERNAL_CALLERS alongside its ratchet test",
-        caller[:64],
-    )
-    return "mcp", "unknown-internal"
+    return request_origin(request, what="folder write", log=logger)
 
 
 async def api_chat_folders(request: web.Request) -> web.Response:
@@ -384,45 +357,11 @@ def _refuse_unattributable_caller(
 ) -> web.Response | None:
     """403 when the caller NAMES a dashboard slot that is gone, else None.
 
-    ``_effective_request_app`` answers ``""`` both for the person and for a
-    caller it cannot place, and the tree-shaping rules read ``""`` as the
-    person's full authority. That is sound for a caller that never had a slot --
-    a Slack thread, a channel session, the person's own cron -- but not for a
-    ``dashboard:`` key, which NAMES a slot: absence there is not "nothing to
-    confine me to", it is "the app I would have been confined to is exactly what
-    got popped". A tab closing while one of its tool calls is still in flight
-    produces precisely that, because the slot is popped synchronously without
-    draining in-flight MCP calls.
-
-    So an app-owned session going through that race would otherwise arrive here
-    with an empty scope and be handed the person's authority over the person's
-    own folders. ``mcp_dashboard._caller_app_scope`` already refuses this class
-    for its own tool set; ``caller_names_a_missing_slot`` exists so a route
-    outside that set applies the same rule, and it is deliberately NOT in the
-    middleware -- a popped slot no longer says whose tab it was, so refusing
-    there would also refuse the person's own in-flight calls on every internal
-    route at once. Each route that could not attribute a write decides for
-    itself, and a write to the shared folder tree is one of those.
+    The rule and its rationale are :func:`token_auth.refuse_unattributable_caller`,
+    shared with the tag routes; this wrapper fixes the audit ``operation`` for the
+    folder-tree writes and keeps the name the folder routes call.
     """
-    if caller_names_a_missing_slot(
-        getattr(state, "_slots", None), request.headers.get("X-Session-Key", "")
-    ):
-        sel().log_api_access(
-            caller="unattributable",
-            operation="chat.folder_write",
-            outcome="denied",
-            source="app_isolation",
-            resources=request.path,
-            error="caller names a dashboard slot that is gone",
-        )
-        return web.json_response(
-            {
-                "error": "the calling session is gone, so this write cannot be attributed",
-                "code": "caller_unattributable",
-            },
-            status=403,
-        )
-    return None
+    return refuse_unattributable_caller(state, request, "chat.folder_write")
 
 
 def _folder_owner_app(folder: dict[str, Any]) -> str:
@@ -1188,29 +1127,12 @@ async def api_chat_folder_delete(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-def _effective_request_app(state: DashboardState, request: web.Request) -> str:
-    """App identity to enforce ownership against, or "" for the dashboard user.
-
-    Reads the claim ``token_auth_middleware`` publishes, and re-derives through
-    the SAME shared rule (``token_auth.derive_caller_app``) when it is absent.
-
-    The internal-secret transport (the managed MCP set) carries no app claim of
-    its own, so the middleware derives one for every route on that transport.
-    The re-derivation here is defense-in-depth for a caller that reaches the
-    handler without having passed that branch, and it calls the shared function
-    rather than restating the rule so the two can never disagree.
-
-    Never read from request BODY or tool arguments — a caller that could name
-    its own scope could name someone else's.
-    """
-    declared = request.get("app", "")
-    if declared:
-        return str(declared)
-    app_name = derive_caller_app(
-        getattr(state, "_slots", None),
-        request.headers.get("X-Session-Key", ""),
-    )
-    return app_name
+# The authorization-identity helper is homed in ``token_auth`` beside the rule it
+# wraps; this module keeps its historical private name because
+# ``chat_folder_scaffold`` imports it from here and
+# ``test_internal_secret_app_identity_3690`` addresses it as
+# ``chat_folders._effective_request_app``.
+_effective_request_app = effective_request_app
 
 
 # Per-STATE metadata-write transaction lock for the slot metadata PATCH
@@ -1273,6 +1195,10 @@ async def api_chat_slot_folder(request: web.Request) -> web.Response:
     # app holding this route could reach a session it does not own. Reported as
     # the same 404 for both reasons on purpose — a distinct code per reason
     # would turn it into an existence oracle for slots the caller cannot see.
+    # A caller whose tab closed mid-call is refused first: its derived app
+    # would be "" and read as the person (the same guard the tree writes apply).
+    if (refusal := refuse_unattributable_caller(state, request, "chat.slot_folder")) is not None:
+        return refusal
     request_app = _effective_request_app(state, request)
     if request_app and getattr(slot, "_app", "") != request_app:
         sel().log_api_access(
@@ -1296,6 +1222,20 @@ async def api_chat_slot_folder(request: web.Request) -> web.Response:
     # save's expected_history_key pin together keep this request's write on
     # the transcript it was authorized against.
     authorized_history_key = slot_history_key(slot)
+    # ``_app`` says who owns the slot OBJECT; the write persists into the
+    # TRANSCRIPT that key names, which a linked slot can point at another
+    # owner's session. Both must resolve to the caller's app (same rule as
+    # ``chat_tags.api_chat_slot_tags``), same indistinguishable 404.
+    if not app_owns_transcript(state._slots, request_app, authorized_history_key):
+        sel().log_api_access(
+            caller=request_app,
+            operation="chat.slot_folder",
+            outcome="denied",
+            source="app_isolation",
+            resources=f"slot={slot.key}",
+            error="app does not own this slot's transcript",
+        )
+        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
     try:
         body = await request.json()
     except Exception:
@@ -1333,6 +1273,7 @@ async def api_chat_slot_folder(request: web.Request) -> web.Response:
             state._slots.get(name) is not slot
             or slot_history_key(slot) != authorized_history_key
             or (expected_created and slot.created_at != expected_created)
+            or not app_owns_transcript(state._slots, request_app, authorized_history_key)
         ):
             source, caller = _audit_origin(request)
             sel().log_api_access(
@@ -1505,7 +1446,11 @@ async def api_chat_slot_mode(request: web.Request) -> web.Response:
     # `/api/chat` could otherwise list a foreign slot and PATCH it into (or out
     # of) crew mode, changing a session it does not own. One code for both
     # reasons on purpose — a distinct code per reason would turn this 404 into an
-    # existence oracle for slots the caller may not know about.
+    # existence oracle for slots the caller may not know about. A caller whose
+    # tab closed mid-call is refused first: its derived app would be "" and read
+    # as the person (the same guard the tree writes apply).
+    if (refusal := refuse_unattributable_caller(state, request, "chat.slot_mode")) is not None:
+        return refusal
     request_app = request.get("app", "")
     if request_app and getattr(slot, "_app", "") != request_app:
         sel().log_api_access(
@@ -1519,6 +1464,19 @@ async def api_chat_slot_mode(request: web.Request) -> web.Response:
                 if not getattr(slot, "_app", "")
                 else "app does not own this slot"
             ),
+        )
+        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+    # ``_app`` says who owns the slot OBJECT; the write persists into the
+    # TRANSCRIPT ``authorized_history_key`` names. Same rule as the folder and
+    # tag writes, same indistinguishable 404.
+    if not app_owns_transcript(state._slots, request_app, authorized_history_key):
+        sel().log_api_access(
+            caller=request_app,
+            operation="chat.slot_mode",
+            outcome="denied",
+            source="app_isolation",
+            resources=f"slot={slot.key}",
+            error="app does not own this slot's transcript",
         )
         return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
     try:
@@ -1564,8 +1522,13 @@ async def api_chat_slot_mode(request: web.Request) -> web.Response:
     async with _slot_meta_txn_lock(state):
         # Re-authorize after the awaits above (body parse, lock acquisition):
         # same slot OBJECT still registered under the name, routing still on
-        # the transcript captured before the first await.
-        if state._slots.get(name) is not slot or slot_history_key(slot) != authorized_history_key:
+        # the transcript captured before the first await, and that transcript
+        # still owned by the caller's app.
+        if (
+            state._slots.get(name) is not slot
+            or slot_history_key(slot) != authorized_history_key
+            or not app_owns_transcript(state._slots, request_app, authorized_history_key)
+        ):
             sel().log_api_access(
                 caller="dashboard",
                 operation="chat.slot_mode",

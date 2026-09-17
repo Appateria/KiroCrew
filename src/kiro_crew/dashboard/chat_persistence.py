@@ -935,6 +935,31 @@ def _member_restore_identity(slot_name: str) -> tuple[str, str] | None:
     return member, members_mod.DM_SLOT_MODE
 
 
+def _is_app_owned_channel_row(meta: dict, history_key: str) -> bool:
+    """A persisted row an APP owns whose conversation is a channel thread.
+
+    The two cannot go together: a channel thread is the person's conversation,
+    and ``get_or_create_slot`` refuses to bind an app-owned slot to one. A row
+    of this shape is the artifact of the earlier auto-bind (an app naming its
+    slot after a channel stem) and is not surfaced — restoring it would load the
+    channel transcript into an app's slot. Its file is left untouched, and the
+    skip is logged so a session that stops appearing at boot can be traced.
+    """
+    if not str(meta.get("app") or ""):
+        return False
+    linked = str(meta.get("linked_session_key") or "")
+    if is_channel_session_key(history_key) or (bool(linked) and is_channel_session_key(linked)):
+        logger.warning(
+            "restore: not surfacing app-owned row %s (app=%s, linked=%s) — a channel "
+            "thread is never an app's slot; the file is left as is",
+            history_key,
+            str(meta.get("app") or "")[:64],
+            linked[:64] or "-",
+        )
+        return True
+    return False
+
+
 def _rehydrate_slot_from_history(
     state: DashboardState,
     slot_name: str,
@@ -987,6 +1012,8 @@ def _rehydrate_slot_from_history(
     )
     # No metadata → session was never persisted. Don't create a phantom slot.
     if not meta:
+        return None
+    if _is_app_owned_channel_row(meta, history_key):
         return None
     # ``adopt_closed`` restores a session that was archived with ``closed``.
     # Off by default so a session the user closed stays closed; app-owned worker
@@ -1633,6 +1660,8 @@ def _apply_recent_session(
         else member_identity
     )
     if _member_identity is _SKIP_MEMBER_RESTORE:
+        return
+    if _is_app_owned_channel_row(meta, key):
         return
     slot = state.get_or_create_slot(
         slot_name,
