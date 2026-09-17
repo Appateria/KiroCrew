@@ -57,6 +57,7 @@ from kiro_crew.config.loader import (
     update_config_locked,
 )
 from kiro_crew.config.paths import kiro_agents_dir, peek_data_home
+from kiro_crew.constants import is_control_tag_tail, strip_control_comments
 from kiro_crew.context import (
     ContextBuilder,
     build_cancelled_turn_preamble,
@@ -2374,13 +2375,83 @@ async def _handle_slash_command(
     return ""
 
 
-def _filter_options_brackets(text: str, bracket_hold: str, stream_buffer: str) -> tuple[str, str]:
-    """Filter ``[OPTIONS: ...]`` tags from streaming text character-by-character.
+#: Longest span the comment hold keeps before giving up on it. Sized for the
+#: three tag families stacked once each at the grammar's own bounds (each
+#: line: opener, 16 whitespace, 256 body, closer, 16 trailing whitespace and
+#: its newline -- under 300 bytes), so every tail the grammar admits fits; a
+#: hold past it is not one and is released as prose rather than withheld to
+#: end of turn. Also the bound on the per-byte re-judgement: each byte costs
+#: one anchored pass over the hold, so this cap is what keeps a stream of
+#: nothing but tags linear.
+_COMMENT_HOLD_MAX = 1024
 
-    Returns the updated *(bracket_hold, stream_buffer)* tuple.
+
+def _at_tag_line_start(stream_buffer: str) -> bool:
+    """Whether the next character lands where a control-tag LINE may begin.
+
+    The tag grammar is line-leading with at most three characters of indent
+    (CommonMark: four is an indented code block). The current line is whatever
+    follows the buffer's last newline; an EMPTY buffer is admitted too, because
+    the buffer is cleared at every flush and the hold cannot see what was
+    already appended. That over-approximates once per flush boundary -- a
+    quoted tag whose ``<`` is the first byte after a flush is judged as if
+    line-leading -- and costs at most a hold that the tail rule below releases
+    the moment content follows it; an ordinary comment or prose is released
+    either way.
+    """
+    line = stream_buffer[stream_buffer.rfind("\n") + 1 :]
+    return len(line) <= 3 and line.strip(" \t") == ""
+
+
+def _comment_hold_is_protocol(hold: str) -> bool:
+    """Whether the held span, from its line-leading ``<``, is so far NOTHING
+    BUT a control-tag tail: complete recognized tag lines (stacked, with their
+    bounded trailing whitespace) and at most one still-arriving tag prefix.
+
+    Decided by the ONE backend grammar (``constants.is_control_tag_tail``,
+    the anchored form of the streaming strip). Any other byte -- a diverging
+    opener (``<div``), an ordinary comment body (``<!-- ordin``), a line break
+    inside a tag, or CONTENT after a complete tag -- makes the span text, and
+    the caller releases it verbatim.
+    """
+    return len(hold) <= _COMMENT_HOLD_MAX and is_control_tag_tail(hold)
+
+
+def _filter_options_brackets(text: str, bracket_hold: str, stream_buffer: str) -> tuple[str, str]:
+    """Filter ``[OPTIONS: ...]`` tags and control-tag comments from streaming
+    text character-by-character.
+
+    Returns the updated *(bracket_hold, stream_buffer)* tuple. The hold is one
+    string and its first character says what it holds: ``[`` opens the OPTIONS
+    bracket-hold, a line-leading ``<`` opens the comment hold.
+
+    Slack streams by APPENDING and appended text is final (``chat.stopStream``
+    does not replace it), so a control tag can only be kept off the stream by
+    holding the bytes that might be one until the stream can tell. The comment
+    hold is the bracket-hold's twin for ``<!-- keep-visible -->`` and its
+    siblings, with one difference that matters: a recognized tag is NOT
+    dropped when its ``-->`` arrives. Control tags are TAIL-anchored -- the
+    same tag quoted mid-message (a fenced example, a line of prose after it)
+    is visible content -- and an append-only stream learns which one it has
+    only from what follows. So a complete tag stays held while it is still a
+    possible tail (``_comment_hold_is_protocol``), is released verbatim the
+    moment any content follows it, and is settled at the end of the turn by
+    ``_resolve_comment_hold`` against the whole reply. Only what the tail
+    grammar recognizes can ever be withheld: every other comment, a hold that
+    diverges from ``<!--``, or one that spans a line break is released as soon
+    as the diverging byte arrives -- and that byte is then processed on its
+    own, so a ``[`` that ends a hold still opens the bracket-hold.
     """
     for ch in text:
-        if bracket_hold or ch == "[":
+        if bracket_hold and bracket_hold[0] == "<":
+            if _comment_hold_is_protocol(bracket_hold + ch):
+                bracket_hold += ch
+                continue
+            # The held span is content. It goes out as written, and the byte
+            # that proved it falls through to be judged on its own.
+            stream_buffer += bracket_hold
+            bracket_hold = ""
+        if bracket_hold:
             bracket_hold += ch
             if ch == "]":
                 if bracket_hold.startswith("[OPTIONS:"):
@@ -2388,9 +2459,32 @@ def _filter_options_brackets(text: str, bracket_hold: str, stream_buffer: str) -
                 else:
                     stream_buffer += bracket_hold
                     bracket_hold = ""
+        elif ch == "[":
+            bracket_hold = ch
+        elif ch == "<" and _at_tag_line_start(stream_buffer):
+            bracket_hold = ch
         else:
             stream_buffer += ch
     return bracket_hold, stream_buffer
+
+
+def _resolve_comment_hold(bracket_hold: str, accumulated: str) -> tuple[str, str]:
+    """Settle a comment hold when the stream ENDS; returns *(hold, release)*.
+
+    The stream is over, so the held span is the reply's tail, and the tail
+    grammar can now be asked directly on the whole reply -- fence parity and
+    all: when ``strip_control_comments`` removes something from *accumulated*,
+    the held tail IS the control tag and is dropped; when it removes nothing
+    (an unterminated fence swallows the tail, a tag prefix that never
+    completed, a body over the bound) the span is content and is released for
+    one last append. A ``[`` hold is not this function's: it keeps the
+    bracket-hold's own end-of-turn outcome.
+    """
+    if not bracket_hold or bracket_hold[0] != "<":
+        return bracket_hold, ""
+    if strip_control_comments(accumulated) != accumulated:
+        return "", ""
+    return "", bracket_hold
 
 
 def build_timing_footer(
@@ -3992,6 +4086,11 @@ async def handle_message(
                     # message after wait returns), so a raising ``stop_stream``
                     # changes nothing except — unguarded — faking a terminal
                     # error on a live turn via the catch-all.
+                    # This message ends here: a held comment is its tail, so
+                    # settle it against the source before that is discarded.
+                    bracket_hold, _released = _resolve_comment_hold(bracket_hold, accumulated)
+                    if _released:
+                        await _append_stream(_released)
                     try:
                         await slack.stop_stream(channel, stream_ts)
                     except Exception:
@@ -4322,9 +4421,14 @@ async def handle_message(
         return
 
     # Strip any inline <thinking> tags that leaked into the text
+    _untrimmed = ""
     if accumulated:
         accumulated, inline_thinking = strip_thinking_tags(accumulated)
-        accumulated = accumulated.strip()
+        # Trailing control-tag lines are peeled BEFORE the whitespace trim: the
+        # trim would erase the indentation that marks a quoted, 4-space-indented
+        # tag as code, and the tail grammar would then read it as protocol.
+        _untrimmed = strip_control_comments(accumulated)
+        accumulated = _untrimmed.strip()
         if inline_thinking:
             thinking_accumulated += ("\n\n" if thinking_accumulated else "") + inline_thinking
 
@@ -4348,7 +4452,10 @@ async def handle_message(
     # answer ending in [OPTIONS: ...] is truncated, the tag goes with the tail,
     # and the buttons silently never appear. Matches the ordering used by the
     # cron, subagent-completion and dashboard-mirror paths.
-    _body_text, options = extract_options(accumulated) if accumulated else ("", [])
+    # From the UNTRIMMED text, for the same reason as above: a tag line that sat
+    # before the OPTIONS trailer is protocol only with its own indent in view.
+    _body_text, options = extract_options(_untrimmed) if accumulated else ("", [])
+    _body_text = strip_control_comments(_body_text).strip()
 
     _render = render_one_for_slack(_body_text, keep_tables=actually_streamed)
     final_text = _render.text or _NO_RESPONSE
@@ -4470,8 +4577,11 @@ async def handle_message(
             _cancel_tool_timer()
             _ct = f"{_active_task_title}  {_elapsed}" if _elapsed else _active_task_title
             await _append_task(_active_task_id, _ct, "complete")
-        # Flush remaining buffer (bracket_hold excluded — it's either
-        # a suppressed OPTIONS tag or an unclosed bracket we drop)
+        # Flush remaining buffer. A ``[`` hold is excluded — it's either a
+        # suppressed OPTIONS tag or an unclosed bracket we drop; a comment hold
+        # is settled against the whole reply and released when it is content.
+        bracket_hold, _released = _resolve_comment_hold(bracket_hold, _untrimmed)
+        stream_buffer += _released
         if stream_buffer:
             stream_buffer, _ = strip_thinking_tags(stream_buffer, strip_whitespace=False)
             await _append_stream(stream_buffer)
