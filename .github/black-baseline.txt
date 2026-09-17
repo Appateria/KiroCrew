@@ -1029,6 +1029,5 @@ test/test_workspace_absolute_paths.py
 test/test_write_secret_file.py
 test/test_ws_and_plan_memory_fixes.py
 test/test_ws_event_scoping.py
-test/test_xdist_auto_cap.py
 test/test_xdist_host_budget.py
 test/windows_sim.py

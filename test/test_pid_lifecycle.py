@@ -4191,6 +4191,7 @@ class TestBrowserSessionOwnerAlive:
             patch.object(Path, "stat", return_value=Mock(st_uid=os.getuid())),
             patch.object(sp, "_linux_pid_sid", return_value=1),
             patch.object(sp, "_env_value", side_effect=_boom),
+            patch.object(sp.platform_compat, "linux_process_name", return_value=None),
         ):
             mock_sys.platform = "linux"
             assert sp._browser_session_owner_alive(900, b"kc-1a2b3c4d") is True

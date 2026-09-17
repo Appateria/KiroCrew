@@ -535,6 +535,27 @@ def test_a_loaded_laptop_is_bounded_by_what_is_free_not_by_what_it_owns(
     assert resolved < 16 // ct._GIB_PER_WORKER, "the static bound alone would over-grant"
 
 
+def test_per_worker_reservation_is_platform_aware(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fix's core claim: one worker's reservation is not one number.
+
+    A full-suite worker holds ~1.5 GiB on Linux but 14.9-16.1 GiB on macOS. The
+    remeasured Linux/Windows divisor is fatally low for macOS -- four ``-n auto``
+    workers reserve 62 GiB on a 36 GiB Mac and the kernel jetsam-kills it --
+    while the macOS figure would clamp a healthy Linux host to a handful of
+    workers, so the default depends on the platform. Both the static and the
+    live reading follow the platform, since they describe the same worker.
+    """
+    monkeypatch.setattr(ct.platform_compat, "IS_MACOS", True, raising=False)
+    assert ct._gib_per_worker() == ct._MACOS_GIB_PER_WORKER
+    assert ct._gib_per_worker_available() == ct._MACOS_GIB_PER_WORKER
+    monkeypatch.setattr(ct.platform_compat, "IS_MACOS", False, raising=False)
+    assert ct._gib_per_worker() == ct._GIB_PER_WORKER
+    assert ct._gib_per_worker_available() == ct._GIB_PER_WORKER_AVAILABLE
+    # The macOS default is the wall against the overshoot: four workers must not
+    # be granted against the reporter's 36 GiB host.
+    assert 4 * ct._MACOS_GIB_PER_WORKER > 36
+
+
 def test_a_starved_host_floors_at_one_worker_instead_of_refusing(
     budget_host: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

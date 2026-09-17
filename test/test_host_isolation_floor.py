@@ -1704,6 +1704,24 @@ class TestTheWorkerBudgetIsMemoryBounded:
     rather than a bug. So each reading must degrade to "skip this bound", never to zero.
     """
 
+    #: The per-worker reservation is now platform-aware (3 GiB on Linux/Windows,
+    #: 16 GiB on macOS), so an assertion here computed against the live selector
+    #: would read one number on Linux and another on macOS. These tests are about
+    #: the shared division MECHANISM, not the platform default that feeds it, so
+    #: the autouse fixture below forces the selectors to the Linux/Windows
+    #: constants on every platform; each assertion then derives its expected
+    #: count from ``_GIB_PER_WORKER`` directly. The platform default itself is
+    #: covered by ``test_xdist_host_budget.py::test_per_worker_reservation_is_platform_aware``.
+
+    @pytest.fixture(autouse=True)
+    def _pin_per_worker_reservation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import xdist_budget as budget
+
+        monkeypatch.setattr(budget, "_gib_per_worker", lambda: budget._GIB_PER_WORKER)
+        monkeypatch.setattr(
+            budget, "_gib_per_worker_available", lambda: budget._GIB_PER_WORKER_AVAILABLE
+        )
+
     def test_the_budget_is_registered_from_the_rootdir_not_from_test_conftest(self) -> None:
         """The gap that was silent for every testpath but ``test/``.
 
