@@ -143,7 +143,7 @@ def test_an_append_is_refused_while_another_owner_holds_the_log():
     foreign.take()
     refused = None
     try:
-        handle.append("turn/started", {"turn": 1, "actor": "user"}, src="acp")
+        handle.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     except LedgerError as exc:
         refused = exc.code
     finally:
@@ -158,9 +158,9 @@ def test_ownership_is_taken_once_the_owner_releases_it():
     foreign = _Foreign()
     foreign.take()
     with pytest.raises(LedgerError):
-        handle.append("turn/started", {"turn": 1, "actor": "user"}, src="acp")
+        handle.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     foreign.give_up()
-    handle.append("turn/started", {"turn": 1, "actor": "user"}, src="acp")
+    handle.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     assert _types() == ["turn/started"]
 
 
@@ -171,7 +171,7 @@ def test_a_read_only_open_takes_no_write_ownership():
     this, which is the regression that would make every reader wait on the writer.
     """
     writer = _session()
-    writer.append("turn/started", {"turn": 1, "actor": "user"}, src="acp")
+    writer.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     del writer
     gc.collect()
 
@@ -190,7 +190,7 @@ def test_two_handles_in_one_process_share_one_ownership():
     can take the lock only once BOTH handles are gone.
     """
     first = _session()
-    first.append("turn/started", {"turn": 1, "actor": "user"}, src="acp")
+    first.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     second = Ledger.open(lg.KIND_SESSION, SESSION)
     # No refusal: the two share one lock through the reference count.
     second.append("message/chunk", {"turn": 1, "delta": "hi"}, src="acp", ignorable=True)
@@ -233,7 +233,7 @@ def test_a_release_fired_by_the_collector_inside_an_acquire_does_not_deadlock(mo
 
     collected_key = str(lg.ledger_dir(lg.KIND_SESSION, "collected-owner") / LEASE_FILE)
     owner = _session("collected-owner")
-    owner.append("turn/started", {"turn": 1, "actor": "user"}, src="acp")
+    owner.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     assert collected_key in lease._held
     cycle = Cycle()
     cycle.handle = owner
@@ -258,7 +258,7 @@ def test_a_release_fired_by_the_collector_inside_an_acquire_does_not_deadlock(mo
 
     def other_owner():
         handle = _session("other-unit")
-        handle.append("turn/started", {"turn": 1, "actor": "user"}, src="acp")
+        handle.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
         kept.append(handle)
         done.set()
 
@@ -291,8 +291,12 @@ def test_a_repair_is_refused_while_another_owner_holds_the_log():
     and the open turn is left exactly as the live writer has it.
     """
     handle = _session()
-    handle.append("turn/started", {"turn": 1, "actor": "user"}, src="acp")
-    handle.append("tool/called", {"turn": 1, "call_id": "tc-1", "name": "fs_write"}, src="acp")
+    handle.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
+    handle.append(
+        "tool/called",
+        {"turn": 1, "call_id": "tc-1", "name": "fs_write", "server": "", "kind": ""},
+        src="acp",
+    )
     del handle
     gc.collect()
 
@@ -353,7 +357,7 @@ def test_a_lock_whose_inode_moved_is_taken_again_on_the_file_that_stands():
     path.touch(exist_ok=True)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(os, "fstat", _replacing_fstat(path, 1))
-        handle.append("turn/started", {"turn": 1, "actor": "user"}, src="acp")
+        handle.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     assert _types() == ["turn/started"]
 
 
@@ -372,7 +376,7 @@ def test_a_lease_file_that_keeps_moving_is_refused_rather_than_trusted():
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(os, "fstat", _replacing_fstat(path, 99))
         with pytest.raises(LedgerError) as excinfo:
-            handle.append("turn/started", {"turn": 1, "actor": "user"}, src="acp")
+            handle.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     assert excinfo.value.code == lg.CODE_ALREADY_OWNED
     assert "keeps being replaced" in str(excinfo.value), "the cause is reported as contention"
     assert _types() == [], "an append landed without ownership"

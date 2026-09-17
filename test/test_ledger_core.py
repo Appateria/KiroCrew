@@ -17,6 +17,7 @@ import stat
 import threading
 
 import pytest
+from ledger_type_helpers import minimal_data
 
 from kiro_crew import ledger as lg
 from kiro_crew import sandbox
@@ -482,7 +483,7 @@ def test_the_session_kind_accepts_every_type_in_the_frozen_vocabulary(tmp_path):
     """
     led = _session("vocab-sess")
     for entry_type in FROZEN_SESSION_VOCABULARY:
-        led.append(entry_type, {"turn": 1}, src="gateway")
+        led.append(entry_type, minimal_data(lg.KIND_SESSION, entry_type), src="gateway")
     written = [e.type for e in led.iter_from(1)]
     assert written == list(FROZEN_SESSION_VOCABULARY)
 
@@ -505,13 +506,15 @@ def test_a_reader_with_the_frozen_vocabulary_reconstructs_every_type(tmp_path):
     rather than left to guess.
     """
     led = _session("vocab-read")
-    for n, entry_type in enumerate(FROZEN_SESSION_VOCABULARY, start=1):
-        led.append(entry_type, {"turn": 1, "marker": n}, src="gateway")
+    for entry_type in FROZEN_SESSION_VOCABULARY:
+        led.append(entry_type, minimal_data(lg.KIND_SESSION, entry_type), src="gateway")
 
     reader = lg.Ledger.open(lg.KIND_SESSION, "vocab-read")
     seen = list(reader.iter_from(1, known=set(FROZEN_SESSION_VOCABULARY)))
     assert [e.type for e in seen] == list(FROZEN_SESSION_VOCABULARY)
-    assert [e.data["marker"] for e in seen] == list(range(1, len(FROZEN_SESSION_VOCABULARY) + 1))
+    # Order is asserted on `seq`, which the writer assigns under the lock, so it
+    # carries the same claim a per-entry marker would and needs no field the
+    # entry's own type does not declare.
     assert [e.seq for e in seen] == list(range(1, len(FROZEN_SESSION_VOCABULARY) + 1))
 
 
@@ -522,7 +525,14 @@ def test_message_is_owned_by_both_kinds_because_both_have_messages():
     assert "message" in lg.TYPE_OWNERSHIP[lg.KIND_CREW]
     assert "message" in lg.TYPE_OWNERSHIP[lg.KIND_SESSION]
     assert _crew().append("message/forwarded", {}, src="gateway").seq == 1
-    assert _session().append("message/received", {}, src="gateway").seq == 1
+    assert (
+        _session()
+        .append(
+            "message/received", {"turn": 0, "role": "user", "source": "dashboard"}, src="gateway"
+        )
+        .seq
+        == 1
+    )
 
 
 @pytest.mark.parametrize("bad", ["noslash", "/leading", "trailing/", "a/b/c", "-bad/x", "x/-bad"])
@@ -1406,12 +1416,24 @@ def test_seq_falls_back_to_a_full_scan_when_the_window_holds_nothing_valid():
 def _interrupted_session() -> Ledger:
     """A session ledger whose newest turn was cut off mid-tool-call."""
     led = _session()
-    led.append("turn/started", {"turn": 1, "actor": "user"}, src="gateway")
-    led.append("tool/called", {"turn": 1, "call_id": "tc-1", "name": "fs_read"}, src="acp")
+    led.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="gateway")
+    led.append(
+        "tool/called",
+        {"turn": 1, "call_id": "tc-1", "name": "fs_read", "server": "", "kind": ""},
+        src="acp",
+    )
     led.append("turn/completed", {"turn": 1, "stop_reason": "end_turn"}, src="acp")
-    led.append("turn/started", {"turn": 2, "actor": "user"}, src="gateway")
-    led.append("tool/called", {"turn": 2, "call_id": "tc-2", "name": "execute_bash"}, src="acp")
-    led.append("tool/called", {"turn": 2, "call_id": "tc-3", "name": "fs_write"}, src="acp")
+    led.append("turn/started", {"turn": 2, "actor": "user", "depth": 0}, src="gateway")
+    led.append(
+        "tool/called",
+        {"turn": 2, "call_id": "tc-2", "name": "execute_bash", "server": "", "kind": ""},
+        src="acp",
+    )
+    led.append(
+        "tool/called",
+        {"turn": 2, "call_id": "tc-3", "name": "fs_write", "server": "", "kind": ""},
+        src="acp",
+    )
     return led
 
 
@@ -1435,7 +1457,10 @@ def test_repair_is_reachable_from_a_handle_as_well_as_from_open():
     assert list(led.iter_from(1))[-1].data["stop_reason"] == "interrupted"
     # The handle's cached seq follows the closers, so its next append does not
     # collide with them.
-    assert led.append("turn/started", {"turn": 3}, src="gateway").seq == led.last_seq
+    assert (
+        led.append("turn/started", {"turn": 3, "actor": "user", "depth": 0}, src="gateway").seq
+        == led.last_seq
+    )
 
 
 def test_an_interrupted_turn_is_closed_when_the_ledger_is_opened():
@@ -1455,7 +1480,7 @@ def test_an_interrupted_turn_is_closed_when_the_ledger_is_opened():
 
 def test_repair_refuses_to_close_past_a_damaged_real_completion(caplog):
     led = _session()
-    led.append("turn/started", {"turn": 1, "actor": "user"}, src="gateway")
+    led.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="gateway")
     led.append("turn/completed", {"turn": 1, "stop_reason": "end_turn"}, src="acp")
     path = lg.ledger_path(lg.KIND_SESSION, SESSION)
     lines = path.read_bytes().splitlines(keepends=True)
@@ -1529,8 +1554,12 @@ def test_a_completed_turns_unmatched_call_is_left_open():
     # did complete is a different anomaly, and inventing a result for it would be
     # this reader editing history it was not asked about.
     led = _session()
-    led.append("turn/started", {"turn": 1, "actor": "user"}, src="gateway")
-    led.append("tool/called", {"turn": 1, "call_id": "tc-1", "name": "fs_read"}, src="acp")
+    led.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="gateway")
+    led.append(
+        "tool/called",
+        {"turn": 1, "call_id": "tc-1", "name": "fs_read", "server": "", "kind": ""},
+        src="acp",
+    )
     led.append("turn/completed", {"turn": 1, "stop_reason": "end_turn"}, src="acp")
     before = _ledger_bytes()
     Ledger.open(lg.KIND_SESSION, SESSION, repair=True)
@@ -1649,7 +1678,7 @@ def _split_into_segments(kind: str, unit_id: str, at_seq: int) -> None:
 def test_segments_are_found_and_ordered_by_their_first_seq(tmp_path):
     led = _session("seg-order")
     for n in range(1, 13):
-        led.append("turn/started", {"turn": n}, src="gateway")
+        led.append("turn/started", {"turn": n, "actor": "user", "depth": 0}, src="gateway")
     _split_into_segments(lg.KIND_SESSION, "seg-order", 9)
     _split_into_segments(lg.KIND_SESSION, "seg-order", 5)
 
@@ -1663,7 +1692,7 @@ def test_segments_are_found_and_ordered_by_their_first_seq(tmp_path):
 def test_a_valid_multi_segment_layout_reads_end_to_end(tmp_path):
     led = _session("seg-read")
     for n in range(1, 13):
-        led.append("turn/started", {"turn": n}, src="gateway")
+        led.append("turn/started", {"turn": n, "actor": "user", "depth": 0}, src="gateway")
     _split_into_segments(lg.KIND_SESSION, "seg-read", 9)
     _split_into_segments(lg.KIND_SESSION, "seg-read", 5)
 
@@ -1726,7 +1755,7 @@ def test_a_kind_root_resolving_outside_the_data_home_is_refused(tmp_path):
 def test_a_real_kind_root_still_reads_and_writes(tmp_path):
     """The guard is a refusal for a wrong directory, not a new failure mode."""
     led = _session("root-ok")
-    led.append("turn/started", {"turn": 1}, src="gateway")
+    led.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="gateway")
     reader = lg.Ledger.open(lg.KIND_SESSION, "root-ok")
     assert [e.type for e in reader.iter_from()] == ["turn/started"]
 
@@ -1734,11 +1763,11 @@ def test_a_real_kind_root_still_reads_and_writes(tmp_path):
 def test_a_foreign_segment_is_refused_and_named(tmp_path):
     target = _session("seg-target")
     for n in range(1, 5):
-        target.append("turn/started", {"turn": n}, src="gateway")
+        target.append("turn/started", {"turn": n, "actor": "user", "depth": 0}, src="gateway")
 
     foreign = _session("seg-foreign")
     for n in range(1, 9):
-        foreign.append("turn/started", {"turn": n}, src="gateway")
+        foreign.append("turn/started", {"turn": n, "actor": "user", "depth": 0}, src="gateway")
     _split_into_segments(lg.KIND_SESSION, "seg-foreign", 5)
     foreign_segment = lg.ledger_dir(lg.KIND_SESSION, "seg-foreign") / "ledger.5.jsonl"
     offending = lg.ledger_dir(lg.KIND_SESSION, "seg-target") / "ledger.5.jsonl"
@@ -1754,7 +1783,7 @@ def test_a_foreign_segment_is_refused_and_named(tmp_path):
 def test_a_renamed_segment_is_refused_and_named(tmp_path):
     led = _session("seg-renamed")
     for n in range(1, 9):
-        led.append("turn/started", {"turn": n}, src="gateway")
+        led.append("turn/started", {"turn": n, "actor": "user", "depth": 0}, src="gateway")
     _split_into_segments(lg.KIND_SESSION, "seg-renamed", 5)
     directory = lg.ledger_dir(lg.KIND_SESSION, "seg-renamed")
     offending = directory / "ledger.6.jsonl"
@@ -1776,7 +1805,7 @@ def test_dropping_the_oldest_segments_is_retention_not_damage(tmp_path):
     """
     led = _session("seg-prune")
     for n in range(1, 13):
-        led.append("turn/started", {"turn": n}, src="gateway")
+        led.append("turn/started", {"turn": n, "actor": "user", "depth": 0}, src="gateway")
     _split_into_segments(lg.KIND_SESSION, "seg-prune", 9)
     lg.ledger_path(lg.KIND_SESSION, "seg-prune").unlink()
 
@@ -1790,7 +1819,7 @@ def test_a_gap_between_segments_is_refused_rather_than_read_across(tmp_path):
     # hand a fold consecutive entries that are not consecutive facts.
     led = _session("seg-gap")
     for n in range(1, 13):
-        led.append("turn/started", {"turn": n}, src="gateway")
+        led.append("turn/started", {"turn": n, "actor": "user", "depth": 0}, src="gateway")
     # Newest boundary first: each split re-reads the head, so splitting low then
     # high would leave the second segment empty.
     _split_into_segments(lg.KIND_SESSION, "seg-gap", 9)
@@ -1807,7 +1836,7 @@ def test_a_neighbour_file_sharing_the_prefix_is_ignored_not_refused(tmp_path):
     # An editor backup or a stray copy must not make a readable ledger unreadable.
     led = _session("seg-neighbour")
     for n in range(1, 5):
-        led.append("turn/started", {"turn": n}, src="gateway")
+        led.append("turn/started", {"turn": n, "actor": "user", "depth": 0}, src="gateway")
     directory = lg.ledger_dir(lg.KIND_SESSION, "seg-neighbour")
     (directory / "ledger.backup.jsonl").write_text("not a segment\n")
 
@@ -1834,7 +1863,9 @@ def test_a_chmod_refusing_filesystem_warns_once_not_once_per_append(monkeypatch,
     monkeypatch.setattr(store, "restrict_dir_to_owner", _refuse)
     with caplog.at_level("WARNING", logger=store.__name__):
         for turn in range(1, 6):
-            ledger.append("turn/started", {"turn": turn}, src="gateway")
+            ledger.append(
+                "turn/started", {"turn": turn, "actor": "user", "depth": 0}, src="gateway"
+            )
 
     warnings = [r for r in caplog.records if "owner-only" in r.getMessage()]
     assert len(warnings) == 1, f"{len(warnings)} warnings for 5 appends, expected 1"
@@ -1847,7 +1878,7 @@ def test_an_already_restricted_directory_is_not_chmodded_again():
     # The mode is checked before it is set, so the steady state costs one stat
     # instead of a syscall that changes nothing on every entry.
     ledger = _session("skip-check")
-    ledger.append("turn/started", {"turn": 1}, src="gateway")
+    ledger.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="gateway")
     calls: list[object] = []
     real = store.restrict_dir_to_owner
 
@@ -1857,7 +1888,7 @@ def test_an_already_restricted_directory_is_not_chmodded_again():
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(store, "restrict_dir_to_owner", _count)
-        ledger.append("turn/completed", {"turn": 1}, src="gateway")
+        ledger.append("turn/completed", {"turn": 1, "stop_reason": "end_turn"}, src="gateway")
 
     if os.name == "posix":
         assert calls == [], f"re-chmodded an already owner-only directory: {calls}"
@@ -1902,7 +1933,7 @@ def test_a_lazily_created_ledger_directory_is_not_world_readable():
     # on first write assert the same thing for themselves rather than trusting a
     # parent that may not have been tightened.
     ledger = _session("hardening-check")
-    ledger.append("turn/started", {"turn": 1}, src="gateway")
+    ledger.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="gateway")
 
     if os.name == "posix":
         mode = stat.S_IMODE(ledger.path.parent.stat().st_mode)
@@ -1915,7 +1946,7 @@ def test_a_ledger_that_exists_but_will_not_open_is_damage_not_absence():
     # `gone` for it converts a recoverable alarm into silence.
     src = _session()
     victim = _session("other-session")
-    entry = victim.append("turn/started", {"turn": 1}, src="gateway")
+    entry = victim.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="gateway")
     ref = lg.Ref(unit="session", id="other-session", from_seq=entry.seq)
     lines = victim.path.read_text(encoding="utf-8").splitlines()
     lines[0] = '{"broken":'
@@ -1930,11 +1961,11 @@ def test_a_citation_past_a_stale_cached_tail_is_not_called_ok():
     # lags. Clamping the expected count to it computes zero expected lines, which
     # answers `ok` for a citation that cannot actually be read.
     first = _session()
-    first.append("turn/started", {"turn": 1}, src="gateway")
+    first.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="gateway")
     stale_tail = first.last_seq
 
     second = Ledger.open("session", SESSION)
-    newer = second.append("turn/completed", {"turn": 1}, src="gateway")
+    newer = second.append("turn/completed", {"turn": 1, "stop_reason": "end_turn"}, src="gateway")
     assert newer.seq > stale_tail
 
     ref = lg.Ref(unit="session", id=SESSION, from_seq=newer.seq)
@@ -1979,7 +2010,7 @@ def test_a_group_is_written_contiguously_with_its_citing_entry_last():
 def test_a_group_is_refused_whole_and_leaves_the_file_identical():
     """Every check happens before a byte is written, as for a single append."""
     session = _session()
-    session.append("turn/started", {"turn": 1}, src="acp")
+    session.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     before = lg.ledger_path(lg.KIND_SESSION, SESSION).read_bytes()
 
     with _raises("bad_src"):
@@ -2004,7 +2035,7 @@ def test_repair_drops_a_chunk_group_whose_citing_entry_never_landed(caplog):
     that does not exist.
     """
     session = _session()
-    session.append("turn/started", {"turn": 1}, src="acp")
+    session.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     # Exactly the shape a torn group leaves: chunks, and then nothing.
     orphans = session.append_many(
         [
@@ -2039,7 +2070,7 @@ def test_repair_drops_a_chunk_group_whose_citing_entry_never_landed(caplog):
 def test_repair_keeps_a_chunk_group_that_was_completed():
     """A group followed by any entry landed whole -- it is not an orphan."""
     session = _session()
-    session.append("turn/started", {"turn": 1}, src="acp")
+    session.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     session.append_many(
         [
             {"type": "message/chunk", "data": {"turn": 1, "delta": "aa"}, "ignorable": True},
@@ -2070,7 +2101,7 @@ def test_a_newer_format_version_says_upgrade_rather_than_corrupt():
     `unknown_entry_type` instead.
     """
     session = _session()
-    session.append("turn/started", {"turn": 1}, src="acp")
+    session.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     path = lg.ledger_path(lg.KIND_SESSION, SESSION)
     lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
     header = json.loads(lines[0])
@@ -2090,7 +2121,7 @@ def test_a_newer_format_version_says_upgrade_rather_than_corrupt():
 def test_the_current_and_older_versions_still_open():
     """The refusal is for NEWER only -- an older file is what migration is for."""
     session = _session()
-    session.append("turn/started", {"turn": 1}, src="acp")
+    session.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     assert Ledger.open(lg.KIND_SESSION, SESSION).last_seq == 1
 
     path = lg.ledger_path(lg.KIND_SESSION, SESSION)
@@ -2112,7 +2143,7 @@ def test_a_group_with_no_data_is_refused_rather_than_written_empty():
     Mutation guard: restoring the `or {}` fallback makes both of these pass.
     """
     session = _session()
-    session.append("turn/started", {"turn": 1}, src="acp")
+    session.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     path = lg.ledger_path(lg.KIND_SESSION, SESSION)
     before = path.read_bytes()
 
@@ -2141,7 +2172,7 @@ def test_a_point_read_finds_an_entry_in_an_older_segment():
     """
     led = _session("seg-get")
     for n in range(1, 13):
-        led.append("turn/started", {"turn": n}, src="gateway")
+        led.append("turn/started", {"turn": n, "actor": "user", "depth": 0}, src="gateway")
     _split_into_segments(lg.KIND_SESSION, "seg-get", 9)
     _split_into_segments(lg.KIND_SESSION, "seg-get", 5)
 
@@ -2166,7 +2197,7 @@ def test_paging_walks_past_a_segment_boundary():
     """
     led = _session("seg-page")
     for n in range(1, 13):
-        led.append("turn/started", {"turn": n}, src="gateway")
+        led.append("turn/started", {"turn": n, "actor": "user", "depth": 0}, src="gateway")
     _split_into_segments(lg.KIND_SESSION, "seg-page", 9)
     _split_into_segments(lg.KIND_SESSION, "seg-page", 5)
 
@@ -2206,7 +2237,7 @@ def test_a_group_cites_the_seqs_it_was_actually_allocated():
     from kiro_crew.ledger import store as store_mod
 
     session = _session()
-    session.append("turn/started", {"turn": 1}, src="acp")
+    session.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
 
     real_open_lock = store_mod._open_lock
     fired: list[int] = []
@@ -2217,7 +2248,7 @@ def test_a_group_cites_the_seqs_it_was_actually_allocated():
         if not fired:
             fired.append(1)
             intruder = Ledger.open(lg.KIND_SESSION, SESSION)
-            intruder.append("turn/started", {"turn": 99}, src="acp")
+            intruder.append("turn/started", {"turn": 99, "actor": "user", "depth": 0}, src="acp")
         return real_open_lock(path)
 
     # A scoped context, NOT the `monkeypatch` fixture: its `undo` would also revert
@@ -2268,7 +2299,7 @@ def test_repair_leaves_the_file_alone_when_a_record_cannot_be_accounted_for(capl
     truncation run at a short offset and drops the valid entry below.
     """
     session = _session()
-    kept = session.append("turn/started", {"turn": 1}, src="acp")
+    kept = session.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     path = lg.ledger_path(lg.KIND_SESSION, SESSION)
     # An over-cap record, then a chunk group with no citing entry: the orphan shape,
     # sitting behind a record the bounded reader would silently drop.
@@ -2313,7 +2344,7 @@ def test_a_group_refuses_a_cite_that_does_not_return_an_entry():
     raises AttributeError instead, which is not a LedgerError and reddens this.
     """
     session = _session()
-    session.append("turn/started", {"turn": 1}, src="acp")
+    session.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     before = lg.ledger_path(lg.KIND_SESSION, SESSION).read_bytes()
 
     with pytest.raises(LedgerError) as caught:
@@ -2359,7 +2390,7 @@ def test_a_failed_append_leaves_the_file_exactly_as_it_was():
     a second copy, which reddens the count below.
     """
     session = _session()
-    session.append("turn/started", {"turn": 1}, src="acp")
+    session.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     path = lg.ledger_path(lg.KIND_SESSION, SESSION)
     before = path.read_bytes()
     burned: list = []
@@ -2367,11 +2398,13 @@ def test_a_failed_append_leaves_the_file_exactly_as_it_was():
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(os, "fsync", _fsync_failing_once(burned))
         with pytest.raises(OSError):
-            session.append("turn/completed", {"turn": 1, "reason": "end_turn"}, src="acp")
+            session.append("turn/completed", {"turn": 1, "stop_reason": "end_turn"}, src="acp")
         assert (
             path.read_bytes() == before
         ), "the failed append left bytes behind; a retry would now duplicate the fact"
-        retried = session.append("turn/completed", {"turn": 1, "reason": "end_turn"}, src="acp")
+        retried = session.append(
+            "turn/completed", {"turn": 1, "stop_reason": "end_turn"}, src="acp"
+        )
     assert burned, "fsync never failed, so the rollback path was not exercised"
 
     completed = [e for e in session.iter_from(1) if e.type == "turn/completed"]
@@ -2392,7 +2425,7 @@ def test_a_rollback_never_removes_another_writers_entries():
     truncating the whole tail) destroys its entry and reddens this.
     """
     session = _session()
-    session.append("turn/started", {"turn": 1}, src="acp")
+    session.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     intruder = Ledger.open(lg.KIND_SESSION, SESSION)
     landed = intruder.append("message/chunk", {"turn": 1, "delta": "keep me"}, src="acp")
     burned: list = []
@@ -2400,7 +2433,7 @@ def test_a_rollback_never_removes_another_writers_entries():
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(os, "fsync", _fsync_failing_once(burned))
         with pytest.raises(OSError):
-            session.append("turn/completed", {"turn": 1, "reason": "end_turn"}, src="acp")
+            session.append("turn/completed", {"turn": 1, "stop_reason": "end_turn"}, src="acp")
     assert burned
 
     survivors = [e.seq for e in Ledger.open(lg.KIND_SESSION, SESSION).iter_from(1)]
@@ -2422,7 +2455,7 @@ def test_a_failed_group_append_rolls_back_the_whole_group():
     writes a second one, reddening the counts below.
     """
     session = _session()
-    session.append("turn/started", {"turn": 1}, src="acp")
+    session.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     path = lg.ledger_path(lg.KIND_SESSION, SESSION)
     before = path.read_bytes()
     group = [
@@ -2463,7 +2496,7 @@ def test_an_append_whose_rollback_also_fails_says_so():
     raise the wrong type and reddens.
     """
     session = _session()
-    session.append("turn/started", {"turn": 1}, src="acp")
+    session.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="acp")
     burned: list = []
 
     def _rollback_fails(path, size):
@@ -2473,7 +2506,7 @@ def test_an_append_whose_rollback_also_fails_says_so():
         patch.setattr(os, "fsync", _fsync_failing_once(burned))
         patch.setattr(store, "_rollback_append", _rollback_fails)
         with pytest.raises(lg.IndeterminateAppend) as caught:
-            session.append("turn/completed", {"turn": 1, "reason": "end_turn"}, src="acp")
+            session.append("turn/completed", {"turn": 1, "stop_reason": "end_turn"}, src="acp")
     assert burned
     assert "could not be rolled back" in str(caught.value)
     assert caught.value.written, "the error does not carry what was written"

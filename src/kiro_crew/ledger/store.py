@@ -69,6 +69,7 @@ from kiro_crew.jsonl_util import (
     bounded_raw_records,
     strict_raw_records,
 )
+from kiro_crew.ledger.entry_types import validate_data
 from kiro_crew.ledger.errors import (
     CODE_ALREADY_EXISTS,
     CODE_ALREADY_OWNED,
@@ -1527,6 +1528,7 @@ class Ledger:
         """
         require_data(data)
         check_ownership(self._kind, type, src)
+        validate_data(self._kind, type, data)
         pointer = None if ref is None else _as_ref(ref)
         if thread is not None and (
             not isinstance(thread, int) or isinstance(thread, bool) or thread < 1
@@ -1621,6 +1623,7 @@ class Ledger:
             # and this is where that promise is kept.
             require_data(item.get("data"))
             check_ownership(self._kind, str(item.get("type") or ""), src)
+            validate_data(self._kind, str(item.get("type") or ""), item.get("data"))
         self._claim()
         with _open_lock(_lock_path(self._kind, self._id)):
             tail = _scan_tail(self._path)
@@ -1655,6 +1658,7 @@ class Ledger:
                     )
                 require_data(citing.get("data"))
                 check_ownership(self._kind, str(citing.get("type") or ""), src)
+                validate_data(self._kind, str(citing.get("type") or ""), citing.get("data"))
                 # LAST, so a torn tail can only cost the citing entry -- the orphan
                 # shape the repair drops -- never a chunk it already named.
                 members = [*items, citing]
