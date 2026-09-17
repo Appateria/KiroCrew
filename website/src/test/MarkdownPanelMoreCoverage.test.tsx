@@ -602,8 +602,8 @@ describe('MarkdownPanel — comment anchoring edge cases', () => {
     fireEvent.mouseUp(document)
 
     const box = await screen.findByLabelText('Comment on the selected text')
-    // No preview root, so nothing was wrapped in a <mark>.
-    expect(document.querySelector('mark')).toBeNull()
+    // No preview root, so nothing is painted.
+    expect(highlightRegistry.has('mc-annotate')).toBe(false)
     fireEvent.change(box, { target: { value: 'from the fallback' } })
     fireEvent.click(screen.getByLabelText('Add comment'))
     await screen.findByText('from the fallback')
@@ -624,11 +624,11 @@ describe('MarkdownPanel — comment anchoring edge cases', () => {
     sel.addRange(range)
     fireEvent.mouseUp(document)
     await screen.findByLabelText('Comment on the selected text')
-    // One <mark> per touched text node, not one for the whole selection.
-    expect(document.querySelectorAll('mark').length).toBeGreaterThan(1)
+    // One range per touched text node, not one for the whole selection —
+    // and the preview DOM itself stays exactly what React rendered.
+    expect(highlightRegistry.get('mc-annotate')!.length).toBeGreaterThan(1)
+    expect(document.querySelector('mark')).toBeNull()
   })
   // Re-selecting while the box is open (highlight moves to the new selection)
-  // is pinned at the toolbar level in SelectionToolbar.composer.test.tsx:
-  // exercising it here would need happy-dom to update a live Range across
-  // `normalize()`, which it does not (browsers do, per spec).
+  // is pinned at the toolbar level in SelectionToolbar.composer.test.tsx.
 })

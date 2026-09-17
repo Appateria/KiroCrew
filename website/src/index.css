@@ -2455,13 +2455,18 @@ body.mc-focus-mode.mc-focus-rail .focus-chrome-rail{
 }
 
 /* Preview find (MarkdownPanel) uses the CSS Custom Highlight API — paints over
-   Range objects without mutating the react-markdown DOM. Only color /
-   background-color are honored by ::highlight(); box properties are ignored. */
+   Range objects without mutating the react-markdown DOM. Only color and
+   background-color are used; box properties such as border-radius are ignored. */
 ::highlight(mc-find) {
   background-color: var(--search-highlight);
 }
 ::highlight(mc-find-current) {
   background-color: var(--search-highlight-current);
+}
+
+/* The passage a comment composer is open over (MarkdownPanel annotation). */
+::highlight(mc-annotate) {
+  background-color: var(--accent-subtle, rgba(99, 102, 241, 0.15));
 }
 
 /* Anchored-comment highlights on the markdown / text artifact body are drawn

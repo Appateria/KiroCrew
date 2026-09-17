@@ -31,10 +31,11 @@ import { copyToClipboard } from '../utils/clipboard'
 import { useLanguageGeneration } from '../i18n/useLanguageGeneration'
 
 // ── CSS Custom Highlight API accessors ───────────────────────────────────────
-// Preview find highlights matches via the browser-native CSS Custom Highlight
-// API (CSS.highlights + Range) instead of injecting <mark> nodes. The preview
-// is React-reconciled (react-markdown), so mutating its DOM would crash React
-// on the next re-render; ranges live outside the DOM and never touch it.
+// Preview find AND the annotation selection paint via the browser-native CSS
+// Custom Highlight API (CSS.highlights + Range) instead of injecting <mark>
+// nodes. The preview is React-reconciled (react-markdown), so mutating its DOM
+// would crash React on the next re-render; ranges live outside the DOM and
+// never touch it.
 // These types aren't in this TS lib yet, so we reach them through narrow casts
 // and feature-detect at runtime (graceful no-highlight fallback when absent).
 type FindHighlight = object
@@ -53,6 +54,20 @@ const FIND_HL_SUPPORTED = !!FindHighlightCtor && !!cssHighlights
 // search at once they would overlap visually, never crash.
 const FIND_HL_ALL = 'mc-find'
 const FIND_HL_CURRENT = 'mc-find-current'
+// File tabs stay mounted while hidden, and each can retain an open comment
+// composer. Aggregate every panel's ranges under the one styled registry name
+// so opening or closing a composer in one tab cannot erase another tab's paint.
+const ANNOTATE_HL = 'mc-annotate'
+const annotationRangesByOwner = new Map<object, Range[]>()
+
+function setAnnotationHighlightRanges(owner: object, ranges: Range[]) {
+  if (!FIND_HL_SUPPORTED || !FindHighlightCtor || !cssHighlights) return
+  if (ranges.length > 0) annotationRangesByOwner.set(owner, ranges)
+  else annotationRangesByOwner.delete(owner)
+  const allRanges = Array.from(annotationRangesByOwner.values()).flat()
+  if (allRanges.length > 0) cssHighlights.set(ANNOTATE_HL, new FindHighlightCtor(...allRanges))
+  else cssHighlights.delete(ANNOTATE_HL)
+}
 
 /**
  * Locate the first char of `selected` in the raw source `content` and return
@@ -1062,22 +1077,19 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
   // Whether the annotation box is open — read by the panel's document-level
   // Escape handler so it yields the key to the box instead of closing the panel.
   const composerOpenRef = useRef(false)
-  const highlightMarksRef = useRef<HTMLElement[]>([])
-
+  // The annotation highlight paints through CSS.highlights, never by wrapping
+  // preview text in <mark> elements: the preview is React-owned, and splitting
+  // or merging its text nodes leaves fibers pointing at nodes React did not
+  // place, which crashes the next commit that rewrites that text. Ranges live
+  // outside the DOM, so a content re-render simply stops painting them. When
+  // the API is absent both callbacks are no-ops, matching how find degrades.
+  const annotationHighlightOwnerRef = useRef<object>({})
   const clearHighlightMarks = useCallback(() => {
-    for (const mark of highlightMarksRef.current) {
-      const parent = mark.parentNode
-      if (!parent) continue
-      while (mark.firstChild) parent.insertBefore(mark.firstChild, mark)
-      parent.removeChild(mark)
-      parent.normalize()
-    }
-    highlightMarksRef.current = []
+    setAnnotationHighlightRanges(annotationHighlightOwnerRef.current, [])
   }, [])
 
   const applyHighlightMarks = useCallback((range: Range) => {
-    clearHighlightMarks()
-    const marks: HTMLElement[] = []
+    if (!FIND_HL_SUPPORTED || !FindHighlightCtor || !cssHighlights) return
     const treeWalker = document.createTreeWalker(range.commonAncestorContainer, NodeFilter.SHOW_TEXT)
     const textNodes: Text[] = []
     let node: Node | null
@@ -1087,6 +1099,7 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
     if (textNodes.length === 0 && range.startContainer.nodeType === Node.TEXT_NODE) {
       textNodes.push(range.startContainer as Text)
     }
+    const ranges: Range[] = []
     for (const textNode of textNodes) {
       const start = textNode === range.startContainer ? range.startOffset : 0
       const end = textNode === range.endContainer ? range.endOffset : textNode.length
@@ -1094,14 +1107,11 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
       const highlightRange = document.createRange()
       highlightRange.setStart(textNode, start)
       highlightRange.setEnd(textNode, end)
-      const mark = document.createElement('mark')
-      mark.style.backgroundColor = 'var(--accent-subtle, rgba(99, 102, 241, 0.15))'
-      mark.style.borderRadius = '2px'
-      highlightRange.surroundContents(mark)
-      marks.push(mark)
+      ranges.push(highlightRange)
     }
-    highlightMarksRef.current = marks
-  }, [clearHighlightMarks])
+    setAnnotationHighlightRanges(annotationHighlightOwnerRef.current, ranges)
+  }, [])
+  useEffect(() => () => clearHighlightMarks(), [clearHighlightMarks])
   const [refreshing, setRefreshing] = useState(false)
   const [hintDismissed, setHintDismissed] = useState(() => localStorage.getItem(HINT_KEY) === '1')
   const [fullscreen, setFullscreen] = useState(false)
@@ -1257,8 +1267,9 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
     // eslint-disable-next-line react-hooks/exhaustive-deps -- runFind is stable per `fullscreen`; listing it would re-run on every match repaint
   }, [findOpen, findTerm, findCase, content, fullscreen])
 
-  // Highlight names are global; clear them if the panel unmounts while find is
-  // open so a stale highlight can't leak onto the next preview.
+  // Find highlight names belong to the one active panel, so clear them if it
+  // unmounts. Annotation ranges use per-owner cleanup above; deleting their
+  // global registry entry here would erase ranges owned by other mounted tabs.
   useEffect(() => () => {
     if (cssHighlights) { cssHighlights.delete(FIND_HL_ALL); cssHighlights.delete(FIND_HL_CURRENT) }
   }, [])
