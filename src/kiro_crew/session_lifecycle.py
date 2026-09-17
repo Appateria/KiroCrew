@@ -33,6 +33,20 @@ from kiro_crew.metrics.sessions import (
 )
 
 CancelOutcome = Literal["acked", "timeout", "no_turn", "error"]
+
+#: The teardown reason a destroy records when it could NOT establish that the ACP
+#: id is globally revoked. Retention authorizes deleting a unit's history only on
+#: ``destroyed``, which means "revocation completed", so this word records the same
+#: teardown while leaving the log in place. The map delete in ``destroy`` removes
+#: exactly one key, and two keys can legitimately point at one sid -- importing a
+#: transferred session twice allocates a new slot key each time and leaves the
+#: source intact -- so the tidier record is the wrong one to claim.
+_END_REASON_SID_RETAINED = "destroyed_sid_retained"
+
+#: Stands in for "a key may still map to this sid, but the map could not be read".
+#: Not a real key, and never logged as one: it only has to be non-None so the claim
+#: is withheld, because an unreadable map is not evidence of revocation.
+_SID_RETENTION_UNKNOWN = "<unreadable session map>"
 StopOutcome = Literal["soft", "hard", "idle"]
 ProviderFactory = Callable[..., Any]
 _ANY_SESSION = object()
@@ -55,6 +69,11 @@ class _SessionMapPort(Protocol):
     def clear_sid(self, key: str) -> None: ...
 
     def delete(self, key: str, *, reason: str | None = None) -> None: ...
+
+    #: Read-only, and used ONLY to withhold a claim: a destroy asks whether any
+    #: other key still maps the session id it just unmapped, and records a
+    #: non-terminal teardown reason when one does.
+    def find_key_by_sid(self, session_id: str) -> str | None: ...
 
     def set(
         self,
@@ -854,6 +873,70 @@ class SessionLifecycleService:
                 reason=constants.unbind_reason_session_destroyed,
             )
             if session is not None:
+                # Append-only session ledger (flag-gated, fail-soft). Destroy is a
+                # teardown and has to record itself, for the same reason the reset
+                # route above does -- and for one more: without this entry the
+                # unit is never collected by EITHER half of retention. The emitter
+                # holds this session's cached handle, and the write lease that
+                # handle carries, so a removal claiming the lease `sole` answers
+                # `owned`; the sweep is blocked from the other side, because a unit
+                # whose newest lifecycle entry is not a close reads as OPEN
+                # whatever its age. One missing entry, both paths defeated.
+                #
+                # The REASON asserts how far the teardown got, and retention treats
+                # only `destroyed` as authorization to delete the unit's history.
+                # That word means the ACP id is globally revoked, so it is claimed
+                # only after checking that no OTHER key still maps to this sid: the
+                # map delete above removes exactly ONE key, and a second key
+                # pointing at the same sid still resolves it, which keeps the
+                # conversation resumable and its log needed. Two keys on one sid is
+                # a state the system itself produces -- importing a transferred
+                # session twice allocates a new slot key each time and deliberately
+                # leaves the source intact (see dashboard/session_transfer.py) --
+                # so this is not only an adversarial shape and the other holder must
+                # not be revoked to make this record tidy.
+                #
+                # Reading the map to WITHHOLD the claim is safe in a way that
+                # reading it to grant one is not: a forged or emptied map can only
+                # make this assert less than the truth, never more, and the sweep
+                # itself still reads nothing but the ledger.
+                #
+                # Placed here, before the await below, for the reason the reset
+                # site documents: the emitter hands the entry to its own thread and
+                # returns, so this adds no suspension point, while writing it after
+                # the await would let a live turn's entries take a lower seq than
+                # the teardown that already happened. Entries from turns that were
+                # in flight still follow it by design -- see `on_session_closed`.
+                #
+                # It cannot start a ledger for a session that has none: `_handle`
+                # never creates one, so a close for an unopened session writes
+                # nothing rather than leaving a header behind for a conversation
+                # that is being destroyed.
+                #
+                # Deferred, not module-scope: this module is reached from the
+                # gateway boot path, and AUTOSDE's no-new-work-on-gateway-boot-path
+                # rule asks for a flag-gated subsystem's IMPORT to be gated too.
+                from kiro_crew import session_ledger_emit
+
+                ledger_sid = session_ledger_emit.session_id_of(session.provider)
+                retained_key: str | None = None
+                if ledger_sid:
+                    try:
+                        retained_key = owner._session_map.find_key_by_sid(ledger_sid)
+                    except Exception:
+                        # An unreadable map is not evidence that the id is revoked.
+                        retained_key = _SID_RETENTION_UNKNOWN
+                if retained_key is not None:
+                    self._deps.logger.info(
+                        "Session destroy: %s still maps to session id of %s; recording a "
+                        "non-terminal teardown so its ledger is retained",
+                        retained_key,
+                        key,
+                    )
+                session_ledger_emit.on_session_closed(
+                    ledger_sid,
+                    END_REASON_DESTROYED if retained_key is None else _END_REASON_SID_RETAINED,
+                )
                 # Still under the same lock as the pop; a manager successor cannot
                 # register until its predecessor's end record is sampled.
                 await record_session_ended(key, end_reason=END_REASON_DESTROYED)
