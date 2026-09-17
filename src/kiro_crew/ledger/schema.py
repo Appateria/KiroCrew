@@ -14,14 +14,12 @@ format has to be readable by a consumer newer *or* older than the writer:
   because a required entry a reader cannot interpret may change the meaning of
   everything after it. Skipping keys loses a detail, skipping a line can lose
   the plot.
-- The envelope is field-compatible with the lifecycle event envelope in
-  ``events/base.py``: this
-  module's ``type`` is that one's ``kind``, and this module's ``time`` is its
-  ``ts_ms``. Same ``domain/action`` naming, same epoch-millisecond clock, so a
-  later projection can fold both streams on one axis. What this format adds is
-  a writer-assigned ``seq`` (contiguous per file, which the lifecycle envelope
-  deliberately left unspecified), a ``thread`` grouping key, and a ``ref``
-  pointer into another file.
+- The envelope carries everything a fold needs on one axis, because this file is
+  the only structured record of the unit's history: ``type`` spelled
+  ``domain/action``, ``time`` in epoch milliseconds, a writer-assigned ``seq``
+  contiguous within the file, a ``thread`` grouping key, and a ``ref`` pointer
+  into another file. A fact with no unit to belong to -- a script cron, gateway
+  lifecycle -- is written to a ``gateway``-kind ledger when one is needed.
 
 Two rules decide whether an entry may be written at all, and they are separate
 because they answer different questions.
@@ -106,22 +104,17 @@ TYPE_OWNERSHIP: dict[str, frozenset[str]] = {
             "approval",
             "model",
             "compaction",
-            "remote",
-            # A session's own bodies, what was put in front of the model, what
-            # was loaded lazily on its behalf, work another model did for it,
-            # and the children it spawned. ``message`` is owned by both kinds:
-            # ownership answers "does this KIND have such events", and both a
-            # crew and a session do.
+            # A session's own bodies, what was put in front of the model, work
+            # another model did for it, and the children it spawned. ``message``
+            # is owned by both kinds: ownership answers "does this KIND have such
+            # events", and both a crew and a session do.
             "message",
             "request",
             "context",
-            "skill",
             "background",
             "subagent",
-            # The two folds a reader builds rather than reads: what a compaction
-            # replaced (`summary/written`, paired with `compaction/applied`) and
-            # the session's own task list (`plan/updated`).
-            "summary",
+            # The session's own task list, a fold a reader builds rather than
+            # reads.
             "plan",
             "write",
         }

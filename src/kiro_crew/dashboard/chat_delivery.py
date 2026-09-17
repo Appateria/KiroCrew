@@ -326,15 +326,14 @@ async def steer_into_running_turn(
         logger.warning("steer failed for slot %s: %s", slot.key, exc)
         steered = False
 
-    # The append-only log's record of this steer is NOT written here, and the
-    # delivered case is not written from this coroutine at all. ``steered`` means
-    # the client accepted the write and nothing more: the turn it was written into
-    # may have ended during the await, and a steer left pending is requeued by that
-    # turn's teardown without ever cutting anything. So a `message/steered` written
-    # here would assert into a permanent file that a turn received text it may
-    # never see. That entry belongs to the ``steering_consumed`` echo, which is the
-    # only positive evidence that a turn consumed the steer and the only site that
-    # knows WHICH turn did -- see ``chat_runner._settle_consumed_steers``.
+    # The append-only log records no steer of its own, and this coroutine is why.
+    # ``steered`` means the client accepted the write and nothing more: the turn it
+    # was written into may have ended during the await, and a steer left pending is
+    # requeued by that turn's teardown without ever cutting anything. An entry
+    # written here would assert into a permanent file that a turn received text it
+    # may never see. What each site can PROVE is recorded instead -- the requeue as
+    # ``message/queued`` below, and the reply the steer cut as a ``message/sent``
+    # marked ``interrupted``.
     def _record_steer_requeued(queue_id: str) -> None:
         """Record that this steer became a QUEUED message instead of cutting a turn.
 
@@ -498,13 +497,12 @@ async def steer_into_running_turn(
     # few lines below, so nothing will read the map entry again and leaving it
     # would hold a full message string for the slot's lifetime.
     slot._steer_send_ids.pop(message, None)
-    # No `message/steered` from here. Reaching this point rules out every requeue
+    # No ledger entry from here either. Reaching this point rules out every requeue
     # and discard KNOWN SO FAR, which is what entitles this path to persist a
     # transcript row -- but that row is mutable and starts as `written`, promoted to
-    # `consumed` only when the echo confirms the injection. A ledger entry has no
+    # `consumed` only when the echo confirms the injection. A ledger line has no
     # such state: it would assert consumption this coroutine cannot prove, and a
-    # turn that ends without the echo still requeues the text. The entry is written
-    # by ``chat_runner._settle_consumed_steers`` instead, from the echo itself.
+    # turn that ends without the echo still requeues the text.
 
     ts = datetime.now(timezone.utc).isoformat()
     # Cut the in-flight text segment at the steer boundary BEFORE persisting the

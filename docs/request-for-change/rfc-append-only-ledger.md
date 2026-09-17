@@ -242,3 +242,33 @@ two: a session ledger takes `gateway` and `acp`, a crew ledger takes `gateway`,
 inside a single session's turn history, and `src` is what a reader attributes an entry to.
 `session:<id>` is accepted by neither kind: no emitter writes it, and adding a source to a
 kind is additive, since no reader validates `src`.
+
+## Amendment 2026-09-16 — the vocabulary trim
+
+Three corrections to the sections above, from implementing them. The body is left as
+written; where the two disagree, this section is what holds.
+
+**The session vocabulary is nine types shorter.** §4 and the storage spec named types with
+no site that could honestly produce them, or that would record a second time a fact another
+entry already carries. Gone: `session/seeded`, `message/steered`, `tool/searched`,
+`tool/loaded`, `skill/searched`, `skill/loaded`, `summary/written`, `remote/placed`,
+`remote/lost`, and `digest` as a `background/completed.kind`. The vocabulary is therefore a
+statement about what the log contains rather than about what it might one day contain,
+which is what makes a reader's declared type set worth anything. Any of them returns when a
+real source exists. Three domains empty out with them and leave `TYPE_OWNERSHIP`: `skill`,
+`summary`, `remote`. The `remote` HEADER field is unrelated and stays.
+
+**The parallel lifecycle-event stream is retired, not coexisting.** §1 counts "a lifecycle
+event schema with no writer" among the five heads this design replaces, and §3 records that
+the two envelopes are field-compatible so one projection could fold both. That package had
+no emitter, no reader and no directory on any host, and each of its kinds names a fact this
+format owns as a `type` -- so it is deleted rather than kept as a second vocabulary every
+future emitter would have to choose between. A fact with no unit to belong to (a script
+cron, gateway lifecycle) gets a `gateway`-kind ledger when something needs to record one.
+
+**The format is pre-release, not frozen.** The storage spec froze the wire format in the
+commit that introduced it. `KIROCREW_SESSION_LEDGER` defaults off and no user data exists on
+disk, so a shape change breaks nothing and the freeze bought only the appearance of one. The
+freeze point is the release that turns the flag on by default: from there a reader may hold
+files, so that change is the one that decides the compatibility strategy -- additive fields
+plus the `ignorable` skip, or migrations -- and `version` is the escape hatch it spends.

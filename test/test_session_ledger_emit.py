@@ -631,13 +631,11 @@ def test_every_body_family_produces_one_body_representation():
     emit.on_turn_started(SESSION, 1, "user")
     _typed(1, small)
     emit.on_message_sent(SESSION, 1, step=1, text=small)
-    emit.on_message_steered(SESSION, 1, mode="interrupt", text=small)
     _typed(2, large)
     emit.on_message_sent(SESSION, 2, step=1, text=large)
-    emit.on_message_steered(SESSION, 2, mode="interrupt", text=large)
     assert emit.flush()
 
-    families = {"message/received", "message/sent", "message/steered"}
+    families = {"message/received", "message/sent"}
     seen: set[str] = set()
     for entry in _body():
         if entry["type"] not in families:
@@ -914,7 +912,7 @@ def test_the_error_flag_is_recorded_as_given_not_derived_from_status():
     assert done[1]["is_error"] is False
 
 
-# --- queue and steering ---------------------------------------------------
+# --- the queue ------------------------------------------------------------
 
 
 def test_a_queued_message_records_its_size_and_place_but_no_turn():
@@ -935,17 +933,6 @@ def test_a_queued_message_does_not_record_its_body_twice():
     emit.on_message_queued(SESSION, source="dashboard", size_bytes=9, queued_seq="q-1")
     assert emit.flush()
     assert "text" not in _body()[-1]["data"]
-
-
-def test_a_steer_records_its_mode_verbatim():
-    _open_session()
-    emit.on_message_steered(SESSION, 3, mode="interrupt", text="stop, wrong file")
-    emit.on_message_steered(SESSION, 3, mode="follow_up", text="also check the tests")
-    assert emit.flush()
-    steers = [e["data"] for e in _body() if e["type"] == "message/steered"]
-    assert [s["mode"] for s in steers] == ["interrupt", "follow_up"]
-    assert steers[0]["text"] == "stop, wrong file"
-    assert steers[0]["turn"] == 3
 
 
 # --- redaction ------------------------------------------------------------
@@ -992,7 +979,6 @@ def test_no_job_is_ever_submitted_without_a_session_key():
         emit.close_open_tool_calls(SESSION, 1)
         emit.on_step_completed(SESSION, 1, 1, ms=5)
         emit.on_message_queued(SESSION, source="slack", size_bytes=3, queued_seq="q-1")
-        emit.on_message_steered(SESSION, 1, mode="interrupt", text="stop")
         emit.on_turn_completed(SESSION, 1, stop_reason="end_turn")
     assert emit.flush()
     assert seen, "no job was submitted at all -- the spy never ran"
@@ -1064,19 +1050,19 @@ def test_the_closer_never_reaches_another_turns_open_call():
     assert not [e for e in done if e["data"]["call_id"] == "call-a"]
 
 
-def test_an_oversize_steer_is_recorded_rather_than_refused():
-    # A steer is a body a person typed. Written straight onto the entry, one over
-    # the ceiling is refused at append time and the steer that actually reached
-    # the turn is missing from the log.
+def test_an_oversize_typed_message_is_recorded_rather_than_refused():
+    # A received message is a body a person typed. Written straight onto the entry,
+    # one over the ceiling is refused at append time and the message that actually
+    # reached the turn is missing from the log.
     _open_session()
     body = "s" * (lg.MAX_ENTRY_BYTES + 500)
-    emit.on_message_steered(SESSION, 1, mode="interrupt", text=body)
+    _typed(1, body, source="dashboard")
     assert emit.flush()
-    steered = [e for e in _body() if e["type"] == "message/steered"]
+    received = [e for e in _body() if e["type"] == "message/received"]
     chunks = [e for e in _body() if e["type"] == "message/chunk"]
-    assert steered, "the steer was refused and lost"
-    assert steered[-1]["data"]["mode"] == "interrupt"
-    assert steered[-1]["data"]["chunks"] == [c["seq"] for c in chunks]
+    assert received, "the message was refused and lost"
+    assert received[-1]["data"]["source"] == "dashboard"
+    assert received[-1]["data"]["chunks"] == [c["seq"] for c in chunks]
     assert "".join(c["data"]["delta"] for c in chunks) == body
 
 
@@ -1114,19 +1100,20 @@ def test_entries_for_one_session_land_in_the_order_they_were_emitted():
     assert seqs == sorted(seqs), "seq is not monotonic in the file"
 
 
-def test_a_steer_in_the_window_before_the_turn_is_published_is_not_blamed_on_turn_zero():
+def test_an_entry_in_the_window_before_the_turn_is_published_is_not_blamed_on_turn_zero():
     # The slot's ordinal is assigned partway through the turn while the ACP client
-    # is reachable earlier, so a steer arriving between the two cannot take its
-    # turn from the slot -- it would read 0 or the previous turn's number. The
-    # emitter's live record is opened at the turn's start, so it is already right
-    # in that window.
+    # is reachable earlier, so an entry written between the two cannot take its turn
+    # from the slot -- it would read 0 or the previous turn's number. The segment
+    # flush is the real caller: it holds a slot and asks the emitter for the turn.
+    # The emitter's live record is opened at the turn's start, so it is already
+    # right in that window.
     _open_session()
     emit.on_turn_started(SESSION, 4, "user")
     assert emit.live_turn(SESSION) == 4, "the live record is not readable at turn start"
-    emit.on_message_steered(SESSION, emit.live_turn(SESSION), mode="interrupt", text="stop")
+    emit.on_message_sent(SESSION, emit.live_turn(SESSION), text="partial reply")
     assert emit.flush()
-    steered = [e for e in _body() if e["type"] == "message/steered"]
-    assert steered and steered[-1]["data"]["turn"] == 4
+    sent = [e for e in _body() if e["type"] == "message/sent"]
+    assert sent and sent[-1]["data"]["turn"] == 4
 
     # And with no turn running the answer is 0, which the caller must treat as
     # "record what you actually have" rather than stamping 0 on an entry.
@@ -1193,7 +1180,7 @@ def test_a_turns_closers_name_the_turn_that_started_it():
     assert turns == {3}, f"entries were split across ordinals: {sorted(turns, key=str)}"
     assert [e["type"] for e in _body()][-1] == "turn/completed"
     # The live record is released under the ordinal it was created with, so no
-    # finished turn is left pinned for a later steer to be blamed on.
+    # finished turn is left pinned for a later entry to be blamed on.
     assert emit.live_turn(SESSION) == 0, "a completed turn is still the live turn"
 
 
@@ -1353,7 +1340,6 @@ def test_a_body_is_redacted_by_the_emitter_not_trusted_from_the_call_site():
     secret = "aws_secret" + "_access_key=" + marker
     _typed(1, f"use {secret} please")
     emit.on_message_sent(SESSION, 1, text=f"ok, {secret}")
-    emit.on_message_steered(SESSION, 1, mode="interrupt", text=secret)
     assert emit.flush()
     blob = json.dumps(_body())
     assert marker not in blob
@@ -1395,7 +1381,6 @@ def test_every_new_family_is_silent_with_the_flag_off(monkeypatch):
     emit.on_step_started(SESSION, 1)
     emit.on_step_completed(SESSION, 1, 1, ms=1)
     emit.on_message_queued(SESSION, source="s", size_bytes=1, queued_seq="q")
-    emit.on_message_steered(SESSION, 1, mode="interrupt", text="t")
     assert len(_body()) == before
 
 
@@ -1418,7 +1403,6 @@ def test_a_disabled_emitter_does_no_payload_work_at_all(monkeypatch):
     emit.on_tool_called(SESSION, 1, name="t", call_id="c1", args="v" * 10000)
     emit.on_tool_completed(SESSION, 1, call_id="c1", status="completed", result="r" * 10000)
     emit.on_message_received(SESSION, 1, text="body")
-    emit.on_message_steered(SESSION, 1, mode="interrupt", text="body")
     emit.on_message_sent(SESSION, 1, text="body")
     emit.on_request_configured(SESSION, 1, model="m", provider="p", system="s" * 10000)
 
@@ -3538,7 +3522,6 @@ def test_every_emitted_type_matches_the_documented_shape():
         "message/sent": {"turn"},
         "message/chunk": {"turn", "delta"},
         "message/queued": {"source", "bytes", "queued_seq"},
-        "message/steered": {"turn", "mode", "text"},
         "request/configured": {"turn", "model", "provider", "context_window"},
         "context/composed": {"turn", "sources", "chars", "tokens", "tokens_estimated"},
         "model/selected": {"model", "source"},
@@ -3558,7 +3541,6 @@ def test_every_emitted_type_matches_the_documented_shape():
     emit.on_compaction_applied(SESSION, pct_before=0.8, pct_after=0.4)
     emit.on_turn_completed(SESSION, 1, stop_reason="end_turn")
     emit.on_message_queued(SESSION, source="slack", size_bytes=3, queued_seq="q1")
-    emit.on_message_steered(SESSION, 1, mode="interrupt", text="stop")
     emit.on_turn_refused(SESSION, 2, "not_authorized")
     emit.on_session_closed(SESSION, "reset")
     emit.on_message_sent(SESSION, 1, step=step, text="o" * (lg.MAX_ENTRY_BYTES + 200))

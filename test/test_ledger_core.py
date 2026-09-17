@@ -417,27 +417,23 @@ def test_the_ownership_registry_is_the_documented_partition():
         "approval",
         "model",
         "compaction",
-        "remote",
         "message",
         "request",
         "context",
-        "skill",
         "background",
         "subagent",
-        "summary",
         "plan",
         "write",
     }
 
 
-#: The session log's complete vocabulary, frozen by this commit. Types and fields
-#: are additive-only from here: a type may gain an emitter later, never a
-#: different shape. Spelled out in full rather than derived from the ownership
-#: registry, so a domain that quietly loses an action is caught -- the registry is
-#: prefix-based and would not notice.
-FROZEN_SESSION_VOCABULARY: tuple[str, ...] = (
+#: The session log's complete vocabulary. Spelled out in full rather than derived
+#: from the ownership registry, so a domain that quietly loses an action is caught --
+#: the registry is prefix-based and would not notice. The shapes are pre-release
+#: while ``KIROCREW_SESSION_LEDGER`` defaults off, so a type may be added, removed or
+#: reshaped; this tuple is what makes such a change deliberate rather than silent.
+SESSION_VOCABULARY: tuple[str, ...] = (
     "session/opened",
-    "session/seeded",
     "session/closed",
     "turn/started",
     "turn/refused",
@@ -446,46 +442,54 @@ FROZEN_SESSION_VOCABULARY: tuple[str, ...] = (
     "message/sent",
     "message/chunk",
     "message/queued",
-    "message/steered",
     "request/configured",
     "context/composed",
     "step/started",
     "step/completed",
     "tool/called",
     "tool/completed",
-    "tool/searched",
-    "tool/loaded",
-    "skill/searched",
-    "skill/loaded",
     "approval/requested",
     "approval/decided",
     "model/selected",
     "compaction/applied",
-    "summary/written",
     "plan/updated",
     "background/completed",
     "subagent/spawned",
     "subagent/steered",
     "subagent/completed",
     "subagent/failed",
-    "remote/placed",
-    "remote/lost",
     "write/dropped",
 )
 
 
-def test_the_session_kind_accepts_every_type_in_the_frozen_vocabulary(tmp_path):
+def test_the_session_kind_accepts_every_type_in_the_vocabulary(tmp_path):
     """The format owns the whole vocabulary, emitters or not.
 
-    An emitter added later must not need a format change to land -- that is what
-    freezing the schema in one commit buys. So every type is writable now, even
-    the ones nothing writes yet.
+    A type is in the vocabulary because a site can honestly produce it, not because
+    it is written today: `approval/*`, `background/completed` and `subagent/*` wait
+    on one slot-key-to-session-id resolver. Each is writable now, so landing that
+    resolver is an emitter change and not a format change.
     """
     led = _session("vocab-sess")
-    for entry_type in FROZEN_SESSION_VOCABULARY:
+    for entry_type in SESSION_VOCABULARY:
         led.append(entry_type, minimal_data(lg.KIND_SESSION, entry_type), src="gateway")
     written = [e.type for e in led.iter_from(1)]
-    assert written == list(FROZEN_SESSION_VOCABULARY)
+    assert written == list(SESSION_VOCABULARY)
+
+
+def test_a_type_the_vocabulary_dropped_is_refused_with_its_domain(tmp_path):
+    """A removed type whose whole domain went with it fails closed.
+
+    `skill/*`, `summary/*` and `remote/*` have no site that could honestly produce
+    them, so their domains left `TYPE_OWNERSHIP` rather than sitting in it unwritten.
+    Re-adding one is a deliberate registry change, which is what this pins: a type
+    cannot creep back in on a prefix that was never removed.
+    """
+    led = _session("vocab-dropped")
+    for dropped in ("skill/loaded", "skill/searched", "summary/written", "remote/placed"):
+        with pytest.raises(lg.LedgerError) as excinfo:
+            led.append(dropped, {}, src="gateway")
+        assert excinfo.value.code == lg.CODE_EVENT_TYPE_NOT_OWNED
 
 
 def test_a_type_outside_the_vocabulary_is_still_refused(tmp_path):
@@ -498,7 +502,7 @@ def test_a_type_outside_the_vocabulary_is_still_refused(tmp_path):
         assert excinfo.value.code == lg.CODE_EVENT_TYPE_NOT_OWNED
 
 
-def test_a_reader_with_the_frozen_vocabulary_reconstructs_every_type(tmp_path):
+def test_a_reader_with_the_vocabulary_reconstructs_every_type(tmp_path):
     """A fold declaring the whole vocabulary reads a whole log without refusing.
 
     The point of the declared-vocabulary read: a reader that knows the format
@@ -506,16 +510,16 @@ def test_a_reader_with_the_frozen_vocabulary_reconstructs_every_type(tmp_path):
     rather than left to guess.
     """
     led = _session("vocab-read")
-    for entry_type in FROZEN_SESSION_VOCABULARY:
+    for entry_type in SESSION_VOCABULARY:
         led.append(entry_type, minimal_data(lg.KIND_SESSION, entry_type), src="gateway")
 
     reader = lg.Ledger.open(lg.KIND_SESSION, "vocab-read")
-    seen = list(reader.iter_from(1, known=set(FROZEN_SESSION_VOCABULARY)))
-    assert [e.type for e in seen] == list(FROZEN_SESSION_VOCABULARY)
+    seen = list(reader.iter_from(1, known=set(SESSION_VOCABULARY)))
+    assert [e.type for e in seen] == list(SESSION_VOCABULARY)
     # Order is asserted on `seq`, which the writer assigns under the lock, so it
     # carries the same claim a per-entry marker would and needs no field the
     # entry's own type does not declare.
-    assert [e.seq for e in seen] == list(range(1, len(FROZEN_SESSION_VOCABULARY) + 1))
+    assert [e.seq for e in seen] == list(range(1, len(SESSION_VOCABULARY) + 1))
 
 
 def test_message_is_owned_by_both_kinds_because_both_have_messages():

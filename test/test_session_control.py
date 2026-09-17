@@ -474,10 +474,10 @@ async def test_a_requeued_steer_records_queued_and_never_steered(tmp_path, monke
     """The append-only log must not claim a steer cut a turn that never got it.
 
     ``steered`` only means the client accepted the write. If the turn ends during
-    the await, the teardown requeues the text and it runs LATER -- so a
-    ``message/steered`` written on the RPC's return is a permanent false statement
-    about a turn, and the body would also be logged twice once the requeue path
-    records it.
+    the await, the teardown requeues the text and it runs LATER -- so a steer entry
+    written on the RPC's return is a permanent false statement about a turn, and the
+    body would also be logged twice once the requeue path records it. That is why the
+    vocabulary carries no steer type at all.
 
     Exactly one entry, and it is ``message/queued``: the requeue moves the text
     straight into the slot queue without passing the append that records a queued
@@ -520,13 +520,12 @@ async def test_a_requeued_steer_records_queued_and_never_steered(tmp_path, monke
         json.loads(line)
         for line in lg.ledger_path("session", sid).read_text(encoding="utf-8").splitlines()[1:]
     ]
-    mine = [e for e in body if e["type"] in ("message/steered", "message/queued")]
+    # Every message-domain entry, not one named type: an entry claiming the turn
+    # received the steer would be caught whatever it was called.
+    mine = [e for e in body if e["type"].startswith("message/")]
     assert len(mine) == 1, f"expected one entry for one message, got {[e['type'] for e in mine]}"
     assert mine[0]["type"] == "message/queued"
     assert mine[0]["data"]["source"] == "steer"
-    assert not [
-        e for e in body if e["type"] == "message/steered"
-    ], "a requeued steer was recorded as having cut the turn"
     session_ledger_emit.reset_caches()
 
 
@@ -3921,10 +3920,10 @@ def test_the_delivery_path_never_claims_a_turn_consumed_a_steer(tmp_path, monkey
     """The steer RPC proves the bytes left, not that any turn received them.
 
     A steer reported delivered can still be sitting pending when its turn ends, and
-    that turn's teardown requeues it to a LATER turn. A `message/steered` written
-    from here would already be on disk saying the earlier turn received it, and an
+    that turn's teardown requeues it to a LATER turn. A ledger entry written from
+    here would already be on disk saying the earlier turn received it, and an
     append-only entry cannot be moved the way the transcript row can. So this path
-    writes no ledger entry at all; the `steering_consumed` echo owns that fact.
+    writes no ledger entry at all, which is why the vocabulary carries no steer type.
 
     Mutation guard: recording the delivered case here -- from a live ordinal or any
     other guess -- reddens this.
@@ -3937,11 +3936,15 @@ def test_the_delivery_path_never_claims_a_turn_consumed_a_steer(tmp_path, monkey
     text = "use the other branch"
     slot._acp_client = _steerable(accepted=True)
 
-    steered_at: list[int] = []
+    appended: list[str] = []
     queued_for: list[str] = []
     monkeypatch.setattr(session_ledger_emit, "session_id_of", lambda _client: "acp-1")
+    # Spied on the shared write seam rather than on one entry point, so an entry
+    # written under ANY type is caught rather than only a steer-shaped one.
     monkeypatch.setattr(
-        session_ledger_emit, "on_message_steered", lambda *a, **kw: steered_at.append(1)
+        session_ledger_emit,
+        "_write",
+        lambda _sid, entry_type, *a, **kw: appended.append(entry_type),
     )
     monkeypatch.setattr(
         session_ledger_emit, "on_message_queued", lambda sid, **_kw: queued_for.append(sid)
@@ -3961,7 +3964,7 @@ def test_the_delivery_path_never_claims_a_turn_consumed_a_steer(tmp_path, monkey
     result = asyncio.run(chat_delivery.steer_into_running_turn(state, slot, text))
 
     assert result == chat_delivery.STEER_STEERED
-    assert steered_at == [], "the delivery path must not assert consumption"
+    assert appended == [], "the delivery path must not assert consumption"
     assert queued_for == [], "and it is not a queued message either"
 
 

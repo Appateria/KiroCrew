@@ -15,7 +15,7 @@ nothing left for a second flag to govern.
 
 **Off is free, not merely silent.** Every entry point that hashes a payload or redacts a
 body checks the flag ITSELF, before doing that work -- `on_tool_called`,
-`on_tool_completed`, `on_message_received`, `on_message_sent`, `on_message_steered`,
+`on_tool_completed`, `on_message_received`, `on_message_sent`,
 `on_request_configured`. Hashing is proportional to payload size and
 redaction walks the whole body, both once per frame on the event loop, so leaving the check
 to the writer would charge every user for a feature that is off by default.
@@ -218,8 +218,9 @@ read in order: it carries no `turn`, and `freed_pct` goes negative exactly when 
 reading includes a later turn's growth. A reader folding on seq is told the truth by
 the fields rather than by the position.
 
-### `message/steered` has no emitter, and its position is why
+### A steer has no entry of its own, and its position is why
 
+The vocabulary carries no steer type, and the reason is ordering rather than access.
 The fact is knowable from exactly one place -- the `steering_consumed` echo, the only
 positive evidence that a turn received the text, and the only site that knows which
 turn did. The delivery cannot write it: its RPC returning proves the bytes left, not
@@ -234,14 +235,13 @@ steer rather than the reply it interrupted. Cutting the segment from the echo in
 only moves the damage: post-steer text arriving in the same window is then flushed
 above the steer row in the transcript.
 
-Both facts have to be owned by one resolver before either site can write this entry,
-which puts it in the same "specified, unwritten" group as `skill/*`,
-`background/completed`, `subagent/*` and `approval/*`. Until then the type is specified
-and its emitter API exists with no caller.
+One resolver would have to own both facts before either site could write such an
+entry, and no site can name one whose seq it can defend -- which is why the type is
+not in the vocabulary at all rather than sitting in it unwritten.
 
 What the cut site CAN prove is recorded. It is cutting the segment because a steer
 arrived, so the flush marks that `message/sent` `interrupted` -- a fact needing no
-agreement with the echo, which is exactly why it is recordable where the steer entry is
+agreement with the echo, which is exactly why it is recordable where a steer entry is
 not. Without it an interrupted reply and a finished one are the same line.
 
 The rest is not lost either. The steer's TEXT reaches the log as the `message/received`
@@ -462,23 +462,36 @@ single `other` source. Three zeroed sources would claim a measurement nobody too
 
 ## Deferred to the next change, and why they are one problem
 
-Five families the design specifies are not emitted here. Three fail for the same
-reason `approval/*` already does -- **this log is keyed by the ACP session id, and
-their sites hold only a slot key or a transcript key** -- and one fails because no
-single site owns both halves of the fact it would state.
+Two families the design specifies are not emitted here, and they fail for the same
+reason `approval/*` already does: **this log is keyed by the ACP session id, and their
+sites hold only a slot key or a transcript key.**
 
 | Family | Why not yet |
 |---|---|
-| `tool/searched`, `tool/loaded` | Tool search runs inside the backend CLI. This process only writes the config overlay that enables it, so the query, the hit count and the loaded specs never enter the gateway at all. |
-| `skill/searched`, `skill/loaded` | `skill_search` resolves a session KEY, and both context builders take `session_key`; the skills loader takes only `project_dir`. No ACP session id reaches any of them. |
 | `background/completed` | Every background model call runs on the shared `_bg` session. The session the work is FOR is known by slot or transcript key, so there is nothing to key the entry by. |
-| `message/steered` | Only the `steering_consumed` echo proves a turn consumed the text, but the text the steer interrupted is logged from the handler's segment cut, and the two race, so either site alone writes an entry whose seq contradicts causality. |
 | `subagent/*` | Spawn holds `parent_session_key`, a slot key; the child's own ACP session id is assigned later, so a spawn-time pointer into the child's log cannot exist yet; and subagent runs have no token or credit accounting to record. |
 
 So the next change is not more emitters. It is one slot-key-to-ACP-session-id
-resolver, which unblocks four of the five at once -- including the approvals PR 1 deferred
-for this exact reason -- where inventing it per family would build the same
-plumbing three times.
+resolver, which unblocks both of these and the approvals alongside them, where
+inventing it per family would build the same plumbing three times.
+
+### Removed types
+
+Nine types the design named are gone from the session vocabulary: `session/seeded`,
+`message/steered`, `tool/searched`, `tool/loaded`, `skill/searched`, `skill/loaded`,
+`summary/written`, `remote/placed`, `remote/lost`, along with `digest` as a
+`background/completed.kind`. Each either has no site that could honestly produce it --
+tool search runs inside the backend CLI, so its query and loaded specs never enter this
+process; the skills loader takes only a `project_dir`; a steer's consumption is provable
+only from an echo that races the entry it would have to be ordered against -- or would
+record a second time a fact another entry already carries. Removing them keeps the
+vocabulary a statement about what the log contains rather than a wish list, which is what
+makes a reader's `known=` set worth declaring.
+
+Any of them may come back when a real source exists: while the format is pre-release
+(`ledger-core.md` section 5) that is an ordinary change, and after the freeze point it is
+an additive one, since re-adding a type is exactly the case the `ignorable` marker and the
+unknown-type refusal already handle.
 
 Every compaction reaches the ledger on exactly one of those two paths. A reading kiro-cli
 reset to unknown mid-turn defers its verdict to the next confirmed reading, and that
@@ -828,9 +841,7 @@ keeps the ordering the drain depends on: `atexit` runs handlers last-registered-
 the registration happens immediately before the writer pool is first asked for work, so the
 pool's own handler still runs ahead of this one.
 
-`kiro_crew.events` is not a second emitter to reconcile with. Its only constructor
-today is a read-only schema validator (`events/backfill.py`), which this module does not
-route through and does not touch. The two envelopes are field-compatible -- this stream's
-`type` is that one's `kind`, its `time` is that one's `ts_ms` -- so a projection folds both
-with a field rename; `docs/request-for-change/rfc-append-only-ledger.md` is the decision
-of record for which facts go to which stream.
+There is no second stream to reconcile with. The parallel lifecycle-event package this
+module was designed alongside is retired, so `kiro_crew.ledger` is the only structured
+record of a session's history and this module is its only writer;
+`docs/request-for-change/rfc-append-only-ledger.md` is the decision of record.

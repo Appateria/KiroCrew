@@ -5894,12 +5894,12 @@ def _settle_consumed_steers(
                     _confirmed_ids = set()
                     slot._steer_confirmed = _confirmed_ids
                 _confirmed_ids.add(_cdid)
-            # No `message/steered` from here, and none from the delivery either --
-            # this family has no emitter yet, deliberately. Its POSITION needs two
-            # coroutines to agree, and neither of them can.
+            # No ledger entry from here, and none from the delivery either: the
+            # session vocabulary carries no steer type, because its POSITION needs
+            # two coroutines to agree and neither of them can.
             #
             # This echo is the only positive evidence that a turn consumed the text
-            # and the only site that knows which turn did, so this is where the
+            # and the only site that knows which turn did, so this is where such an
             # entry would have to be written. But the text the steer INTERRUPTED
             # reaches the log later, from the handler's segment cut, which runs when
             # `client.steer()` returns. Under stdin backpressure that RPC is still
@@ -5909,10 +5909,8 @@ def _settle_consumed_steers(
             #
             # Cutting the segment from here instead trades the defect for a worse
             # one: post-steer text arriving in the same window would be flushed
-            # above the steer row in the transcript. The honest fix is a resolver
-            # that owns both facts, which is the same reason `skill/*`,
-            # `background/completed`, `subagent/*` and `approval/*` have no emitter
-            # in this change. The type stays specified; a reader sees the steer as a
+            # above the steer row in the transcript. Recording it at all therefore
+            # waits on a resolver that owns both facts. A reader sees the steer as a
             # `message/received` on the next turn, which is what the transcript
             # shows too.
             # `remaining + [_msg]` is the live-steer list, NOT `_pending_steers`:
@@ -7579,10 +7577,9 @@ async def _run_chat(
             # `interrupted`: this text was CUT OFF, and this site is the one that
             # knows it -- it is cutting the segment precisely because a steer
             # arrived. Without the mark the log cannot tell a reply the user
-            # interrupted from one the model finished, which is most of what the
-            # absent `message/steered` entry would have said. It needs no
-            # coordination with the echo that proves consumption, which is why
-            # this fact is recordable and that one is not.
+            # interrupted from one the model finished. It needs no coordination
+            # with the echo that proves consumption, which is why this fact is
+            # recordable where a steer entry of its own is not.
             _flush_segment(
                 state,
                 slot,

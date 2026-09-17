@@ -388,14 +388,14 @@ async def test_a_turn_with_no_attachment_says_nothing_about_attachments(tmp_path
 def test_a_segment_cut_by_a_steer_is_recorded_as_interrupted():
     """The one fact the cut site can prove about a steer.
 
-    `message/steered` has no emitter, because whether a turn CONSUMED the steer is
+    The vocabulary carries no steer type, because whether a turn CONSUMED the steer is
     knowable only from the backend echo, and the text the steer cut off is logged
     from a different coroutine -- neither site can order the two. But the site that
     cuts the segment knows something it needs no agreement about: it is cutting
     because a steer arrived, so this reply was interrupted rather than finished.
 
     Without the mark, an interrupted reply and a completed one are the same line in
-    the log. This is most of what the absent entry would have said, recorded from a
+    the log. This is most of what a steer entry would have said, recorded from a
     site that owns the fact outright.
 
     Mutation guard: dropping the argument at either the cut site or the flush makes

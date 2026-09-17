@@ -226,15 +226,6 @@ _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
         "exfiltration-URL chain at the source, before it is put on an `Identity`.",
     ),
     (
-        "Event backfill report samples",
-        "events/backfill.py",
-        "One serialized sample event per kind in the backfill validator's "
-        "report, printed to CLI stdout. Store fields folded into samples "
-        "(subagent task previews, cron names) can carry tokens the operator "
-        "pasted into a task, so each sample passes the shared two-pass "
-        "redaction before leaving the process.",
-    ),
-    (
         "Browser CLI install failures",
         "browser_cli/install.py",
         "The stderr of a failed `npm install -g @playwright/cli` / browser download, "

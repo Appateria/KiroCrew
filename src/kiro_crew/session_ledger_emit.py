@@ -3059,47 +3059,6 @@ def on_message_queued(
     )
 
 
-def on_message_steered(session_id: str, turn: int, *, mode: str = "", text: str = "") -> None:
-    """NO PRODUCTION CALLER YET -- see the emitter spec's deferred table.
-
-    The fact is knowable only from the ``steering_consumed`` echo, while the text
-    the steer interrupted is logged from the handler's segment cut, and the two
-    race: under stdin backpressure the echo lands first and this entry would take a
-    lower seq than the assistant text it cut. Wiring it needs a resolver that owns
-    both facts. The API is here, specified and tested, for that resolver to call.
-
-    Record a steer injected into a running turn.
-
-    ``mode`` is the caller's own word: ``interrupt`` cuts the turn's current
-    output, ``follow_up`` waits for it to finish. Recorded verbatim rather than
-    normalized, matching how ``session/closed`` records the gateway's own reason.
-
-    Gated on the flag before redaction, like the other body entry points, and
-    written through :func:`_append_body_entry` for the same reason they are: a
-    steer is a body a person typed, so one over the entry ceiling would be refused
-    at append time and the steer that actually reached the turn would be missing
-    from the log.
-    """
-    if not session_id or not enabled():
-        return
-    body = _safe_text(text)
-
-    def _job() -> None:
-        ledger = _handle(session_id)
-        if ledger is None:
-            return
-        _append_body_entry(
-            ledger,
-            "message/steered",
-            turn,
-            text=body,
-            extra={"mode": mode},
-            src=_SRC_GATEWAY,
-        )
-
-    _submit(_job, "appending message/steered", session_id, len(body))
-
-
 def _payload_digest(payload: str) -> tuple[str, int]:
     """``(sha256, byte length)`` for *payload*, or ``("", -1)`` when there is none.
 
@@ -3408,7 +3367,6 @@ __all__ = [
     "on_message_queued",
     "on_message_received",
     "on_message_sent",
-    "on_message_steered",
     "on_model_selected",
     "on_request_configured",
     "on_session_closed",

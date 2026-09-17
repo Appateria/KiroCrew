@@ -8,27 +8,13 @@ Owners: `kiro_crew.ledger` (`schema.py`, `store.py`, `errors.py`)
 
 The problem it answers is that long-horizon work keeps its state in a context window, which harness-owned compaction summarizes lossily. Transcripts are not a substitute: rotation, compaction and consolidation rewrite the whole file, the grain is a message rather than an operation, and no field defines an order a consumer can fold on. An append-only file with a writer-assigned sequence inverts that -- the record is the authority, the context is a cache -- and lets one unit cite a segment of another's history instead of copying it.
 
-## 2. Relationship to `kiro_crew.events`
+## 2. One stream, not two
 
-These are two layers of one story, not two competing logs, and the split is deliberate.
+There is one structured record of what happened, and it is this one. A parallel global lifecycle stream (`kiro_crew.events`, day-sharded under `events/`, joined by a correlation `key`) was retired unwritten: it had no emitter and no reader, no `events/` directory existed on any host, and each of its kinds names a fact this format already owns as a `type`. Two vocabularies for one fact is a choice every future emitter would have had to make, and the answer would have been "this one" every time.
 
-`kiro_crew.events` is a **global lifecycle stream**: one envelope (`v`, `kind`, `src`, `key`, `ts_ms`, `data`), day-sharded under `events/`, joined across domains by its `key`. Its own contract records that it carries no ordering field because ordering "needs a defined scope (per writer? per key? global?)" and would arrive "with the first emitter". `kiro_crew.ledger` is a **per-unit record**: one file per crew or session, where the scope question is already answered by the file itself, so `seq` is contiguous *within that file* and means something a global stream cannot give it.
+`seq`, `thread` (a grouping key naming an earlier seq in the SAME file) and `ref` (a pointer into another file) are why. All three are defined relative to a single unit's ledger, so the scope question a global stream cannot answer for itself -- per writer? per key? global? -- is answered by the file. A day-sharded, multi-domain shard would need either a per-key sequencer inside a shared file or a `seq` whose meaning varies by kind.
 
-That per-file scope is what the ledger adds, and it is why the two are not merged. `seq`, `thread` (a grouping key naming an earlier seq in the SAME file) and `ref` (a pointer into another file) are all defined relative to a single unit's ledger. Putting them in the global stream would require either a per-key sequencer inside a day-sharded multi-domain file, or a `seq` whose scope varies by `kind` -- the ambiguity that stream deliberately refused.
-
-Which stream a future emitter writes:
-
-| Emitter records | Stream | Why |
-|---|---|---|
-| One unit's own history, needing order, threading or citation | `kiro_crew.ledger` | The ordering scope is the unit's file. |
-| A cross-domain lifecycle fact folded by correlation key | `kiro_crew.events` | No per-unit order is needed; the join axis is `key`. |
-
-No emitter double-writes. The two envelopes are field-compatible on purpose -- the ledger's `type` is the stream's `kind`, its `time` is `ts_ms`, both `domain/action`, both epoch milliseconds -- so a projection that wants one timeline folds both with a field rename and no semantic translation.
-
-Both of the events track's pending decisions are settled by this module, and `events/base.py` records that in place of the deferrals:
-
-- **Which stream a future emitter writes.** This one, whenever it needs order, threading or citation. The global stream stays for an unsequenced cross-domain fact whose join axis is `key`.
-- **The scope of ordering, and who assigns it.** `seq` is scoped PER UNIT -- one contiguous sequence inside one file -- and is assigned by the single writer of that file, under its lock. A day-sharded, multi-domain shard cannot answer that for itself: it would need either a per-key sequencer inside a shared file, or a scope that varies by `kind`. That is why the answer arrives with a per-unit file rather than as a convention on the global stream, and why `seq` stays out of that envelope instead of being added to it.
+A fact with no unit to belong to still has a home: a script cron, or gateway lifecycle, gets a `gateway`-kind ledger when something needs to record one. That kind does not exist yet, and adding it is a change to `KINDS` and `TYPE_OWNERSHIP` rather than to the wire format.
 
 ## 3. Storage and identity
 
@@ -153,24 +139,31 @@ Both of these are one type each, not one per writer. The child's identity is `sr
 
 `ref` on a report is **the one cross-kind bridge a writer takes**: from a crew ledger into a session's segment, one level down, in the direction a conductor reads. The pair is symmetric with `subagent/spawned` (section 5): the child's header `thread` points up at the entry that caused it, and that entry's `ref` points down into the child's record.
 
-## 5. The frozen session-log format
+## 5. The session-log format, pre-release
 
-**Types and fields are additive-only from this commit: a type may gain an emitter later, never a
-different shape.** The format is frozen here, in the commit that introduces it, so that every later
-change is an emitter landing against a schema that already accepts it. That is why the tables below
-list types nothing writes yet -- writing one must never require reopening the format.
+**The shapes below are PRE-RELEASE and may change.** `KIROCREW_SESSION_LEDGER` defaults off, so
+no ledger directory is created on a stock install and there is no user data on disk for a shape
+change to break. While that holds, a type may be added, removed or reshaped in one commit.
+
+**The freeze point is the release that turns the flag on by default.** From then on there are
+files a reader may hold, so the compatibility strategy has to be decided rather than assumed: a
+type gains fields additively and an unknown type is skipped when its writer marked it
+`ignorable`, OR a shape change carries a migration. That choice belongs to the change that flips
+the default, which is the first one with data to migrate. `version` is the escape hatch it would
+spend.
 
 Every type is `domain/<past participle>`, a fact that happened. Every turn-scoped entry carries
 `data.turn`, and `data.step` where a step exists. `thread` stays unset on session entries.
 
 The **Emitter** column says what exists in this commit. `yes` means the gateway writes it today;
-`—` means the type is owned, writable and specified, and nothing writes it yet.
+`—` means the type is owned, writable and specified, and nothing writes it yet. A type with no
+emitter is kept only where the site that will write it is identified; the types with no honest
+source were removed (see the emitter spec's "Removed types").
 
 ### Session, turn
 | Type | `data` | Emitter |
 |---|---|---|
 | `session/opened` | header echo + `resumed` | yes |
-| `session/seeded` | `{source, count}` — history imported from a legacy transcript | — |
 | `session/closed` | `{reason}` | yes |
 | `turn/started` | `{turn, actor, depth, message_seq?, attempt?}` | yes |
 | `turn/refused` | `{turn, actor, reason, depth}` | yes |
@@ -203,7 +196,6 @@ opposite handling. The pair `(turn, attempt)` is therefore the identity a fold g
 | `message/sent` | `{turn, step, text, usage, interrupted?, chunks:[seq]}` | yes |
 | `message/chunk` | `{turn, step, delta}` — an oversize body's slice | overflow only |
 | `message/queued` | `{source, bytes, queued_seq}` — arrived while a turn ran | yes |
-| `message/steered` | `{turn, mode: interrupt \| follow_up, text}` | — |
 | `request/configured` | `{turn, model, provider, context_window, system?, system_bytes?}` — written on change only | yes |
 | `context/composed` | `{turn, step, sources:[{kind, chars, tokens}], chars, tokens, tokens_estimated}` | yes |
 | `step/started` | `{turn, step}` — one model call | yes |
@@ -213,16 +205,12 @@ opposite handling. The pair `(turn, attempt)` is therefore the identity a fold g
 every block put in front of the model — `system`, `memory`, `lessons`, `skills_index`, `steering`,
 `project`, `tool_specs`, `ledger_context` — each with its `tokens`.
 
-### Tool, skill, approval
+### Tool, approval
 
 | Type | `data` | Emitter |
 |---|---|---|
 | `tool/called` | `{turn, step, call_id, name, server, kind, args_hash?, args_bytes?}` | yes |
 | `tool/completed` | `{turn, step, call_id, status, is_error?, elapsed_ms, result_hash?, result_bytes?}` | yes |
-| `tool/searched` | `{turn, query, hits}` — lazy MCP discovery | — |
-| `tool/loaded` | `{turn, server, names:[..], spec_tokens}` | — |
-| `skill/searched` | `{turn, query, hits}` | — |
-| `skill/loaded` | `{turn, name, path, tokens, via: index \| search \| pointer}` | — |
 | `approval/requested` | `{turn, id, tool, reason}` | — |
 | `approval/decided` | `{turn, id, decision, by}` | — |
 
@@ -237,22 +225,19 @@ same claim as "it worked".
 Approvals have no emitter yet for a reason rather than a schedule: the approval coordinator carries
 a slot key, not a session id, so there is nothing to key an entry by.
 
-### Model, compaction, plan, placement
+### Model, compaction, plan
 
 | Type | `data` | Emitter |
 |---|---|---|
 | `model/selected` | `{turn?, model, source}` | yes |
 | `compaction/applied` | `{turn, pct_before, pct_after, freed_pct}` | yes |
-| `summary/written` | `{turn, text, covers:{start_seq, end_seq}}` — the fold knows what it replaced | — |
 | `plan/updated` | `{turn, items:[{id, text, state}]}` — the session's own task list | — |
-| `remote/placed` | `{provider, id}` | — |
-| `remote/lost` | `{reason}` | — |
 
 ### Background and children
 
 | Type | `data` | Emitter |
 |---|---|---|
-| `background/completed` | `{kind: title \| memory_consolidation \| summary \| digest, model, tokens, credits, ms, result_ref}` | — |
+| `background/completed` | `{kind: title \| memory_consolidation \| summary, model, tokens, credits, ms, result_ref}` | — |
 | `subagent/spawned` | `{turn, agent_id, agent, model, scope:{memory, lessons, project}}` + `ref` into the child's log | — |
 | `subagent/steered` | `{agent_id, mode}` | — |
 | `subagent/completed` | `{agent_id, tokens, credits, ms}` | — |
@@ -268,7 +253,7 @@ same pair as a crew dispatch, one level down.
 
 Every refusal is a `LedgerError` carrying a stable `code`; the codes are API surface and are additive-only.
 
-**Ownership** answers whether a kind of unit has such events at all. `schema.TYPE_OWNERSHIP` maps kind to owned `type` domains -- crew: `member` `activity` `slot` `patrol` `message` `crew` `item` `memory`; session: `session` `turn` `step` `tool` `approval` `model` `compaction` `summary` `plan` `remote` `message` `request` `context` `skill` `background` `subagent` -- and anything else is `event_type_not_owned`. It is prefix-based, so a new action under an owned domain needs no change: `crew/dispatch` and `crew/report` are owned by the `crew` domain the registry already lists. `message` appears in both registries, which is what ownership means: a crew forwards messages and a session records its own bodies, so both kinds have such events and neither name is a collision.
+**Ownership** answers whether a kind of unit has such events at all. `schema.TYPE_OWNERSHIP` maps kind to owned `type` domains -- crew: `member` `activity` `slot` `patrol` `message` `crew` `item` `memory`; session: `session` `turn` `step` `tool` `approval` `model` `compaction` `plan` `message` `request` `context` `background` `subagent` `write` -- and anything else is `event_type_not_owned`. It is prefix-based, so a new action under an owned domain needs no change: `crew/dispatch` and `crew/report` are owned by the `crew` domain the registry already lists. `message` appears in both registries, which is what ownership means: a crew forwards messages and a session records its own bodies, so both kinds have such events and neither name is a collision.
 
 **Namespacing** answers whether an emitter may write it, and it is a rule about `src`. Two halves:
 
