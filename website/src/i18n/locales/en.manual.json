@@ -4941,6 +4941,10 @@
       "skillsTab": {
         "adds_new_requirements_to": "Adds new requirements to {{target}} — {{description}}",
         "delete_confirm": "Delete “{{name}}”?",
+        "update_failed_title": "Save failed",
+        "saving": "Saving…",
+        "delete_failed_error": "Could not delete “{{name}}”: {{error}}",
+        "readonly_skill_error": "This skill is managed on disk and cannot be changed from this page.",
         "dismiss_confirm": "Dismiss “{{name}}”?",
         "dismiss_all": "Dismiss All",
         "dismiss_all_confirm": "Dismiss all {{count}} pending skills?",
