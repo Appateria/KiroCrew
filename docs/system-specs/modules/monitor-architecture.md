@@ -327,16 +327,86 @@ what makes it safe. A notification pipeline aimed at humans needs no token
 budget because a paged human self-limits; an agent does not, which is why the
 budget half of this design is not optional.
 
-**The stall streak is engine state.** A watch whose verdict has been byte-identical
-across N settled ticks with no progress is stuck, and the engine stops it. That
+**The stall streak is engine state.** A watch whose verdict has been
+byte-identical across N settled ticks is stuck, and the engine stops it. That
 counter belongs in the persisted state the engine reads, not in a file that only
 an instruction knows to maintain -- an advisory counter maintained by prose is
-lost to exactly the long-running compaction it exists to survive. No engine state
-holds a streak of **identical verdicts** today. Streak counters do exist and are
-about something else: `quiet_streak` with `floor_ticks` counts consecutive quiet
-observations and the deliveries they force, `consecutive_provider_errors` counts
-provider failures, and `irq.py` carries its own consecutive-error backstop. None
-of them notices a watch that keeps reaching the same conclusion.
+lost to exactly the long-running compaction it exists to survive. `MonitorState`
+holds it as `stall_digest`, `stall_streak` and `stall_started_at`, and
+`decide_monitor` folds them after the effect is chosen, because the verdict a
+digest summarizes does not exist before then.
+
+Four things the shape decides, each for a reason worth keeping:
+
+- The digest is **derived** from the verdict on every tick, never persisted
+  beside a second copy of it. What the record keeps is the digest of an EARLIER
+  verdict, which nothing else holds, so the one-source-of-truth rule above
+  survives one layer up. The **decision** is inside the digest, not only the
+  entries, and that is what makes "with no progress" the same question as
+  identity: a wake, a record, a retry, a new fingerprint or a moved head all
+  change the digest, so a tick that progressed cannot match. What stays
+  invisible is the woken agent's own uncommitted work, and no condition
+  available at this layer can see that.
+- A tick counts only when it **settled the subject and the engine then did
+  nothing about it** -- a `NO_CHANGE`. `PENDING` is the domain's not-concluded
+  class -- `checks_incomplete`, `checks_pending`, `review_threads_incomplete` and
+  the rest -- so a pending tick never counts and a watch is never retired for
+  being early. `PROVIDER_ERROR` never counts either, being no evidence about the
+  subject and already carrying its own budget. **Every other tick zeroes the
+  streak**, because it means the watch was working: a wake acted, a `RECORD_ONLY`
+  held a change inside the coalescing floor, a `RETRY_PROVIDER` waited on
+  incomplete evidence, a stop already ended it. Counting a deferral is the same
+  error as counting a pending tick, and at the 15s minimum cadence a held change
+  reaches twelve identical `RECORD_ONLY` verdicts 180s into a 240s window --
+  retiring the watch before the window could release the wake it was folding.
+  Zeroing on an UNSETTLED tick is what makes reading a clock in the trip safe: a
+  streak left standing through a long pending stretch would let time alone satisfy
+  the floor, and the next unsettled terminal tick -- a non-retryable provider
+  error -- would be filed as a stall. The price is that a subject whose checks
+  flap never accumulates a streak and is retired by its runtime budget instead: a
+  later stop with an honest reason, which beats an earlier one with a false
+  reason.
+- The trip needs a **measured wall-clock floor** as well as the count, because
+  the count answers the right question in the wrong unit on its own. Cadence is
+  user-set from 15s to 86400s, and the streak's clock starts on its first counted
+  tick, so twelve ticks is eleven intervals -- 3300s at the 300s default, 165s at
+  the 15s minimum -- and 165s of an unchanged subject is a watch whose agent is
+  still working. `stall_started_at` records when the streak
+  opened and the trip reads `now - stall_started_at`, so nothing is translated
+  from ticks into seconds. Storing a ceiling derived from `cadence_secs` would
+  make the trip a pure integer comparison, at the price of a cached value derived
+  from a mutable input with nothing invalidating it: a streak opened at the
+  default would carry that ceiling into a 15s cadence and trip a quarter of the
+  way into its floor. Any such translation breaks on
+  a cadence change in one direction or the other, so there is none, and no
+  invalidation rule to get wrong. Reading the clock reopens nothing: the hazard a
+  snapshot was avoiding was a predicate an operator could make true between two
+  folds. The clock is `time.time()`, a wall clock rather than a monotonic one, and
+  neither direction reopens that hazard: backwards, the elapsed comparison goes
+  negative and only delays a trip; forwards, a jump can satisfy the floor early but
+  cannot manufacture the counted ticks the other half of the condition requires.
+- Both thresholds are **bounded by numbers already in the module** rather than
+  chosen freely, which is what lets a reader check them. The count must exceed
+  the floor's tick equivalent at the default cadence, or it never binds, and stay
+  inside the ticks a default watch gets before its runtime budget, or the stall
+  can never fire: `6 < 12 < 48`. The floor must clear the coalescing window by a
+  wide margin, or a folded burst looks like a stall, and stay well under the
+  re-alert interval, because a re-alert wakes the subject and zeroes the streak,
+  so a floor at or past it could never be reached: `240 << 1800 << 21600`.
+- The stop records `verdict_stall`, distinct from `approval_stall` (a delivery
+  failure) and from every `*_budget` reason (a spent bound), because a stop that
+  reads like a convergence or like a cost is the cycle-cap anti-pattern under a
+  new name. The engine owns that reason through `monitor_stall_reason`, the way
+  it already owns `monitor_budget_reason` -- taking the tick's `now` as a value
+  for the same reason that function does, so it cannot disagree with the fold that
+  decided the stop. Both writers of `stopped_reason` otherwise copy the
+  observation's own code and would file a stall as `checks_failed`.
+
+Streak counters do exist and are about something else: `quiet_streak` with
+`floor_ticks` counts consecutive quiet observations and the deliveries they
+force, `consecutive_provider_errors` counts provider failures, and `irq.py`
+carries its own consecutive-error backstop. None of them notices a watch that
+keeps reaching the same conclusion.
 
 #### The decision is split, and only half of it is pure
 
@@ -403,7 +473,7 @@ Required contents:
 | `coalescing` | the open window: when it opened, which keys joined |
 | `errors` | per-kind counts, so a retryable class stays bounded |
 | `budgets_spent` | turns, tokens and provider errors already charged |
-| `stall` | the verdict digest and its consecutive-match count |
+| `stall` | the verdict digest, its consecutive-match count, and when that streak opened |
 
 **The state document holds delivery bookkeeping only. It never holds subject
 state.** What the subject looks like belongs in the evidence file, which is
@@ -461,9 +531,9 @@ already share.
 ## Rules the engine enforces, not the prose
 
 An operational rule that lives only in an instruction can be violated silently.
-These are code -- or, where marked `target`, are the reason this consolidation
-exists, because deleting the instruction before the engine enforces the rule
-leaves it enforced nowhere:
+These are code, or say in their own text where an implementation still diverges
+-- deleting the instruction before the engine enforces the rule would leave it
+enforced nowhere:
 
 - An unclassified provider state is `unknown` and counts as **not passing**.
 - Superseded attempts collapse to the newest per check identity. A host keeps
@@ -496,8 +566,9 @@ leaves it enforced nowhere:
 - A stale reviewer stamp is an entry (`stale:<name>`), not a paragraph.
 - An un-dispositioned finding is an entry, so readiness cannot be declared over
   one.
-- The stall streak is engine state, so a stuck watch stops itself (`target` -- no
-  engine state holds it today).
+- The stall streak is engine state, so a stuck watch stops itself. `MonitorState`
+  carries `stall_digest`, `stall_streak` and `stall_started_at`; `decide_monitor`
+  folds them and `monitor_stall_reason` names the stop `verdict_stall`.
 
 ## Adding a new monitored kind
 

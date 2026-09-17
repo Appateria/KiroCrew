@@ -46,7 +46,11 @@ from kiro_crew.atomic_write import replace_with_retry
 from kiro_crew.config.loader import config_dir, data_home
 from kiro_crew.config.paths import legacy_home
 from kiro_crew.constants import MAX_BANNER_CHARS
-from kiro_crew.monitoring.decision import decide_monitor, monitor_budget_reason
+from kiro_crew.monitoring.decision import (
+    decide_monitor,
+    monitor_budget_reason,
+    monitor_stall_reason,
+)
 
 # The one place this module names a host: a tick that sent no request is a third
 # outcome ``MonitorObservation`` has no field for, so the marker is the reason code
@@ -2867,7 +2871,11 @@ class AutoNudgeService:
                         if decision is MonitorDecision.STOP_SUCCESS
                         else MonitorOutcome.BLOCKED
                     )
-                    staged_state.stopped_reason = observation.reason_code or "monitor_blocked"
+                    staged_state.stopped_reason = (
+                        monitor_stall_reason(staged_state, now=now)
+                        or observation.reason_code
+                        or "monitor_blocked"
+                    )
                     staged_state.stopped_at = now
             # Every probe advances durable inspection state and the next
             # deadline. Persist before publishing so a restart cannot restore
@@ -3129,6 +3137,9 @@ class AutoNudgeService:
                 staged_state.coalesce_fingerprint = ""
                 staged_state.coalesce_opened_at = 0.0
                 staged_state.coalesce_alerted = {}
+                staged_state.stall_digest = ""
+                staged_state.stall_streak = 0
+                staged_state.stall_started_at = 0.0
             await self._persist_staged_monitor_locked(loop, staged)
             if loop.active and not state.wake_in_flight and loop.id not in self._firing:
                 self._arm_from_deadline(loop)

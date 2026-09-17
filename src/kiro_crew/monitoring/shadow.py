@@ -10,6 +10,7 @@ from dataclasses import fields
 from kiro_crew.monitoring.decision import (
     decide_monitor,
     monitor_budget_reason,
+    monitor_stall_reason,
     terminal_decision_for_outcome,
 )
 
@@ -133,7 +134,9 @@ async def run_shadow_probe(
         MonitorDecision.STOP_BUDGET,
     }:
         staged.outcome = _terminal_outcome(decision, observation.provider_error)
-        staged.stopped_reason = observation.reason_code or decision.value
+        staged.stopped_reason = (
+            monitor_stall_reason(staged, now=now) or observation.reason_code or decision.value
+        )
         staged.stopped_at = now
         staged.next_probe_at = 0.0
     else:

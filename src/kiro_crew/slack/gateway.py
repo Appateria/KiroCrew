@@ -240,11 +240,14 @@ from kiro_crew.monitoring.completion import (
     is_monitor_completion_evidence,
 )
 from kiro_crew.monitoring.models import (
+    DEFAULT_MONITOR_STALL_MIN_SECS,
+    DEFAULT_MONITOR_STALL_TICKS,
     MONITOR_STOP_APPROVAL_STALL,
     MONITOR_STOP_COMPLETION_UNAVAILABLE,
     MONITOR_STOP_INVALID_RECORD,
     MONITOR_STOP_SESSION_UNAVAILABLE,
     MONITOR_STOP_UNSUPPORTED_VERSION,
+    MONITOR_STOP_VERDICT_STALL,
     MonitorActionDisposition,
     MonitorDispatchResult,
     MonitorOutcome,
@@ -7445,6 +7448,23 @@ class GatewayOrchestrator:
                     body = (
                         "The pull request was closed without merging. Decide whether "
                         "to reopen it or abandon this watch. Restart the monitor if you reopen it."
+                    )
+                elif reason == MONITOR_STOP_VERDICT_STALL:
+                    # NOT the terminal-blocker map below, whose copy sends the reader to
+                    # repair something. But it must not claim the opposite either: the
+                    # DOMINANT way a watch reaches twelve identical ticks is an
+                    # already-alerted red sitting inside its re-alert interval, so
+                    # "nothing is wrong" would be false exactly when it matters. Name the
+                    # verdict it kept reaching and let the reader judge it. The minutes
+                    # are derived so the sentence cannot outlive the floor.
+                    last_seen = monitor.last_observation_reason_code or "no change"
+                    title = "Pull request monitor stopped — its verdict stopped moving"
+                    body = (
+                        f"The monitor reached the same conclusion {DEFAULT_MONITOR_STALL_TICKS} "
+                        f"checks in a row, over at least {DEFAULT_MONITOR_STALL_MIN_SECS // 60} "
+                        f"minutes. Last seen: {last_seen}. It stopped because nothing was "
+                        "moving, not because of a new problem -- act on that verdict yourself, "
+                        "or start a new watch if you expect it to change."
                     )
                 else:
                     title = "Pull request monitor stopped on a terminal blocker"

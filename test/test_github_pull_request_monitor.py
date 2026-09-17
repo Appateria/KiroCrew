@@ -22,6 +22,9 @@ from kiro_crew.monitoring.github_pull_request import (
     parse_github_pull_request_target,
 )
 from kiro_crew.monitoring.models import (
+    DEFAULT_MONITOR_CADENCE_SECS,
+    DEFAULT_MONITOR_STALL_TICKS,
+    MONITOR_STOP_VERDICT_STALL,
     MonitorBudgets,
     MonitorDecision,
     MonitorObservation,
@@ -2876,6 +2879,55 @@ async def test_shadow_fails_closed_on_an_untyped_result() -> None:
 
     assert verdict.decision is MonitorDecision.RETRY_PROVIDER
     assert state.last_provider_error is ProviderErrorKind.TRANSIENT
+
+
+@pytest.mark.asyncio
+async def test_shadow_records_a_stalled_watch_as_a_stall_not_as_the_subject() -> None:
+    """The second writer of ``stopped_reason`` needs the same precedence.
+
+    ``run_shadow_probe`` otherwise takes the reason from the observation, so a
+    watch retired for repeating itself would persist as ``checks_failed`` on this
+    path while the delivering path called it a stall. One rule, both writers.
+    """
+    red = MonitorProbeResult(
+        canonical={"head_revision": "abc123"},
+        observation=MonitorObservation(
+            "red-1",
+            MonitorObservationStatus.ACTIONABLE,
+            reason_code="checks_failed",
+            summary="One check is failing.",
+        ),
+    )
+
+    class Provider:
+        def probe(self, subjects: object, **kwargs: object) -> dict[str, object]:
+            return {subject: red for subject in subjects}  # type: ignore[union-attr]
+
+    async def persist(updated: MonitorState) -> None:
+        return None
+
+    state = MonitorState(
+        kind="github_pull_request",
+        target="https://github.com/owner/repo/pull/123",
+        objective="review_ready",
+        created_ts=1_000.0,
+        # Already alerted and inside the re-alert interval, so every tick decides
+        # NO_CHANGE and the verdict never moves.
+        last_fingerprint="red-1",
+        last_wake_fingerprint="red-1",
+        coalesce_alerted={"red-1": 1_000.0},
+        budgets=MonitorBudgets(max_runtime_secs=10_000_000),
+    )
+
+    for tick in range(DEFAULT_MONITOR_STALL_TICKS):
+        verdict = await run_shadow_probe(
+            state, Provider(), persist, now=1_100.0 + tick * DEFAULT_MONITOR_CADENCE_SECS
+        )
+
+    assert verdict.decision is MonitorDecision.STOP_BLOCKED
+    assert state.outcome is MonitorOutcome.BLOCKED
+    assert state.stopped_reason == MONITOR_STOP_VERDICT_STALL
+    assert state.stopped_reason != "checks_failed"
 
 
 def test_the_github_result_requires_its_response_explicitly() -> None:

@@ -57,11 +57,48 @@ DEFAULT_MONITOR_COALESCE_SECS = 240.0
 #: is re-reported on this interval rather than once, and a future timestamp
 #: (clock rollback) reads as stale so it can never suppress a wake forever.
 DEFAULT_MONITOR_REALERT_SECS = 6 * 3600
+#: How many consecutive COUNTED ticks may carry a byte-identical verdict before
+#: the watch is retired as stuck. Counted in ticks because the thing being
+#: counted is repeated conclusions, and a tick is when a conclusion is reached.
+#:
+#: The value is bounded on both sides by numbers already in this module rather
+#: than chosen freely. It must EXCEED the floor's tick equivalent at the default
+#: cadence (``DEFAULT_MONITOR_STALL_MIN_SECS // DEFAULT_MONITOR_CADENCE_SECS``,
+#: which is 6), or the count never binds at the default and the constant is
+#: decoration. And it must fall INSIDE the ticks a default watch gets before its
+#: runtime budget retires it (``DEFAULT_MONITOR_RUNTIME_SECS //
+#: DEFAULT_MONITOR_CADENCE_SECS``, which is 48), or the stall can never fire for
+#: the reason it exists. So 6 < 12 < 48.
+DEFAULT_MONITOR_STALL_TICKS = 12
+#: Least wall-clock a stall streak must cover before it may retire a watch.
+#:
+#: The tick count above answers "how many times did it reach the same
+#: conclusion", which is the right question in the wrong unit on its own: cadence
+#: is user-set from 15s to 86400s. The streak's clock starts on its FIRST counted
+#: tick, so twelve ticks is ELEVEN intervals -- 3300s at the 300s default, 165s at
+#: the 15s minimum -- and 165s of an unchanged subject is a watch whose agent is
+#: still working. The trip therefore needs BOTH.
+#:
+#: This value is bounded on both sides too. It must exceed
+#: ``DEFAULT_MONITOR_COALESCE_SECS`` by a wide margin, or a burst being folded
+#: could look like a stall (1800 is 7.5 windows). And it must stay well under
+#: ``DEFAULT_MONITOR_REALERT_SECS``, because a re-alert wakes the subject and
+#: zeroes the streak: a floor at or past that interval could never be reached,
+#: which is the unreachable-mechanism failure in its other direction. So
+#: 240 << 1800 << 21600, and at the default cadence twelve ticks already span
+#: 3300s, inside the 14400s runtime budget.
+DEFAULT_MONITOR_STALL_MIN_SECS = 1800
 MONITOR_STOP_RUNTIME_BUDGET = "runtime_budget"
 MONITOR_STOP_AGENT_TURN_BUDGET = "agent_turn_budget"
 MONITOR_STOP_TOKEN_BUDGET = "token_budget"
 MONITOR_STOP_PROVIDER_ERROR_BUDGET = "provider_error_budget"
 MONITOR_STOP_APPROVAL_STALL = "approval_stall"
+#: A watch retired because its own verdict stopped moving. DISTINCT from
+#: ``approval_stall``, which is a delivery failure -- the session could not get
+#: tool approval -- and distinct from every ``*_budget`` reason, which mean a
+#: bound was spent. Those three answers to "why did this stop" have different
+#: remedies, so a reader must be able to tell them apart from the record alone.
+MONITOR_STOP_VERDICT_STALL = "verdict_stall"
 MONITOR_STOP_COMPLETION_UNAVAILABLE = "completion_evidence_unavailable"
 MONITOR_STOP_UNSUPPORTED_VERSION = "unsupported_monitor_version"
 MONITOR_STOP_USER = "user_stop"
@@ -565,6 +602,59 @@ class MonitorState:
     #: decision, because on a durable per-loop record this map grows across
     #: restarts and the growth is a durability cost, not untidiness.
     coalesce_alerted: dict[str, float] = field(default_factory=dict)
+    #: The stall streak: a digest of the last COUNTED verdict, and how many
+    #: consecutive ticks have reached exactly that verdict.
+    #:
+    #: A tick counts only when it settled the subject AND the engine then did
+    #: nothing about it -- a ``NO_CHANGE``. Any other settled decision zeroes all
+    #: three fields, because it means the watch was working: a wake acted, a
+    #: record or a retry deferred on purpose, a stop already ended it.
+    #:
+    #: The digest is DERIVED from the verdict on every tick and never stored
+    #: alongside a second copy of what it summarizes, so the two cannot
+    #: disagree. What is persisted here is history -- the digest of the verdict
+    #: BEFORE this tick's -- which nothing else in the record holds, so there is
+    #: still one source of truth for the present verdict.
+    #:
+    #: All three fields load as absent-means-fresh. A record written before them
+    #: starts its streak on its first post-upgrade tick, which costs at most one
+    #: ceiling of ticks once and can neither miss a wake nor retire a live watch
+    #: early. Seeding a streak from the recorded ``last_decision`` and
+    #: ``last_fingerprint`` was considered and rejected: the record does not carry
+    #: the rest of the last verdict's entry, so a seeded digest could claim a
+    #: match that never happened, and the only direction that error runs is
+    #: stopping a working watch.
+    stall_digest: str = ""
+    #: Consecutive counted ticks whose verdict digest matched ``stall_digest``,
+    #: counting this one. Zero before the first counted tick and after ANY tick
+    #: that was not one, so the word "consecutive" means what it says.
+    stall_streak: int = 0
+    #: When the current streak's first counted tick landed. Zero means no streak.
+    #:
+    #: The trip needs both a repeated-conclusion count and elapsed wall-clock, and
+    #: this is the wall-clock measured DIRECTLY rather than translated. Storing a
+    #: tick ceiling derived from ``cadence_secs`` would make the trip a pure
+    #: integer comparison, at the price of a cached value derived from a mutable
+    #: input with nothing invalidating it: a streak opened at the 300s default
+    #: would carry that ceiling into a 15s cadence and trip a quarter of the way
+    #: into its floor. Any translation from ticks to seconds breaks on a cadence
+    #: change in one direction or the other, so nothing is translated.
+    #:
+    #: Reading the clock in the trip does NOT reopen the hazard a ceiling guards
+    #: against, which is a predicate an operator can make true between two folds by
+    #: rewriting the cadence. This is ``time.time()``, a WALL clock, so it is not
+    #: monotonic and can move either way -- but neither direction reopens that
+    #: hazard. Backwards, ``now - stall_started_at`` goes negative and fails the
+    #: floor, so a jump can only DELAY a trip. Forwards, a jump can satisfy the
+    #: floor early but cannot manufacture the twelve counted ticks, which is the
+    #: other half of the condition and the reason both halves are required.
+    #: What it does require is that the fold zero this pair on every tick that is
+    #: not a counted one -- an unsettled tick INCLUDED -- because a stale streak
+    #: sitting through a long pending stretch would let the clock satisfy the floor
+    #: and hand the next NON-RETRYABLE PROVIDER ERROR a stall's reason. A merge or
+    #: close is settled and takes its own branch, so the exposure is exactly the
+    #: unsettled terminal tick.
+    stall_started_at: float = 0.0
     #: Adoption metering. Without these two numbers a probe gate that never
     #: fires and a probe gate that is doing its job are indistinguishable from
     #: the outside, so a gate stuck at zero adoption goes unnoticed.
@@ -672,6 +762,7 @@ class MonitorState:
             "last_probe_at",
             "next_probe_at",
             "stopped_at",
+            "stall_started_at",
         ):
             value = getattr(self, name)
             if not is_finite_non_negative_number(value):
@@ -690,6 +781,7 @@ class MonitorState:
             "followup_ticks",
             "quiet_streak",
             "floor_ticks",
+            "stall_streak",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -767,6 +859,8 @@ class MonitorState:
                 raise ValueError("coalesce_alerted keys must be strings")
             if not is_finite_non_negative_number(value):
                 raise ValueError("coalesce_alerted values must be finite non-negative numbers")
+        if not isinstance(self.stall_digest, str):
+            raise ValueError("stall_digest must be a string")
         if self.outcome is not None and not isinstance(self.outcome, MonitorOutcome):
             raise ValueError("outcome must be a MonitorOutcome")
         if not isinstance(self.stopped_reason, str):
