@@ -6482,6 +6482,18 @@
       "comment_unread_other": "{{count}} Kommentare · ungelesen",
       "open_comment_thread": "Kommentar-Thread öffnen"
     },
+    "importSessionItem": {
+      "failed": "Fehlgeschlagen",
+      "import_from_file": "Eine Sitzung aus einer Datei importieren",
+      "refusal_damaged_file": "Diese Datei konnte nicht gelesen werden. Sie ist möglicherweise beschädigt oder keine exportierte Sitzung.",
+      "refusal_not_a_session": "Diese Datei ist keine exportierte Sitzung.",
+      "refusal_too_large": "Diese Datei ist zu groß für den Import.",
+      "refusal_upload_failed": "Diese Datei konnte nicht hochgeladen werden. Möglicherweise wurde die Verbindung unterbrochen.",
+      "refusal_busy": "Es laufen derzeit zu viele Importe. Bitte versuchen Sie es in einem Moment erneut.",
+      "imported": "Importiert",
+      "imported_named": "Importiert: {{title}}",
+      "unknown_error": "Der Import ist fehlgeschlagen"
+    },
     "instanceTabBar": {
       "connected": "verbunden",
       "connected_refresh": "verbunden · Aktualisierung {{time}}",

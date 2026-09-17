@@ -6379,6 +6379,18 @@
       "comment_unread_other": "{{count}}件のコメント · 未読",
       "open_comment_thread": "コメントスレッドを開く"
     },
+    "importSessionItem": {
+      "failed": "失敗",
+      "import_from_file": "ファイルからセッションをインポート",
+      "refusal_damaged_file": "このファイルを読み取れませんでした。破損しているか、エクスポートされたセッションではない可能性があります。",
+      "refusal_not_a_session": "このファイルはエクスポートされたセッションではありません。",
+      "refusal_too_large": "このファイルはサイズが大きすぎるためインポートできません。",
+      "refusal_upload_failed": "このファイルをアップロードできませんでした。接続が切断された可能性があります。",
+      "refusal_busy": "現在インポートの実行が多すぎます。少し待ってからもう一度お試しください。",
+      "imported": "インポートしました",
+      "imported_named": "インポートしました: {{title}}",
+      "unknown_error": "インポートに失敗しました"
+    },
     "instanceTabBar": {
       "connected": "接続済み",
       "connected_refresh": "接続済み · {{time}} に更新",

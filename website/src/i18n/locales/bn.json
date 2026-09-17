@@ -6482,6 +6482,18 @@
       "comment_unread_other": "{{count}}টি মন্তব্য · অপঠিত",
       "open_comment_thread": "কমেন্ট থ্রেড খুলুন"
     },
+    "importSessionItem": {
+      "failed": "ব্যর্থ",
+      "import_from_file": "ফাইল থেকে একটি সেশন আমদানি করো",
+      "refusal_damaged_file": "এই ফাইলটি পড়া যায়নি। এটি ক্ষতিগ্রস্ত হতে পারে, বা এটি রপ্তানি করা সেশন নয়।",
+      "refusal_not_a_session": "এই ফাইলটি রপ্তানি করা সেশন নয়।",
+      "refusal_too_large": "এই ফাইলটি আমদানি করার জন্য অত্যন্ত বড়।",
+      "refusal_upload_failed": "এই ফাইলটি আপলোড করা যায়নি। সংযোগ বিচ্ছিন্ন হয়ে থাকতে পারে।",
+      "refusal_busy": "এখন অনেকগুলি আমদানি চলছে। কিছুক্ষণ পরে আবার চেষ্টা করো।",
+      "imported": "ইমপোর্ট হয়েছে",
+      "imported_named": "ইমপোর্ট হয়েছে: {{title}}",
+      "unknown_error": "ইমপোর্ট ব্যর্থ হয়েছে"
+    },
     "instanceTabBar": {
       "connected": "সংযুক্ত",
       "connected_refresh": "সংযুক্ত · রিফ্রেশ {{time}}",

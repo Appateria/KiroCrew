@@ -2443,18 +2443,34 @@ async def test_send_bundle_downgrades_a_v2_bundle_that_has_no_layer_b():
 # ── helpers ──────────────────────────────────────────────────────────────
 
 
-def _make_request(state, body, *, raw: str | None = None):
-    """A minimal aiohttp-request stand-in for the import handler."""
+def _make_request(state, body, *, raw: str | None = None, gz: bytes | None = None):
+    """A minimal aiohttp-request stand-in for the import handler.
 
-    async def _json():
-        if raw is not None:
-            return json.loads(raw)
-        return body
+    Serves BYTES via ``read()``, not a pre-parsed dict, because the handler
+    decides the body format from the first two bytes — a stub that handed back a
+    dict would skip the very branch under test. ``gz`` sends compressed bytes
+    verbatim (what a browser uploads); ``raw`` sends an exact string (malformed
+    JSON); otherwise *body* is serialised the way a real caller would.
+    """
+
+    if gz is not None:
+        payload = gz
+    elif raw is not None:
+        payload = raw.encode("utf-8")
+    else:
+        payload = json.dumps(body).encode("utf-8")
+
+    async def _read():
+        return payload
 
     return SimpleNamespace(
         app={"state": state},
         get=lambda _k, default="": default,
-        json=_json,
+        # A real request always has headers, and the caller-identity rule reads
+        # ``X-Session-Key`` off them when the auth middleware published no app
+        # claim. Empty is the dashboard owner, which is what these tests are.
+        headers={},
+        read=_read,
     )
 
 
@@ -2495,7 +2511,7 @@ def _stub_state(st, monkeypatch, save=None):
         _restricted_keys=set(),
         _tags=[],
         _tags_authoritative=True,
-        _folders={},
+        _folders=[],
         get_or_create_slot=_get_or_create,
         push_slots_update=lambda: None,
         # The materialiser wraps creation + begin_slot_construction in this to
@@ -2515,6 +2531,7 @@ def _stub_state(st, monkeypatch, save=None):
     state.live_slot_count = lambda: len(state._slots) + len(state._slots_under_construction)
     state.begin_slot_construction = state._slots_under_construction.add
     state.end_slot_construction = state._slots_under_construction.discard
+
     # Seed with the first slot the handler will mint, so tests that read
     # ``state._imported_slot`` before the call still resolve; _get_or_create
     # rebinds it to the real minted slot when the handler runs.
@@ -2522,8 +2539,10 @@ def _stub_state(st, monkeypatch, save=None):
     return state
 
 
-async def _run_import(st, monkeypatch, body, *, return_slot=False, created=None, save=None):
-    state = _stub_state(st, monkeypatch, save=save)
+async def _run_import(
+    st, monkeypatch, body, *, return_slot=False, created=None, save=None, gz=None, state=None
+):
+    state = state if state is not None else _stub_state(st, monkeypatch, save=save)
     if created is not None:
         from kiro_crew.dashboard.chat_handlers import _ChatSlot
 
@@ -2538,7 +2557,7 @@ async def _run_import(st, monkeypatch, body, *, return_slot=False, created=None,
             return s
 
         state.get_or_create_slot = _get_or_create
-    resp = await st.api_chat_slot_import(_make_request(state, body))
+    resp = await st.api_chat_slot_import(_make_request(state, body, gz=gz))
     assert isinstance(resp, web.Response)
     if return_slot:
         return state._imported_slot
@@ -3010,3 +3029,421 @@ async def test_slot_cap_is_rechecked_after_the_pre_creation_awaits(monkeypatch):
     assert json.loads(resp.body)["code"] == "transfer_slot_cap"
     # Nothing was allocated by the request that lost the race.
     assert "imported-1" not in state._slots
+
+
+# ── install from a FILE: the body format ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_import_accepts_the_exact_bytes_the_export_endpoint_writes(monkeypatch):
+    """The acceptance bar: an exported file installs with no step in between.
+
+    Compressed with the EXPORT MODULE'S OWN serialiser, not a local
+    ``gzip.compress`` that happens to look similar — the defect this closes was
+    precisely that the two halves of one product disagreed about a format, so a
+    test that re-implements the sending half could pass while the endpoint still
+    refuses the real file. ``GET .../export`` answers ``application/gzip``; the
+    importer read ``request.json()`` and rejected those bytes as malformed JSON.
+    """
+    from kiro_crew.dashboard import session_transfer as st
+    from kiro_crew.dashboard.session_export import gzip_bundle
+
+    resp = await _run_import(st, monkeypatch, None, gz=gzip_bundle(_valid()))
+
+    assert resp.status == 200, resp.body
+    assert json.loads(resp.body)["messages"] == 1
+
+
+@pytest.mark.asyncio
+async def test_import_still_accepts_a_plain_json_body(monkeypatch):
+    """The tunnel's server-to-server caller posts uncompressed JSON and must not
+    break: the sender is an independently-updated install, so a receiver that
+    started demanding gzip would refuse every peer that has not shipped this."""
+    from kiro_crew.dashboard import session_transfer as st
+
+    resp = await _run_import(st, monkeypatch, _valid())
+
+    assert resp.status == 200, resp.body
+
+
+@pytest.mark.asyncio
+async def test_import_sniffs_the_magic_and_not_the_content_type(monkeypatch):
+    """A browser uploading a ``.gz`` off disk sends whatever its platform guesses
+    for the type — often ``application/octet-stream``, sometimes nothing. The
+    stub request carries NO content type at all, so a handler that branched on
+    the header could not reach the gzip path this asserts."""
+    from kiro_crew.dashboard import session_transfer as st
+    from kiro_crew.dashboard.session_export import gzip_bundle
+
+    request = _make_request(_stub_state(st, monkeypatch), None, gz=gzip_bundle(_valid()))
+    assert not hasattr(request, "content_type")
+
+    resp = await st.api_chat_slot_import(request)
+
+    assert resp.status == 200, resp.body
+
+
+@pytest.mark.asyncio
+async def test_import_refuses_a_corrupt_gzip_with_its_own_code(monkeypatch):
+    """A truncated upload gets a code of its own, not the bad-JSON one.
+
+    The sender needs to know its FILE did not survive the trip; told
+    ``transfer_invalid_json`` it would go looking for a syntax error in a
+    document it never wrote by hand.
+    """
+    from kiro_crew.dashboard import session_transfer as st
+    from kiro_crew.dashboard.session_export import gzip_bundle
+
+    truncated = gzip_bundle(_valid())[: len(gzip_bundle(_valid())) // 2]
+    resp = await _run_import(st, monkeypatch, None, gz=truncated)
+
+    assert resp.status == 400
+    assert json.loads(resp.body)["code"] == "transfer_invalid_gzip"
+
+
+@pytest.mark.asyncio
+async def test_import_still_refuses_plain_garbage_as_bad_json(monkeypatch):
+    """Bytes that are neither gzip nor JSON keep the code they always had."""
+    from kiro_crew.dashboard import session_transfer as st
+
+    state = _stub_state(st, monkeypatch)
+    resp = await st.api_chat_slot_import(_make_request(state, None, raw="{not json"))
+
+    assert resp.status == 400
+    assert json.loads(resp.body)["code"] == "transfer_invalid_json"
+
+
+def test_gunzip_refuses_a_bomb_while_it_is_still_small(monkeypatch):
+    """The cap bounds the ALLOCATION, not the result.
+
+    A ``gzip.decompress`` followed by a ``len()`` check ALSO refuses an oversized
+    body — after allocating every byte of it, which on a compression bomb is the
+    whole attack. So "it was refused" proves nothing on its own. What is asserted
+    here is the quantity actually held when the refusal fires: at most one chunk
+    past the cap. Replace the incremental loop with decompress-then-measure and
+    this reddens, because the reported size becomes the full expansion.
+    """
+    import gzip
+
+    from kiro_crew.dashboard import session_transfer as st
+
+    monkeypatch.setattr(st, "_MAX_DECOMPRESSED_BYTES", 4096)
+    monkeypatch.setattr(st, "_CHUNK_BYTES", 1024)
+    bomb = gzip.compress(b"\0" * (8 * 1024 * 1024))
+    assert len(bomb) < 64 * 1024, "the point of the fixture is that it is tiny"
+
+    with pytest.raises(st._BundleTooLarge) as caught:
+        st._gunzip_bounded(bomb)
+
+    held = caught.value.args[0]
+    assert held <= 4096 + 1024, f"held {held} bytes before refusing"
+
+
+@pytest.mark.asyncio
+async def test_import_refuses_an_oversized_compressed_body(monkeypatch):
+    """End to end: the bound is wired to a coded refusal, not only to a helper."""
+    import gzip
+
+    from kiro_crew.dashboard import session_transfer as st
+
+    monkeypatch.setattr(st, "_MAX_DECOMPRESSED_BYTES", 4096)
+    resp = await _run_import(st, monkeypatch, None, gz=gzip.compress(b"\0" * (1024 * 1024)))
+
+    assert resp.status == 400
+    assert json.loads(resp.body)["code"] == "transfer_bundle_too_large"
+
+
+def test_the_decompression_cap_never_makes_gzip_stricter_than_plain_json():
+    """The property that makes the cap safe, not the arithmetic behind it.
+
+    ``client_max_size`` (60 MiB) bounds EVERY body, compressed or not, so the
+    plain path can never deliver more than that much JSON. As long as the
+    decompressed ceiling is above it, the gzip path accepts strictly more than the
+    plain path ever could -- which is what makes "a bundle this refuses" a bundle
+    that was already unimportable by the only route that existed before.
+
+    Pinned rather than argued, because the arithmetic reads as though the cap
+    tracks the validator's CHARACTER ceilings, and a character ceiling is not a
+    byte ceiling: ``ensure_ascii`` renders one non-ASCII char as six bytes. The
+    number moving with those ceilings is a convenience; this comparison is the
+    guarantee.
+    """
+    from kiro_crew.dashboard import session_transfer as st
+
+    assert st._MAX_DECOMPRESSED_BYTES > st._GATEWAY_CLIENT_MAX_SIZE
+    # And the magnitude still comes from the validator, so the two move together.
+    assert st._MAX_DECOMPRESSED_BYTES == (
+        st._MAX_TOTAL_CHARS + st._MAX_LAYER_B_CHARS + st._JSON_ENVELOPE_SLACK
+    )
+
+
+def test_the_stated_gateway_body_limit_matches_the_gateway():
+    """The restated constant has to be the real one, or the test above proves
+    nothing. Read out of the server module rather than trusted."""
+    from pathlib import Path
+
+    import kiro_crew.dashboard.server as server_mod
+    from kiro_crew.dashboard import session_transfer as st
+
+    source = Path(server_mod.__file__).read_text(encoding="utf-8")
+    assert "client_max_size=60 * 1024 * 1024" in source
+    assert st._GATEWAY_CLIENT_MAX_SIZE == 60 * 1024 * 1024
+
+
+# ── install from a FILE: the round trip ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_concurrent_expansions_are_bounded_and_the_excess_is_refused(monkeypatch):
+    """The per-body cap bounds ONE request; the sum is what exhausts a host.
+
+    Without a concurrency bound, N authenticated requests each hold up to the
+    ceiling at the same time. Asserted on the OBSERVED simultaneity, not on the
+    presence of a semaphore: the gunzip is replaced with one that records how
+    many are inside it at once.
+    """
+    from kiro_crew.dashboard import session_transfer as st
+    from kiro_crew.dashboard.session_export import gzip_bundle
+
+    monkeypatch.setattr(st, "_expansion_lock", None)
+    monkeypatch.setattr(st, "_expansion_slots", None)
+    monkeypatch.setattr(st, "_expansion_waiting", 0)
+
+    inside = {"now": 0, "peak": 0}
+    release = asyncio.Event()
+
+    async def _slow_to_thread(fn, *args):
+        if fn is st._gunzip_bounded:
+            inside["now"] += 1
+            inside["peak"] = max(inside["peak"], inside["now"])
+            await release.wait()
+            inside["now"] -= 1
+            return fn(*args)
+        return fn(*args)
+
+    monkeypatch.setattr(st.asyncio, "to_thread", _slow_to_thread)
+    gz = gzip_bundle(_valid())
+
+    # More than the queue allows, all in flight together.
+    running = [
+        asyncio.create_task(_run_import(st, monkeypatch, None, gz=gz))
+        for _ in range(st._MAX_CONCURRENT_EXPANSIONS + st._MAX_QUEUED_EXPANSIONS + 2)
+    ]
+    await asyncio.sleep(0.05)
+    refused = [t for t in running if t.done()]
+    release.set()
+    results = await asyncio.gather(*running)
+
+    assert inside["peak"] <= st._MAX_CONCURRENT_EXPANSIONS, inside
+    assert refused, "the excess must be refused immediately, not parked"
+    busy = [r for r in results if r.status == 429]
+    assert busy, [r.status for r in results]
+    assert json.loads(busy[0].body)["code"] == "transfer_expansion_busy"
+
+
+@pytest.mark.asyncio
+async def test_the_expansion_permit_outlives_the_decompression(monkeypatch):
+    """A permit that ends at the gunzip bounds the CPU, not the memory.
+
+    A decompressed bundle stays resident -- first as bytes, then as the parsed
+    document -- through redaction and persistence, so what has to be bounded is
+    how many are resident AT ONCE, not how many are inflating at once. Measured
+    inside the post-decompression pass rather than at the gunzip: with the permit
+    released when the body has been read, every admitted caller frees its slot
+    immediately and they all pile into redaction together, which is precisely the
+    sum the bound exists to prevent.
+    """
+    from kiro_crew.dashboard import chat_handlers as ch
+    from kiro_crew.dashboard import session_transfer as st
+    from kiro_crew.dashboard.session_export import gzip_bundle
+
+    monkeypatch.setattr(st, "_expansion_lock", None)
+    monkeypatch.setattr(st, "_expansion_slots", None)
+    monkeypatch.setattr(st, "_expansion_waiting", 0)
+
+    resident = {"now": 0, "peak": 0}
+    release = asyncio.Event()
+
+    async def _park_in_redaction(fn, *args):
+        if fn is ch._redact_history_rows:
+            resident["now"] += 1
+            resident["peak"] = max(resident["peak"], resident["now"])
+            await release.wait()
+            resident["now"] -= 1
+        return fn(*args)
+
+    monkeypatch.setattr(st.asyncio, "to_thread", _park_in_redaction)
+    gz = gzip_bundle(_valid())
+
+    running = [
+        asyncio.create_task(_run_import(st, monkeypatch, None, gz=gz))
+        for _ in range(st._MAX_CONCURRENT_EXPANSIONS + st._MAX_QUEUED_EXPANSIONS + 2)
+    ]
+    await asyncio.sleep(0.05)
+    peak_while_parked = resident["peak"]
+    release.set()
+    await asyncio.gather(*running)
+
+    assert peak_while_parked, "no caller reached redaction; the harness missed the pass"
+    assert peak_while_parked <= st._MAX_CONCURRENT_EXPANSIONS, resident
+
+
+@pytest.mark.asyncio
+async def test_the_transcript_only_mark_reads_layer_b_skipped_not_absence(monkeypatch):
+    """A file bundle MAY carry Layer B and usually will not — so the mark is
+    driven by the sender's explicit signal, never inferred from absence.
+
+    Three cases, because inferring from absence gets two of them wrong:
+
+    * no Layer B and no signal — a session that never HAD a kiro-cli context.
+      Nothing was lost, so nothing is marked. Inference would mark it.
+    * no Layer B, ``layer_b_skipped`` set — context existed and was withheld
+      (the export's default-off posture, or a mid-turn source). Marked.
+    * Layer B present — full fidelity, not marked.
+    """
+    from kiro_crew.dashboard import session_transfer as st
+    from kiro_crew.dashboard.session_export import gzip_bundle
+
+    never_had = await _run_import(st, monkeypatch, None, gz=gzip_bundle(_valid()), return_slot=True)
+    assert "transcript only" not in never_had.title
+
+    withheld = await _run_import(
+        st,
+        monkeypatch,
+        None,
+        gz=gzip_bundle(_valid(layer_b_skipped=True)),
+        return_slot=True,
+    )
+    assert "transcript only" in withheld.title
+
+
+# ── the round trip, over the real handlers ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_an_exported_file_installs_with_no_step_in_between(tmp_path):
+    """The two halves of the feature, wired to each other over HTTP.
+
+    Every other test here stubs one side. This one stubs NEITHER: a real
+    ``DashboardState``, the real ``api_chat_slot_export``, the real
+    ``api_chat_slot_import``. It is the test whose absence let the defect ship —
+    each half was covered, the PAIR was not, and the pair is where they disagreed
+    about a format.
+
+    Also covers, in one pass, the two exit criteria that are about repetition
+    rather than about a single install: the same file installed twice yields TWO
+    separate sessions, and a plain-JSON body keeps working alongside gzip so the
+    tunnel is unregressed.
+    """
+    import gzip
+
+    from aiohttp.test_utils import TestClient, TestServer
+    from chat_test_helpers import _make_state
+
+    from kiro_crew.dashboard.session_export import api_chat_slot_export
+    from kiro_crew.dashboard.session_transfer import api_chat_slot_import
+
+    state = _make_state(tmp_path)
+    # Make the SOURCE session auto-approving, so the exported file genuinely
+    # RECORDS `approval_policy: "auto"`. Exit criterion: an installed session
+    # lands interactive regardless of what its source record says — asserted
+    # below, and vacuous unless the file actually carries the dangerous value.
+    state.sessions.has_session.return_value = True
+    state.sessions.get_approval_policy.return_value = "auto"
+    app = web.Application(client_max_size=60 * 1024 * 1024)
+    app["state"] = state
+    app.router.add_post("/api/chat/slots/import", api_chat_slot_import)
+    app.router.add_get("/api/chat/slots/{slot}/export", api_chat_slot_export)
+
+    async with TestClient(TestServer(app)) as client:
+        body = json.dumps(_valid(origin="seedbox", title="round trip")).encode()
+
+        # Seed one session the way the tunnel does: an uncompressed JSON body.
+        seeded = await client.post(
+            "/api/chat/slots/import", data=body, headers={"Content-Type": "application/json"}
+        )
+        assert seeded.status == 200, await seeded.text()
+        seeded_key = (await seeded.json())["key"]
+
+        # Export it. These are the bytes a user is handed.
+        exported = await client.get(f"/api/chat/slots/{seeded_key}/export")
+        assert exported.status == 200, await exported.text()
+        assert exported.headers["Content-Type"] == "application/gzip"
+        gz = await exported.read()
+        assert gz[:2] == b"\x1f\x8b"
+        # The file really does record auto-approval, so the interactive-on-arrival
+        # assertion at the end is measuring something. Without this the mock could
+        # stop reporting a policy and that assertion would still pass.
+        assert json.loads(gzip.decompress(gz))["source"]["approval_policy"] == "auto"
+
+        # Install them UNCHANGED. No gunzip, no re-encode, no manual step. This
+        # is the assertion the whole change exists for.
+        first = await client.post(
+            "/api/chat/slots/import",
+            data=gz,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert first.status == 200, await first.text()
+        first_key = (await first.json())["key"]
+
+        # The same file again: another session, not a refusal and not a merge.
+        second = await client.post(
+            "/api/chat/slots/import",
+            data=gz,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert second.status == 200, await second.text()
+        second_key = (await second.json())["key"]
+        assert second_key != first_key
+
+        # And the tunnel's plain body still lands, next to them.
+        tunnel_again = await client.post(
+            "/api/chat/slots/import", data=body, headers={"Content-Type": "application/json"}
+        )
+        assert tunnel_again.status == 200, await tunnel_again.text()
+
+    # The same file installed twice is TWO sessions, not one replaced: install
+    # only ever adds, so a second install of one file cannot reach the first.
+    assert first_key != second_key, (first_key, second_key)
+    assert first_key in state._slots and second_key in state._slots
+
+    # An installed session lands INTERACTIVE, whatever the source recorded: the
+    # materialiser applies a fixed field set that does not include
+    # approval_policy, so there is no path by which a file can arrive
+    # pre-approved to run tools.
+    for key in (first_key, second_key):
+        assert getattr(state._slots[key], "approval_policy", "") == ""
+
+
+@pytest.mark.asyncio
+async def test_a_body_past_the_server_limit_is_told_it_is_too_large(tmp_path):
+    """A body the server refuses by SIZE gets the size answer, not the generic one.
+
+    ``request.read()`` raises ``HTTPRequestEntityTooLarge`` once the body passes
+    the Application's ``client_max_size``, which is the one read failure whose
+    cause the server KNOWS. Catching it with everything else would answer
+    ``transfer_body_unreadable`` — copy that hedges between "too large" and "the
+    connection dropped" — and send a person whose file is simply too big looking
+    for a network fault. The limit is set small here so the assertion is about
+    the branch and not about moving 60 MiB.
+    """
+    from aiohttp.test_utils import TestClient, TestServer
+    from chat_test_helpers import _make_state
+
+    from kiro_crew.dashboard.session_transfer import api_chat_slot_import
+
+    app = web.Application(client_max_size=1024)
+    app["state"] = _make_state(tmp_path)
+    app.router.add_post("/api/chat/slots/import", api_chat_slot_import)
+
+    async with TestClient(TestServer(app)) as client:
+        oversized = await client.post(
+            "/api/chat/slots/import",
+            data=b"x" * 4096,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert oversized.status == 400, await oversized.text()
+        payload = await oversized.json()
+
+    assert payload["code"] == "transfer_bundle_too_large", payload
+    assert "size limit" in payload["error"], payload

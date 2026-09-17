@@ -4524,6 +4524,18 @@
     "inlineCommentOverlay": {
       "open_comment_thread": "Open comment thread"
     },
+    "importSessionItem": {
+      "failed": "Failed",
+      "import_from_file": "Import a session from a file",
+      "refusal_damaged_file": "This file could not be read. It may be damaged, or not an exported session.",
+      "refusal_not_a_session": "This file is not an exported session.",
+      "refusal_too_large": "This file is too large to import.",
+      "refusal_upload_failed": "This file could not be uploaded. The connection may have dropped.",
+      "refusal_busy": "Too many imports are running right now. Try again in a moment.",
+      "imported": "Imported",
+      "imported_named": "Imported: {{title}}",
+      "unknown_error": "The import failed"
+    },
     "instanceTabBar": {
       "instances": "Remote instances",
       "local": "Local",

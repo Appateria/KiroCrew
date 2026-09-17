@@ -6379,6 +6379,18 @@
       "comment_unread_other": "{{count}} 条评论 · 未读",
       "open_comment_thread": "打开评论话题"
     },
+    "importSessionItem": {
+      "failed": "失败",
+      "import_from_file": "从文件导入会话",
+      "refusal_damaged_file": "无法读取此文件。它可能已损坏，或者不是导出的会话。",
+      "refusal_not_a_session": "此文件不是导出的会话。",
+      "refusal_too_large": "此文件太大，无法导入。",
+      "refusal_upload_failed": "无法上传此文件。连接可能已中断。",
+      "refusal_busy": "当前正在进行的导入过多。请稍后重试。",
+      "imported": "已导入",
+      "imported_named": "已导入：{{title}}",
+      "unknown_error": "导入失败"
+    },
     "instanceTabBar": {
       "connected": "已连接",
       "connected_refresh": "已连接 · {{time}} 后刷新",

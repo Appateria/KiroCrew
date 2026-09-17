@@ -1640,6 +1640,12 @@ describe('every api method issues one well-formed /api request', () => {
       { id: 'send', app: 'doc-store', endpoint: '/api/apps/doc-store/send' },
       { surface: 'file-overflow', path: '/tmp/a.txt', kind: 'file' },
     ],
+    // `importSessionFromFile(file)` posts the file's BYTES as the request body,
+    // deliberately un-wrapped. The generic `'sw-1'` would arrive as a STRING
+    // body, which `call()` above then tries to JSON-parse -- a harness artifact,
+    // not a defect: a real caller hands this a Blob, exactly as here, and a Blob
+    // body is left alone the same way a FormData one is.
+    importSessionFromFile: [new Blob(['{}'], { type: 'application/gzip' })],
   }
 
   it('covers the whole surface (guards against the table silently shrinking)', () => {

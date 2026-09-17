@@ -6482,6 +6482,18 @@
       "comment_unread_other": "{{count}} टिप्पणियाँ · अपठित",
       "open_comment_thread": "कमेंट थ्रेड खोलें"
     },
+    "importSessionItem": {
+      "failed": "विफल",
+      "import_from_file": "फ़ाइल से एक सत्र आयात करें",
+      "refusal_damaged_file": "यह फ़ाइल पढ़ी नहीं जा सकी। यह क्षतिग्रस्त हो सकती है, या निर्यात किया गया सत्र नहीं है।",
+      "refusal_not_a_session": "यह फ़ाइल निर्यात किया गया सत्र नहीं है।",
+      "refusal_too_large": "यह फ़ाइल आयात करने के लिए बहुत बड़ी है।",
+      "refusal_upload_failed": "यह फ़ाइल अपलोड नहीं हो सकी। कनेक्शन टूट गया हो सकता है।",
+      "refusal_busy": "इस समय बहुत सारे आयात चल रहे हैं। कुछ क्षण बाद पुनः प्रयास करें।",
+      "imported": "इंपोर्ट किया गया",
+      "imported_named": "इंपोर्ट किया गया: {{title}}",
+      "unknown_error": "इंपोर्ट विफल रहा"
+    },
     "instanceTabBar": {
       "connected": "कनेक्टेड",
       "connected_refresh": "कनेक्ट है · रिफ़्रेश {{time}}",

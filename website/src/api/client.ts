@@ -2892,6 +2892,32 @@ export const api = {
     a.remove()
     URL.revokeObjectURL(url)
   },
+  /** Install a session from an exported file, as its own new session.
+   *
+   *  Posts the file's BYTES unchanged — no gunzip, no re-encode, no JSON wrapper.
+   *  The endpoint reads the format off the first two bytes, so a `.gz` straight
+   *  off disk and a plain `.json` a user unpacked by hand both work, and the
+   *  browser never has to know which it was handed. Sending
+   *  `application/octet-stream` is honest for the same reason: the file's type is
+   *  whatever the platform recorded, and it is not this call's to assert.
+   *
+   *  An install ADDS a session and touches no existing one, so a repeat needs no
+   *  confirm step: installing the same file twice is two sessions, which is the
+   *  documented behaviour rather than an accident to guard against. */
+  importSessionFromFile: async (file: Blob) => {
+    const r = await fetch('/api/chat/slots/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', ..._sk },
+      body: file,
+    })
+    return (await j(r)) as {
+      ok: boolean
+      key: string
+      title: string
+      messages: number
+      resume_mode: string
+    }
+  },
   sendSessionToInstance: (id: string, slot: string) =>
     post('/api/instances/' + encodeURIComponent(id) + '/send-session', { slot }).then(j) as Promise<{
       ok: boolean
