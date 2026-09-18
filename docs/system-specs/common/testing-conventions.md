@@ -280,6 +280,72 @@ Rules that decide whether one is worth having:
   (`context._memory_stores` / `_lesson_stores` behind `_stores_lock`), and reset those
   globals through `monkeypatch`, never raw assignment.
 
+### Channel wire fakes: borrow the library's read side, do not model it
+
+`kiro_crew.testing.fake_channel_wire` fakes a channel's `aiohttp` session one layer
+below the client, so the real client, transport, dispatcher and renderer run against
+canned vendor bytes. A fake at that seam has a standing hazard: a response object
+written by hand can disagree with `aiohttp` in ways that raise no `AttributeError`,
+so the suite verifies the client against *our model of `aiohttp`* rather than against
+`aiohttp`, and stays green while production refuses the same bytes.
+
+The rule that removes it: **the response read side is `aiohttp`'s own code.**
+`_FakeResponseCM` binds `ClientResponse.json`, `.text`, `.get_encoding`,
+`.raise_for_status` and `.ok` onto itself and inherits `HeadersMixin` for
+`content_type` / `charset`, supplying only the attributes those methods read
+(`_body`, `_headers`, `status`, `reason`, `request_info`, `history`, `release`).
+Content-type enforcement, the `+json` suffix match, the `content_type=None` bypass,
+empty-body-reads-as-`None`, charset decoding and the `status < 400` rule are then
+decided by the library, not by this repo. `test_fake_channel_wire.py` asserts that
+identity directly: a local re-implementation of any of those methods fails the suite
+regardless of what it returns.
+
+Do not construct a real `ClientResponse` to get this. Its `__init__` is private and
+churns across minor releases, which is the fragile surface; the read-side method
+bodies are not.
+
+Borrowing a method means supplying what it reads in the **type** it reads it in, not
+merely under the right name. `_headers` is a `multidict.CIMultiDict`, the mapping a
+real response carries, because `HeadersMixin` looks a header up by `aiohttp`'s own
+spelling: under a plain `dict` a fixture writing `content-type` is a second, separate
+field that the lookup walks past, so the default answers instead and `.json()`
+accepts a body production refuses. That is the very divergence the borrow removes, so
+`multidict` is a declared direct dependency rather than `aiohttp`'s transitive one.
+
+#### Third-party HTTP test doubles: declined for this harness
+
+`aioresponses` was evaluated as a replacement and **declined**. Recorded so the
+question is not reopened without new facts:
+
+- It does not run on the `aiohttp` this repo resolves to. `aioresponses` 0.7.9, the
+  latest release, declares `aiohttp<4.0,>=3.8` but constructs `ClientResponse`
+  directly with a `writer=` keyword; on `aiohttp` 3.14.x -- what `setup.cfg`'s
+  `aiohttp>=3.9,<4` resolves to, with no lockfile and no CI ceiling -- that raises
+  `TypeError: ClientResponse.__init__() missing 1 required keyword-only argument:
+  'stream_writer'`. Adopting it costs either a first-party `response_class` shim,
+  which restores the hand-written model it was meant to delete, or an
+  `aiohttp<3.14` ceiling on a **runtime** dependency to serve a test-only concern.
+- It reaches no further than the rule above. Both patch at the session boundary, so
+  both inherit the same response semantics; the delegation does it without a
+  dependency and without coupling to a private constructor.
+- It cannot replace the harness outright. `FakeWireWebSocket` scripts frames for the
+  WeCom streaming reply, and `aioresponses` is HTTP-only, so the best available
+  outcome was a split harness rather than one deleted file.
+
+Outbound **encoding** fidelity is out of reach for either option and remains an
+accepted limit: `aiohttp` encodes a body inside `ClientRequest`, which is built below
+the `client._session` seam this harness replaces, so a body recorded here is the
+value the client passed, not the bytes a real request would carry. Assert on
+`RecordedRequest.form` / `.json_body` with that in mind.
+
+#### Path hardening in test utilities is not a precedent
+
+`channel_fixtures.py` resolves fixture paths with `O_NOFOLLOW` containment and an
+atomic replace. That is shipped and correct, but its inputs are test-authored strings
+inside a single-user trust boundary, so it sets no expectation that test utilities
+carry attacker-grade path containment. Spend that review effort on the governance and
+keystone paths instead.
+
 ## Which conftest you are standing on
 
 There are **two** testpaths (`setup.cfg`'s `testpaths = test
