@@ -244,12 +244,28 @@ def _text_scrape_enabled() -> bool:
         return False
 
 
-def _log_scrape_disabled_once() -> None:
-    """Announce the skipped scrape exactly once per process."""
+def _log_scrape_disabled_once(signin_required: bool = False) -> None:
+    """Announce the skipped scrape exactly once per process.
+
+    ``signin_required`` swaps the message for the auth-class case, where the
+    default text ("the API returned no credit plan") names a cause that did not
+    happen and points at a knob that cannot help -- see
+    :func:`_unavailable_reason`. Without the swap, an operator reading only the log
+    is told to enable a billed scrape to fix an expired sign-in.
+    """
     global _usage_scrape_disabled_logged
     if _usage_scrape_disabled_logged:
         return
     _usage_scrape_disabled_logged = True
+    if signin_required:
+        logger.info(
+            "Kiro usage: no live Kiro credential could be read, so the credit "
+            "pill stays unavailable. Sign in to Kiro again (for example by "
+            "running kiro-cli login) to restore it. Enabling "
+            "dashboard.usage_text_scrape_enabled will NOT help here -- the "
+            "scrape is a billed kiro-cli chat turn that needs the same sign-in."
+        )
+        return
     logger.info(
         "Kiro usage: the API returned no credit plan and the /usage text scrape "
         "is disabled, so the credit pill stays unavailable. The scrape is a "
@@ -287,6 +303,46 @@ def _record_scrape_outcome(success: bool) -> None:
             _usage_scrape_failures,
             _USAGE_SCRAPE_BACKOFF_SECS,
         )
+
+
+#: Pill ``reason`` for an auth-class usage failure: no live credential could be
+#: read, or the API refuses the one that was. The remedy is a fresh sign-in, and
+#: unlike ``scrape_disabled`` it costs nothing to act on.
+_REASON_SIGNIN_REQUIRED = "signin_required"
+#: Pill ``reason`` for the other case: the API answered about the account and
+#: reported no credit plan, and the billed scrape that could still find one is
+#: opted out.
+_REASON_SCRAPE_DISABLED = "scrape_disabled"
+
+
+def _unavailable_reason(api_result: kiro_usage_api.UsageResult) -> str:
+    """Pick the pill's ``reason`` for a failed read whose scrape will not run.
+
+    ``scrape_disabled`` is only true when the API actually answered ABOUT the
+    account. When the read failed because no live credential was readable, or
+    because the credential was rejected, that message states a cause that did not
+    happen ("the free usage API returned no plan for this account") and prescribes
+    a remedy that spends credits without being able to work: the ``/usage`` scrape
+    is a billed kiro-cli chat turn needing the same sign-in, so every attempt is
+    paid for and fails until ``_record_scrape_outcome`` parks it.
+
+    So an auth-class ``auth_state`` reports ``signin_required`` instead. Anything
+    the API path could not prove was an auth problem keeps the original message --
+    a spurious "sign in again" on a working sign-in would be the same class of
+    defect in the other direction.
+
+    This changes the message only. The scrape decision above is deliberately
+    untouched: an empty candidate list does NOT prove kiro-cli cannot
+    authenticate, because kiro-cli may authenticate from a store this module does
+    not enumerate (see :func:`_identity_matches_account`), so suppressing the
+    scrape here would break hosts where it works today.
+    """
+    if api_result.auth_state in (
+        kiro_usage_api.AUTH_NO_CREDENTIAL,
+        kiro_usage_api.AUTH_REJECTED,
+    ):
+        return _REASON_SIGNIN_REQUIRED
+    return _REASON_SCRAPE_DISABLED
 
 
 def _cache_without_scrape(
@@ -847,10 +903,13 @@ async def _fetch_usage_bg() -> None:
         # handshake, so they are isolated from the maintenance/cron pools. Fails
         # closed (returns None) so we fall through to the text scrape rather than
         # showing a fabricated number.
-        api_usage = await asyncio.get_running_loop().run_in_executor(
+        api_result = await asyncio.get_running_loop().run_in_executor(
             subprocess_executor(),
             functools.partial(kiro_usage_api.fetch_usage_limits, expected_arn=expected_arn),
         )
+        # ``usage`` is the number; ``auth_state`` is why it is missing when it is,
+        # and is only ever consulted to pick the unavailable message below.
+        api_usage = api_result.usage
         if api_usage and api_usage.get("credits_plan") is not None:
             # API output is untrusted too: redact every string leaf before caching.
             api_usage = {k: _redact_strings(v) for k, v in api_usage.items()}
@@ -882,8 +941,9 @@ async def _fetch_usage_bg() -> None:
         # enough times to look broken. Both checks are before the spawn, so a
         # disabled or parked scrape costs nothing at all.
         if not await asyncio.to_thread(_text_scrape_enabled):
-            _log_scrape_disabled_once()
-            _cache_without_scrape(api_usage, identity, reason="scrape_disabled")
+            reason = _unavailable_reason(api_result)
+            _log_scrape_disabled_once(signin_required=reason == _REASON_SIGNIN_REQUIRED)
+            _cache_without_scrape(api_usage, identity, reason=reason)
             return
         if _scrape_in_backoff():
             _cache_without_scrape(api_usage, identity)

@@ -2560,7 +2560,7 @@ export default function App() {
   // backend cache has not warmed yet" (null) apart from "the request failed"
   // (undefined) — both are falsy. Without it a failing endpoint renders as a
   // spinner that never resolves, since the 30s refetch keeps retrying forever.
-  const { data: kiroUsage, isError: kiroUsageFailed } = useQuery<KiroCreditUsage | 'none' | 'api-key' | 'scrape-disabled' | null>({
+  const { data: kiroUsage, isError: kiroUsageFailed } = useQuery<KiroCreditUsage | 'none' | 'api-key' | 'scrape-disabled' | 'signin-required' | null>({
     queryKey: ['kiro-usage'],
     queryFn: () => api.sessionsUsage().then(d => {
       const u: KiroUsagePayload = d?.usage || {}
@@ -2635,9 +2635,13 @@ export default function App() {
       // warming cache). Scrape opt-in off with no API plan -> same treatment:
       // permanent until the user flips dashboard.usage_text_scrape_enabled, so
       // explain rather than hide (#7623 — hiding left no hint a knob exists).
+      // No readable Kiro credential -> also terminal, but a DIFFERENT remedy:
+      // sign in again, which is free, where flipping the scrape knob spends
+      // credits on a fetch that cannot authenticate (#11602).
       // Empty cache (Kiro warming) -> spinner.
       if (u.available === false) {
         if (u.reason === 'api_key_auth') return 'api-key' as const
+        if (u.reason === 'signin_required') return 'signin-required' as const
         if (u.reason === 'scrape_disabled') return 'scrape-disabled' as const
         return 'none' as const
       }
@@ -3811,6 +3815,13 @@ export default function App() {
                 // the knob — hiding the segment here left users of v0.1.3-era
                 // dashboards with a pill that silently vanished (#7623).
                 segments.push(<button key="usage" className={`${seg} text-muted opacity-60`} onClick={() => setKiroUsageOpen(true)} title={i18nT('app.kiro_credit_usage_scrape_disabled')} aria-label={i18nT('app.kiro_credit_usage_scrape_disabled')}><Coins size={12} /> <span className="font-mono text-[11px] tabular-nums">—</span></button>)
+              } else if (kiroUsageState === 'signin-required') {
+                // No live Kiro credential could be read (or it was rejected), so
+                // the free API never got an answer about this account. Terminal
+                // like 'scrape-disabled', but the label must name the FREE remedy,
+                // signing in again, because the scrape-disabled copy sent these
+                // users to a billed knob that cannot authenticate either (#11602).
+                segments.push(<button key="usage" className={`${seg} text-muted opacity-60`} onClick={() => setKiroUsageOpen(true)} title={i18nT('app.kiro_credit_usage_signin_required')} aria-label={i18nT('app.kiro_credit_usage_signin_required')}><Coins size={12} /> <span className="font-mono text-[11px] tabular-nums">—</span></button>)
               } else if (!kiroUsageState) {
                 segments.push(<button key="usage" className={`${seg} text-muted`} onClick={() => setKiroUsageOpen(true)} title={i18nT('app.kiro_credit_usage_checking')} aria-label={i18nT('app.kiro_credit_usage_checking_2')}><Coins size={12} /> {!isMobile && <Loader2 size={11} className="animate-spin" />}</button>)
               } else {
