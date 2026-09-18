@@ -713,8 +713,8 @@ lifecycle stages, in different shapes:
 
 | Site | Lifecycle stage | Shape | Reachable from code |
 |---|---|---|---|
-| `mcp_shared._resolve_excluded_tools` | per call, cached per session | flat name set from `managedToolPolicy.exclude` | yes |
-| the same function's fail-open returns | before the exclude list is parsed | returns an empty set | nothing to migrate; withholds every exclusion equally |
+| `mcp_shared._resolve_tool_policy` | per call, cached per session | `ToolPolicy(excluded, unresolved)` from `managedToolPolicy.exclude` | yes |
+| the same function's unresolved returns | before the exclude list is parsed | empty set plus the reason it could not be read; `tools/call` refuses, `tools/list` still lists | nothing to migrate; the refusal is audited per call |
 | `acp/kas_agents.to_client_custom_agent` | startup projection, before the session exists | `excludedTools` list relayed to the agent host | yes |
 | `acp/session_mcp.session_mcp_disabled_tools` | session projection: Claude `permissions.deny`, codex `rawInput.server`/`tool` | `(server, tool)` pairs, unioned from the agent spec AND the dashboard-written global `mcp.json` | yes |
 | `agent._WORKER_MIRRORED_SHAPES` | derive-time copy | copies the persisted key | copies rather than resolves, so a rewrite here would alter a user's stored value |

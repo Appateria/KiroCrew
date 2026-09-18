@@ -2309,7 +2309,7 @@ a trust root on its own; publication therefore also writes a
   no-follow, regular-file, size-bounded) — `session_pid_sig` owns both the
   read and write discipline for the file family. Every `.txt` reader routes
   through it: `mcp_core._resolve_session_key` (host-pid + walk),
-  `mcp_shared._resolve_excluded_tools` (policy walk),
+  `mcp_shared._resolve_tool_policy` (policy walk),
   `mcp_caller.CallerContext.from_env` (host-pid + walk; also serves
   `mcp_gateway/stub.py`), and `mcp_gateway/gatewayd._resolve_peer_identity`
   (server-side peer walk). The sidecar is additive.

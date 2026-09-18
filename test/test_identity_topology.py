@@ -12,7 +12,7 @@ the dashboard, completion events unroutable.
 Why the gate stayed green: the ancestry walk is implemented in FOUR
 independent copies (``mcp_caller.CallerContext.from_env``,
 ``mcp_core._resolve_session_key``, the inline walk in
-``mcp_shared._resolve_excluded_tools``, ``mcp_gateway/stub.py``), each tested
+``mcp_shared._resolve_tool_policy``, ``mcp_gateway/stub.py``), each tested
 with hand-rolled per-file mocks that encode their author's topology
 assumptions. Mocks cannot detect that the assumption itself changed.
 
@@ -204,9 +204,9 @@ def test_mcp_core_resolves_session_key(topo, monkeypatch, view) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Walk copy 3: the inline walk in mcp_shared._resolve_excluded_tools
+# Walk copy 3: the inline walk in mcp_shared._resolve_tool_policy
 # ---------------------------------------------------------------------------
-# The policy session-key walk is inlined in ``_resolve_excluded_tools`` and
+# The policy session-key walk is inlined in ``_resolve_tool_policy`` and
 # its deep-walk step is a nested function reading the real /proc, so it
 # cannot be patched. Model the resolvable case with the file on the DIRECT
 # parent (kiro-cli): under the host view the very first ancestor matches and
@@ -244,9 +244,9 @@ def test_mcp_shared_policy_walk_reaches_gateway(topo, monkeypatch, view) -> None
     urlopen = MagicMock(return_value=response)
     monkeypatch.setattr(mcp_shared, "loopback_urlopen", urlopen)
 
-    assert mcp_shared._resolve_excluded_tools() == set()
+    assert mcp_shared._resolve_tool_policy().excluded == set()
     # The walk must have RESOLVED a session key and reached the gateway —
-    # under pidns it resolves empty and fail-opens without the call.
+    # under pidns it resolves empty and returns unresolved without the call.
     assert urlopen.called
     request = urlopen.call_args[0][0]
     assert request.get_header("X-session-key") == SESSION_KEY
@@ -400,9 +400,13 @@ def test_mcp_shared_refuses_symlinked_pid_file(topo, monkeypatch) -> None:
     urlopen = MagicMock()
     monkeypatch.setattr(mcp_shared, "loopback_urlopen", urlopen)
 
-    # No key resolvable -> startup-race fail-open WITHOUT a policy call and,
+    # No key resolvable -> startup-race refusal WITHOUT a policy call and,
     # crucially, WITHOUT the stolen key ever being read through the symlink.
-    assert mcp_shared._resolve_excluded_tools() == set()
+    policy = mcp_shared._resolve_tool_policy()
+    assert policy.excluded == set()
+    # Refusing to follow the symlink must not be reported as an empty
+    # exclusion list, or a stolen-key attempt would silently widen the deny.
+    assert policy.unresolved == "no_session_key"
     assert not urlopen.called
 
 
@@ -464,7 +468,7 @@ _REGISTERED_CALL_SITES: dict[str, str] = {
     ),
     "mcp_shared.py": (
         "reader: policy session-key /proc ancestry walk inline in "
-        "_resolve_excluded_tools — assumes HOST pids; .txt reads via "
+        "_resolve_tool_policy -- assumes HOST pids; .txt reads via "
         "session_pid_sig.read_session_pid_txt (hardened, unsigned)"
     ),
     "mcp_gateway/stub.py": "reader via CallerContext.from_env; register-time caller block — assumes HOST pids",

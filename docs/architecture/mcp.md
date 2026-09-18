@@ -950,8 +950,7 @@ Containment for app agents has three layers:
 |-------|-----------|----------------|
 | Agent config | `managedToolPolicy` renders as `disabledTools`; a `neutralize` entry re-declares a server with every tool disabled and does not add it to `tools` | Written at registration, no network |
 | kiro-cli | Reads `disabledTools` and filters before the model sees the list | In-process, no network |
-| MCP server | `GET /api/session-tool-policy` returns the calling session's `managedToolPolicy.exclude`, and the server filters `tools/list` and `tools/call` | Gateway round-trip |
-
+| MCP server | `GET /api/session-tool-policy` returns the calling session's `managedToolPolicy.exclude`, and the server filters `tools/list` and `tools/call`. When that read fails the policy is `unresolved`: `tools/call` refuses with an audited error, `tools/list` still lists everything | Gateway round-trip |
 `managedToolPolicy` and `includeMcpJson` are in
 `bridges._FRAMEWORK_OWNED_AGENT_KEYS`, so they are refreshed from the template on
 every boot rather than preserved as user preferences. Preserving them is wrong in
@@ -963,15 +962,73 @@ exclude list, which the framework would then faithfully preserve forever.
 discovers the real tool names, so a server that grows a tool cannot quietly slip
 past a stale pattern.
 
-The third layer is defense in depth for hosts that ignore `disabledTools`, and it
-fails **open** by design: kiro-cli calls `tools/list` once at session start, so
-returning an empty list on a transient gateway failure would leave that session
-permanently believing the server has no tools, unrecoverable without a restart.
-A missing session key is not cached (a startup race must be retryable); a
-resolved key whose policy call fails gets a 30s negative cache so a persistently
-unreachable gateway does not add a 5s timeout to every tool call. The gateway
-side is deny-by-default in the opposite sense: a caller that cannot prove its
-identity gets a 400/404, never an empty policy.
+The third layer is defense in depth for hosts that ignore `disabledTools`. When the
+policy cannot be read, what it does depends on WHY, because the reasons differ in
+kind and its two consumers carry different risk.
+
+`tools/call` fails **closed** on `policy_unreadable`, the gateway's `409`: a spec for
+this session exists and its policy could not be determined, so an operator exclusion may
+exist and be withheld. The call is refused with an error naming the reason and audited as
+`rejected_policy_unresolved`. The test for admitting a reason here is that it means ONE
+thing, because a refusal derived from an ambiguous reason is wrong for half the callers
+it hits.
+
+`resolution_failed` -- no usable answer, meaning nothing came back or a `5xx` said the
+gateway is broken -- passes that test and is still permissive, which is the one place
+this contract says something different from what the security argument alone would say.
+Refusing on it was implemented and measured, and the repository's real-MCP end-to-end
+lane will not run a legitimate first tool call under it: five heads with it refusing all
+fail that lane and the two with it permissive both pass. So in this deployment an
+ordinary call reaches that arm, and refusing there does not cost an attacker a tool call,
+it costs an ordinary caller every tool call. It stays permissive and audited until the
+gateway can say why a real call lands there, which is a gateway-side question.
+
+The other reasons stay permissive, each because no operator exclusion is known to exist
+for that caller or because refusal would be permanent rather than a window that closes. `agent_not_resolved` is the `404`, returned both for a session still
+registering (a policy may exist) and for a caller the gateway can never map to an agent
+(no policy can exist); refusing denies the second class forever. `no_session_key` is
+the same gap inside the MCP process, where no agent is named at all. `policy_forbidden`
+is ANY `4xx`: the gateway answered and made a decision about this caller, which for
+`403 member_session_unverified` is the steady state of a session claiming a private
+memory store without a verifiable proof. A boundary the gateway is enforcing is not a
+boundary it failed to read. The test is deliberately the status class and not a list of
+codes -- a list is only as complete as its author's knowledge of the endpoint, and a
+status it never learned would be refused as though it were an outage. Each call through one of these windows is audited as
+`tool_policy.unenforced_call`, so they are visible instead of silent. Closing the `404`
+needs the endpoint to distinguish registering from unmappable.
+
+`tools/list` never filters on an unresolved policy at all, whatever the reason:
+kiro-cli calls it once at session start and caches the answer, so hiding tools on a
+transient failure would leave that session permanently believing the server has no
+tools, unrecoverable without a restart. A listed tool that refuses when called is
+not a hole; an unlisted tool that runs is. Each unfiltered listing is audited as
+`tool_policy.unfiltered_listing`.
+
+A session that has ever resolved its policy is served from the per-session cache and
+never reaches these paths again, so a refusal only affects a session whose policy has
+never been read once.
+
+A missing session key is not cached as a policy (a startup race must be
+retryable, and it clears in milliseconds); a resolved key whose policy call fails
+gets a 60s negative cache so a persistently unreachable gateway does not add a 5s
+timeout to every tool call. That negative cache reports the reason of the clock it
+hit -- the short window an identity race, the long window `resolution_failed` -- so
+a cached read lands in the same class its live form would. Serving one shared reason
+would repeat the conflation the resolver exists to undo, one level down. The gateway
+side is deny-by-default in the same sense: a caller that cannot prove its identity
+gets a 400/404, never an empty policy.
+
+An empty body from that endpoint means one thing only: this agent genuinely
+declares no exclusions. A spec that EXISTS and cannot be read -- unparseable,
+valid JSON that is not an object, a `managedToolPolicy` of the wrong shape, or two
+specs declaring one agent name -- answers `409` with `{"error":
+"policy_unreadable"}` and a SEL `denied` record. Sharing the empty body with those
+cases would make an unreadable deny indistinguishable from no deny on the wire, so
+no caller could tell them apart however carefully it fails closed. The MCP side
+maps that `409` to `unresolved="policy_unreadable"` and does NOT negative-cache
+it: the answer is immediate so there is no timeout to debounce, and both negative
+clocks are process-global, so caching one session's malformed spec there would
+refuse calls for every sibling session in a pooled backend.
 
 ## The MCP-first rule
 

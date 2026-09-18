@@ -32,7 +32,7 @@ from kiro_crew.agent_discovery import (
     read_agent_spec_strict,
     spec_by_declared_name,
 )
-from kiro_crew.agent_spec_format import agent_spec_candidates
+from kiro_crew.agent_spec_format import agent_spec_candidates, iter_agent_spec_files
 
 # The migration module owns the pre-migration leftover-tab spelling.
 from kiro_crew.channel_transcript_migration import _orphan_target_stem
@@ -3148,6 +3148,45 @@ def _service_wait_ping(
         state.push_slots_update()
 
 
+class ManagedToolPolicyUnreadable(Exception):
+    """An agent's spec exists but its ``managedToolPolicy`` cannot be read.
+
+    Distinct from "this agent has no policy": an operator may have written an
+    exclusion that is unreadable from here, so the two must not share one
+    answer on the wire. A caller that cannot tell them apart has to treat an
+    unreadable deny as no deny, which silently widens it.
+    """
+
+
+def _refuse_if_any_spec_is_unreadable(agents_dir: Path, agent_name: str) -> None:
+    """Raise when a spec in *agents_dir* cannot be read, so "no match" is honest.
+
+    :func:`spec_by_declared_name` resolves an agent by parsing every spec and
+    comparing its declared ``name``. Its reader folds each refusal into "not a
+    usable spec", which a scan for a name cannot tell apart from "a spec for
+    someone else" -- so an unparseable file leaves the scan reporting no match
+    when the policy it was looking for may be inside that very file.
+
+    A file's declared name cannot be recovered without reading it, and its
+    filename does not have to carry it, so there is no sound way to narrow this
+    to "specs that could be *agent_name*". The honest answer while any spec is
+    unreadable is that this agent's policy is unknown. Fixing or removing the
+    file clears it, and the refusal is audited by the caller.
+
+    Uses :func:`read_agent_spec_strict`, the reader that keeps the failure class,
+    for exactly the reason its docstring gives: this caller needs to know WHY.
+    """
+    for path in iter_agent_spec_files(agents_dir):
+        try:
+            read_agent_spec_strict(path, operation="session_tool_policy", source="dashboard")
+        except (OSError, ValueError) as exc:
+            raise ManagedToolPolicyUnreadable(
+                f"a spec in the agents directory could not be read "
+                f"({exc.__class__.__name__}), so the policy for {agent_name!r} is "
+                f"unknown: it may be the file that declares it"
+            ) from exc
+
+
 def _read_managed_tool_policy_sync(agents_dir: Path, agent_name: str) -> dict[str, Any] | None:
     """Read one agent's ``managedToolPolicy`` from disk. Blocking.
 
@@ -3169,11 +3208,15 @@ def _read_managed_tool_policy_sync(agents_dir: Path, agent_name: str) -> dict[st
     a user-writable directory, so it goes through the hardened reader,
     labelled ``session_tool_policy`` / ``dashboard``.
 
-    ``None`` means "no policy to report", and is deliberately distinct from an
-    empty dict. The caller answers ``{}`` for both, but only a dict is an agent
-    whose config was read and understood, which is what its SEL ``ok`` record
-    attests -- an unreadable or malformed file is not an agent with no policy.
-    Collapsing the two would start logging success for files this never parsed.
+    ``None`` means "this agent has no policy to report" -- no spec file, or a
+    spec that declares none. The caller answers ``{}`` for it, without a SEL
+    ``ok`` record when nothing was parsed.
+
+    Raises :class:`ManagedToolPolicyUnreadable` when a spec EXISTS but its
+    policy cannot be determined (unparseable, valid JSON that is not an object,
+    or a ``managedToolPolicy`` of the wrong shape). That is not "no policy": the
+    operator may have written an exclusion this cannot see, so the caller must
+    not answer it with the same empty body a policy-free agent gets.
 
     Propagates :class:`kiro_crew.agent_discovery.AmbiguousAgentSpecError` when
     two specs declare *agent_name*: that is not "no policy" either, and the
@@ -3189,6 +3232,16 @@ def _read_managed_tool_policy_sync(agents_dir: Path, agent_name: str) -> dict[st
             # ``kas_agents.load_agent_spec``).
             present = [p for p in agent_spec_candidates(agents_dir, agent_name) if p.is_file()]
             if not present:
+                # No spec matched by declared name and none by filename. That is
+                # "no policy" only if every spec in the directory was READABLE:
+                # the scan above resolves a name by parsing each file, and its
+                # reader folds a refusal into "no match", so an unparseable spec
+                # is indistinguishable from one declaring a different name. A
+                # package-installed agent is namespaced on disk
+                # (``<package>-<name>.json``) and has no bare filename
+                # candidate, so the scan is the ONLY thing that could have found
+                # its policy -- and a file this cannot read may be exactly it.
+                _refuse_if_any_spec_is_unreadable(agents_dir, agent_name)
                 return None
             # The hardened reader: the agents directory is user-writable, so
             # a symlink here is not followed to a sensitive target.
@@ -3199,15 +3252,27 @@ def _read_managed_tool_policy_sync(agents_dir: Path, agent_name: str) -> dict[st
         # A ``ValueError`` subclass, so it is named BEFORE the parse-failure arm
         # below or it would be swallowed as "no policy" instead of propagating.
         raise
-    except (OSError, ValueError):
-        return None
+    except (OSError, ValueError) as exc:
+        # The file is there and could not be read or parsed. Whatever exclusions
+        # it declares are unknown, so this is reported as unknown.
+        raise ManagedToolPolicyUnreadable(
+            f"agent spec for {agent_name!r} could not be read: {exc.__class__.__name__}"
+        ) from exc
     if not isinstance(config, dict):
         # Valid JSON that is not an object (a list, a scalar, null) parses
         # fine, but `.get` on it would raise. It is a malformed spec, so it
         # takes the same disposition as the unparseable case above.
-        return None
+        raise ManagedToolPolicyUnreadable(
+            f"agent spec for {agent_name!r} is valid JSON but not an object"
+        )
     policy = config.get("managedToolPolicy", {})
-    return policy if isinstance(policy, dict) else None
+    if isinstance(policy, dict):
+        return policy
+    # A policy of the wrong shape is a policy this cannot read, not an absent
+    # one: the operator wrote something here and its meaning is unknown.
+    raise ManagedToolPolicyUnreadable(
+        f"managedToolPolicy for {agent_name!r} is {type(policy).__name__}, not an object"
+    )
 
 
 async def api_session_tool_policy(request: web.Request) -> web.Response:
@@ -3292,8 +3357,8 @@ async def api_session_tool_policy(request: web.Request) -> web.Response:
         )
     except AmbiguousAgentSpecError as exc:
         # Two specs declare this agent's name. The policy is undefined, not
-        # empty, so the empty answer the caller fails open on is recorded as a
-        # denial naming both files rather than passed off as "no policy".
+        # empty, so it is answered with a status the caller cannot mistake for
+        # a policy-free agent, and recorded as a denial naming both files.
         _sel().log_api_access(
             caller=session_key,
             operation="session_tool_policy",
@@ -3302,10 +3367,38 @@ async def api_session_tool_policy(request: web.Request) -> web.Response:
             resources=f"agent={agent_name}",
             error=str(exc),
         )
-        return web.json_response({})
+        return web.json_response(
+            {
+                "error": f"The policy for agent {agent_name!r} could not be determined.",
+                "code": "policy_unreadable",
+                "reason": str(exc),
+            },
+            status=409,
+        )
+    except ManagedToolPolicyUnreadable as exc:
+        # The spec is present and its policy could not be determined. Answering
+        # {} here would be byte-identical to an agent that legitimately has no
+        # policy, and the caller would run a tool this cannot prove is allowed.
+        _sel().log_api_access(
+            caller=session_key,
+            operation="session_tool_policy",
+            outcome="denied",
+            source="dashboard",
+            resources=f"agent={agent_name}",
+            error=str(exc),
+        )
+        return web.json_response(
+            {
+                "error": f"The policy for agent {agent_name!r} could not be determined.",
+                "code": "policy_unreadable",
+                "reason": str(exc),
+            },
+            status=409,
+        )
     if policy is None:
-        # Missing, unreadable, malformed, or a non-dict policy: answer the same
-        # empty policy as before and, as before, do not log it as a success.
+        # This agent has no policy: no spec file, or a spec declaring none.
+        # A genuinely absent policy is an empty one, so the answer is unchanged
+        # -- and still not logged as a success, since nothing was parsed.
         return web.json_response({})
 
     _sel().log_api_access(
