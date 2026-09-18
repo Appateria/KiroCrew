@@ -1149,6 +1149,71 @@ async def _await_cron_fire_time_gate(
     return reason, False
 
 
+#: Env-var names a cron job's own ``env`` map may never deliver to the spawned
+#: session, stripped in :func:`cron_job_env_without_reserved`. Reserved names
+#: match case-insensitively while allowed keys keep their declared case.
+#:
+#: ``job.env`` comes from an app manifest's ``crons[].env`` block, which
+#: ``apps.manifest.CronEntry.from_dict`` copies verbatim -- keys are stringified,
+#: never screened -- so every name here is one whose VALUE decides how the run is
+#: governed rather than what it does:
+#:
+#: * ``KIROCREW_APPROVAL_MODE`` is re-injected by the caller when the job's own
+#:   VALIDATED ``approval_mode`` is "auto"; delivered through ``job.env`` instead,
+#:   it auto-approves an interactive cron's ``spawn_run`` subagents.
+#: * ``KIROCREW_SECURITY_POLICY`` and ``KIROCREW_ADMISSION_POLICY`` name the FILE
+#:   the governance and admission ceilings are read from.
+#:   ``platform.governance`` resolves that env path as a tier ABOVE the operator's
+#:   own ``security_policy.json`` and the two are mutually exclusive
+#:   (first-present-wins), so a job-supplied path replaces the operator's ceiling
+#:   for the scheduled agent and every MCP server it starts, rather than
+#:   tightening it.
+#: * ``KIROCREW_HOME`` picks the same ceiling one level up: ``config.paths`` reads
+#:   it to resolve the data home, and ``governance._policy_home_path`` resolves
+#:   ``security_policy.json`` under that home, so a job-supplied home points the
+#:   ceiling read at a directory the job controls. It reaches the child even
+#:   though the policy-path pair would not, because ``KIROCREW_HOME`` is absent
+#:   from ``sandbox._AGENT_DENIED_ENV_KEYS`` while the
+#:   ``KIROCREW_POLICY_*`` fetch family is in it.
+#: * ``KIROCREW_PROFILE`` picks WHICH ceiling is composed at all:
+#:   ``platform.resolve_profile`` reads it, and a job-supplied ``standalone``
+#:   drops the companion edition's overlay, so an operation the enterprise
+#:   ceiling denies resolves as permitted. It is forwarded to first-party app
+#:   backends on purpose (``apps/backend.py``), which is the gateway's own value
+#:   and untouched here.
+#:
+#: Stripped HERE, at the untrusted-input seam, and deliberately not in the agent
+#: spawn's own env scrub: the gateway's ``os.environ`` copy of each of these is
+#: the OPERATOR's value, and a child that inherits nothing at all resolves the
+#: standalone ungoverned ceiling, which is open where deny-by-default is open.
+#: Removing them from every child would therefore drop a real operator ceiling;
+#: removing them from ``job.env`` drops only what an app asked for.
+#:
+#: Reserved names match case-insensitively: ``CronEntry.from_dict`` keeps a
+#: manifest key's case verbatim, and a Windows child resolves ``kirocrew_home``
+#: and ``KIROCREW_HOME`` as one variable.
+_CRON_RESERVED_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "KIROCREW_APPROVAL_MODE",
+        "KIROCREW_SECURITY_POLICY",
+        "KIROCREW_ADMISSION_POLICY",
+        "KIROCREW_HOME",
+        "KIROCREW_PROFILE",
+    }
+)
+
+
+def cron_job_env_without_reserved(job_env: dict[str, str] | None) -> dict[str, str]:
+    """Return *job_env* minus :data:`_CRON_RESERVED_ENV_KEYS`.
+
+    A module-level function rather than a comprehension inside the caller's
+    closure so the seam has a name a test can drive: the property it carries is
+    about an untrusted map reaching a spawned session, and a closure is reachable
+    only by standing a whole gateway up.
+    """
+    return {k: v for k, v in (job_env or {}).items() if k.upper() not in _CRON_RESERVED_ENV_KEYS}
+
+
 async def _pre_create_cron_slot(dashboard_state: "DashboardState", job: CronJob) -> None:
     """Pre-create the job's first-run dashboard tab, best-effort.
 
@@ -5152,8 +5217,11 @@ class GatewayOrchestrator:
                 "auto". Otherwise an app manifest could set it directly in
                 ``job.env`` and have an interactive cron's spawn_run subagents
                 silently auto-approved -- an authorization bypass.
+
+                The two governance policy-path vars are reserved for the same
+                reason, and the strip set is ``_CRON_RESERVED_ENV_KEYS``.
                 """
-                env = {k: v for k, v in (job.env or {}).items() if k != "KIROCREW_APPROVAL_MODE"}
+                env = cron_job_env_without_reserved(job.env)
                 if job.approval_mode == "auto":
                     env["KIROCREW_APPROVAL_MODE"] = "auto"
                 return env or None
