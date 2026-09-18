@@ -32,7 +32,8 @@ import threading
 import time
 import uuid
 import webbrowser
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -545,6 +546,39 @@ def _delivery_result(
     if wake_message is not None:
         return result
     return result is MonitorDispatchResult.DISPATCHED
+
+
+@dataclass(frozen=True)
+class _DmDispatchAdapter:
+    """What ONE dispatcher-routed DM channel supplies to the shared fire path.
+
+    A channel whose nudge is delivered by synthesizing an inbound message and
+    handing it to that channel's real dispatcher differs from its siblings in
+    five places and nowhere else. Everything around those five -- the guard
+    ladder, the envelope, the turn timeout, when a loop is retired, and how a
+    result is spelled -- is the same reasoning for every such channel, so it
+    lives once in :meth:`GatewayOrchestrator._fire_dm_nudge` instead of being
+    re-derived per channel.
+
+    ``channel`` keys ``dashboard_state.channel_transports`` and names the
+    channel in logs. ``supports_monitor`` says whether the channel can carry a
+    structured monitor wake: a channel without one is only ever asked for a
+    plain nudge, so it never sees a ``wake_message``. ``authorize`` is the
+    fire-time allow-list re-check, which each channel spells against a
+    different object. ``resolve_conversation`` answers where the synthetic turn
+    lands. ``build_inbound`` mints that channel's own inbound type.
+
+    The three callables take the transport and dispatcher rather than closing
+    over them because a channel's transport is resolved per fire, not once at
+    construction: a gateway can start, stop and restart one channel while a
+    loop stays armed across all of it.
+    """
+
+    channel: str
+    supports_monitor: bool
+    authorize: Callable[[Any, Any, str], bool]
+    resolve_conversation: Callable[[Any, Any, str, str], Awaitable[str]]
+    build_inbound: Callable[[str, str, str], Any]
 
 
 # Budget for awaiting the in-flight run-marker write during shutdown. Bounded
@@ -6711,61 +6745,97 @@ class GatewayOrchestrator:
                 logger.warning("AutoNudge: failed to persist nudge turn for %s", key, exc_info=True)
         return _delivery_result(wake_message, MonitorDispatchResult.DISPATCHED)
 
-    async def _fire_discord_nudge(
-        self, loop: NudgeLoop, wake_message: str | None = None
+    async def _fire_dm_nudge(
+        self,
+        loop: NudgeLoop,
+        adapter: _DmDispatchAdapter,
+        wake_message: str | None = None,
     ) -> bool | MonitorDispatchResult:
-        """Drive one unattended nudge turn in a Discord DM session.
+        """Drive one unattended nudge turn in a dispatcher-routed DM session.
 
-        Synthesizes an ``InboundMessage`` and routes it through the Discord
-        dispatcher — the exact path a real DM takes — so busy/steer/queue
-        handling, rendering, chunking, and persistence behave like a user
-        turn. ``interpret_commands=False`` keeps the nudge from being parsed
-        as a ``!command``.
+        Shared by every channel that delivers a nudge the way a real DM arrives:
+        synthesize that channel's inbound type and hand it to the channel's own
+        dispatcher, so busy/steer/queue handling, rendering, chunking and
+        persistence behave like a user turn. ``interpret_commands=False`` keeps
+        the nudge text from being read as a command.
+
+        Four guards run before anything is delivered, and they are this caller's
+        responsibility rather than the transport's precisely because a synthetic
+        injection never passes through ``transport.receive``:
+
+        1. The channel's transport and dispatcher are running. A gateway can
+           have the channel disabled or still starting, which is a SKIP: the
+           loop is fine and the next cycle may find the transport up.
+        2. The binding key has the direct-message shape
+           ``<channel>:{agent}:direct:{principal}[:genN]``. Any other shape
+           cannot name a principal, so the loop can never fire and is retired.
+        3. The principal is still on the inbound allow-list. The create
+           endpoint checks it too, but an allow-list can SHRINK after a loop is
+           armed, so the check is repeated here at fire time.
+        4. The session generation still matches. A ``new``-style command mints a
+           fresh key; firing into the rotated one would run in a session with
+           none of the loop's context, and a stop issued from there could never
+           find this loop. Retire instead of firing into the wrong generation.
+
+        Then a busy session is a SKIP rather than a queue, so a cycle is not
+        counted while the human's own turn is running.
+
+        A retirement only happens for a plain nudge (``wake_message is None``).
+        A structured monitor wake reports ``UNAVAILABLE`` and leaves the
+        monitor's own lifecycle to decide, since the controller owns that
+        record. Every outcome returns through :func:`_delivery_result`, so a
+        caller asking for a plain nudge reads a bool and a caller carrying a
+        wake reads the typed result.
         """
         key = loop.slot_key
-        transports = getattr(self.dashboard_state, "channel_transports", None) or {}
-        transport = transports.get("discord")
-        dispatcher = transport.dispatcher if transport is not None else None
-        if transport is None or dispatcher is None:
-            logger.info("AutoNudge skip: discord transport not running (loop %s)", loop.id)
-            return _delivery_result(wake_message, MonitorDispatchResult.BUSY)
-        # Key shape: discord:{agent}:direct:{user_id}[:genN]
-        parts = key.split(":")
-        if len(parts) < 4 or parts[2] != "direct":
-            logger.warning("AutoNudge: unsupported discord key %s — removing loop %s", key, loop.id)
-            if self.autonudge_svc and wake_message is None:
-                await self.autonudge_svc.remove(loop.id)
-            return _delivery_result(wake_message, MonitorDispatchResult.UNAVAILABLE)
-        user_id = parts[3]
-        # Defense-in-depth: re-check the inbound allowlist at fire time (the
-        # create endpoint enforces it too, but the allowlist can shrink after
-        # a loop was created). Synthetic injection bypasses transport.receive,
-        # so authorization is this caller's responsibility — mirrors
-        # on_interaction's _authorized re-check. Uses the dispatcher's public
-        # injection surface; a missing method raises loudly instead of
-        # silently retiring the loop.
-        if not dispatcher.is_authorized(user_id):
-            logger.warning(
-                "AutoNudge: discord user %s not authorized — removing loop %s",
-                user_id,
+        channel = adapter.channel
+        if wake_message is not None and not adapter.supports_monitor:
+            # Fail closed BEFORE delivering. A channel with no structured
+            # dispatch cannot report whether the wake landed, so delivering it
+            # and then answering UNAVAILABLE would show the text to the reader
+            # while the controller treats the wake as undelivered and sends it
+            # again. Refusing first keeps the two in agreement.
+            logger.info(
+                "AutoNudge: %s carries no monitor dispatch, refusing wake for loop %s",
+                channel,
                 loop.id,
             )
+            return MonitorDispatchResult.UNAVAILABLE
+        transports = getattr(self.dashboard_state, "channel_transports", None) or {}
+        transport = transports.get(channel)
+        dispatcher = transport.dispatcher if transport is not None else None
+        if transport is None or dispatcher is None:
+            logger.info(
+                "AutoNudge skip: %s transport not running (loop %s)",
+                channel,
+                loop.id,
+            )
+            return _delivery_result(wake_message, MonitorDispatchResult.BUSY)
+
+        async def _retire(reason: str, *args: Any) -> bool | MonitorDispatchResult:
+            logger.warning("AutoNudge: " + reason, *args)
             if self.autonudge_svc and wake_message is None:
                 await self.autonudge_svc.remove(loop.id)
             return _delivery_result(wake_message, MonitorDispatchResult.UNAVAILABLE)
-        # Generation guard: the dispatcher derives the CURRENT key for this
-        # user (dm_scope + `!new` generation). If it no longer matches the
-        # loop's stored key, the monitored conversation is gone — a synthetic
-        # turn would run in a fresh session with none of the loop's context,
-        # and autonudge_stop from that new session could never find this
-        # loop. Retire it instead of firing into the wrong generation.
+
+        parts = key.split(":")
+        if len(parts) < 4 or parts[2] != "direct":
+            return await _retire("unsupported %s key %s, removing loop %s", channel, key, loop.id)
+        principal = parts[3]
+        if not adapter.authorize(transport, dispatcher, principal):
+            return await _retire("%s user not authorized, removing loop %s", channel, loop.id)
         try:
-            current_key = dispatcher.current_session_key(user_id)
+            current_key = dispatcher.current_session_key(principal)
         except Exception:
+            # A dispatcher that cannot answer is not evidence of rotation, so
+            # treat the key as current and let the busy check and the dispatch
+            # itself decide. Failing closed here would retire a healthy loop on
+            # a transient lookup error.
             current_key = key
         if current_key != key:
             logger.info(
-                "AutoNudge: discord session rotated (%s -> %s) — removing loop %s",
+                "AutoNudge: %s session rotated (%s -> %s), removing loop %s",
+                channel,
                 key,
                 current_key,
                 loop.id,
@@ -6775,8 +6845,14 @@ class GatewayOrchestrator:
             return _delivery_result(wake_message, MonitorDispatchResult.UNAVAILABLE)
         sessions = getattr(dispatcher, "sessions", None)
         if sessions is not None and sessions.is_busy(key):
-            logger.info("AutoNudge skip: discord session %s busy (loop %s)", key, loop.id)
+            logger.info(
+                "AutoNudge skip: %s session %s busy (loop %s)",
+                channel,
+                key,
+                loop.id,
+            )
             return _delivery_result(wake_message, MonitorDispatchResult.BUSY)
+
         if wake_message is None:
             msg_body = await compose_nudge_body(
                 loop.message, loop.stop_sentinel_path, loop.slot_key
@@ -6784,33 +6860,33 @@ class GatewayOrchestrator:
             tagged = f"[auto-nudge cycle {loop.cycle_count + 1}]\n{msg_body}"
         else:
             tagged = wake_message
+
         try:
-            conversation_id = await transport.resolve_conversation(user_id)
+            conversation_id = await adapter.resolve_conversation(
+                transport, sessions, key, principal
+            )
         except Exception:
             logger.exception(
-                "AutoNudge: discord conversation lookup failed for %s (loop %s)",
+                "AutoNudge: %s conversation lookup failed for %s (loop %s)",
+                channel,
                 key,
                 loop.id,
             )
             return _delivery_result(wake_message, MonitorDispatchResult.BUSY)
+
         completion_hook: MonitorCompletionHook | None = None
         try:
-            synthetic = InboundMessage(
-                channel_type="discord",
-                user_id=user_id,
-                conversation_id=conversation_id,
-                text=tagged,
-            )
+            synthetic = adapter.build_inbound(principal, conversation_id, tagged)
             dispatch_kwargs: dict[str, Any] = {"interpret_commands": False}
-            completion_hook = self._monitor_completion_hook(loop)
-            if wake_message is not None and completion_hook is None:
-                return MonitorDispatchResult.UNAVAILABLE
-            if completion_hook is not None:
-                dispatch_kwargs["monitor_completion"] = completion_hook
-                dispatch_kwargs["monitor_session_key"] = key
-            dispatch = dispatcher.handle_message(synthetic, **dispatch_kwargs)
+            if adapter.supports_monitor:
+                completion_hook = self._monitor_completion_hook(loop)
+                if wake_message is not None and completion_hook is None:
+                    return MonitorDispatchResult.UNAVAILABLE
+                if completion_hook is not None:
+                    dispatch_kwargs["monitor_completion"] = completion_hook
+                    dispatch_kwargs["monitor_session_key"] = key
             dispatch_result = await asyncio.wait_for(
-                dispatch,
+                dispatcher.handle_message(synthetic, **dispatch_kwargs),
                 timeout=_NUDGE_TURN_TIMEOUT,
             )
             if wake_message is not None:
@@ -6823,108 +6899,111 @@ class GatewayOrchestrator:
                 return dispatch_result is MonitorDispatchResult.DISPATCHED
             return True
         except Exception:
-            logger.exception("AutoNudge: discord nudge failed for %s (loop %s)", key, loop.id)
+            logger.exception(
+                "AutoNudge: %s nudge failed for %s (loop %s)",
+                channel,
+                key,
+                loop.id,
+            )
             if wake_message is None:
                 return False
             if completion_hook is not None and completion_hook.accepted:
                 return MonitorDispatchResult.DISPATCHED
             return MonitorDispatchResult.UNAVAILABLE
 
+    async def _fire_discord_nudge(
+        self, loop: NudgeLoop, wake_message: str | None = None
+    ) -> bool | MonitorDispatchResult:
+        """Drive one unattended nudge turn in a Discord DM session.
+
+        The guard ladder and the delivery live in :meth:`_fire_dm_nudge`; this
+        supplies only what is specific to Discord. Authorization is asked of the
+        DISPATCHER here, which is the object holding Discord's inbound
+        allow-list, and it mirrors the re-check ``on_interaction`` performs.
+        """
+        return await self._fire_dm_nudge(
+            loop,
+            _DmDispatchAdapter(
+                channel="discord",
+                supports_monitor=True,
+                authorize=lambda _transport, dispatcher, principal: bool(
+                    dispatcher.is_authorized(principal)
+                ),
+                resolve_conversation=(
+                    lambda transport, _sessions, _key, principal: transport.resolve_conversation(
+                        principal
+                    )
+                ),
+                build_inbound=lambda principal, conversation_id, text: InboundMessage(
+                    channel_type="discord",
+                    user_id=principal,
+                    conversation_id=conversation_id,
+                    text=text,
+                ),
+            ),
+            wake_message,
+        )
+
     async def _fire_webex_nudge(self, loop: NudgeLoop) -> bool:
         """Drive one unattended nudge turn in a Webex DM session.
 
-        Sibling of :meth:`_fire_discord_nudge`, with the same four guards and for
-        the same reasons: a synthetic injection bypasses ``transport.receive``, so
-        authorization, the generation check and the busy check are this caller's
-        responsibility rather than the transport's.
+        The guard ladder and the delivery live in :meth:`_fire_dm_nudge`; this
+        supplies only what is specific to Webex. Two of those three pieces carry
+        a reason worth keeping beside them.
 
-        The nudge is routed through the dispatcher — the exact path a real DM
-        takes — so queue/steer handling, rendering, byte-safe chunking and
-        persistence all behave like a user turn. ``interpret_commands=False``
-        keeps the nudge text from being parsed as a ``/command``.
+        Authorization is asked of the TRANSPORT, not the dispatcher, because the
+        Webex allow-list is held there.
+
+        The room is read from the persisted origin link when there is one.
+        Webex's ``resolve_conversation`` answers with the EMAIL, which its send
+        path maps onto ``toPersonEmail``, so it delivers correctly but is a
+        SECOND spelling of the same room. An origin bind is matched by VALUE
+        (see ``_origin_mirror_link``), so a nudge that writes the link in that
+        other spelling makes a later ``/unlink`` miss the binding. The persisted
+        link therefore wins, and the email is the first-turn fallback, where no
+        binding exists to disagree with yet.
+
+        Webex carries no structured-monitor dispatch, so ``supports_monitor`` is
+        False and this path is only ever asked for a plain nudge.
         """
-        key = loop.slot_key
-        transports = getattr(self.dashboard_state, "channel_transports", None) or {}
-        transport = transports.get("webex")
-        dispatcher = transport.dispatcher if transport is not None else None
-        if transport is None or dispatcher is None:
-            logger.info("AutoNudge skip: webex transport not running (loop %s)", loop.id)
-            return False
-        # Key shape: webex:{agent}:direct:{email}[:genN]
-        parts = key.split(":")
-        if len(parts) < 4 or parts[2] != "direct":
-            logger.warning("AutoNudge: unsupported webex key %s — removing loop %s", key, loop.id)
-            if self.autonudge_svc:
-                await self.autonudge_svc.remove(loop.id)
-            return False
-        email = parts[3]
-        # Defence in depth: the create endpoint checks the allow-list too, but it
-        # can shrink after a loop was created, and a synthetic turn never passes
-        # through the transport's own gate.
-        if not transport.is_authorized(email):
-            logger.warning("AutoNudge: webex user not authorized — removing loop %s", loop.id)
-            if self.autonudge_svc:
-                await self.autonudge_svc.remove(loop.id)
-            return False
-        # Generation guard: a `/new` mints a new key, and firing into the rotated
-        # one would run in a fresh session with none of the loop's context — and
-        # an `autonudge_stop` from that session could never find this loop.
-        try:
-            current_key = dispatcher.current_session_key(email)
-        except Exception:
-            current_key = key
-        if current_key != key:
-            logger.info("AutoNudge: webex session rotated — removing loop %s", loop.id)
-            if self.autonudge_svc:
-                await self.autonudge_svc.remove(loop.id)
-            return False
-        sessions = getattr(dispatcher, "sessions", None)
-        if sessions is not None and sessions.is_busy(key):
-            logger.info("AutoNudge skip: webex session busy (loop %s)", loop.id)
-            return False
-        # The SHARED fire-path composer, same as the slack/discord/dashboard
-        # adapters: it applies the {{STOP_FILE}} substitution and prefixes the
-        # session's durable work-ledger snapshot, so a Webex loop starts each cycle
-        # from that state rather than from transcript memory. Calling the bare
-        # template substitution instead would silently opt this channel out of the
-        # ledger — the one feature whose whole point is surviving context loss.
-        msg_body = await compose_nudge_body(loop.message, loop.stop_sentinel_path, loop.slot_key)
-        tagged = f"[auto-nudge cycle {loop.cycle_count + 1}]\n{msg_body}"
-        # Imported HERE, not at module scope: this file is on the gateway boot
-        # path, and it deliberately keeps every channel client behind
-        # TYPE_CHECKING so enabling one channel does not cost every launch the
-        # import of all of them. Reached only when a Webex loop actually fires.
-        from kiro_crew.webex.client import WebexInbound
-        from kiro_crew.webex.transport import ROOM_DIRECT
 
-        try:
-            # The room this conversation is actually being read in, so the synthetic
-            # turn rebinds the SAME origin location a real message would. Webex's
-            # ``resolve_conversation`` answers with the EMAIL — its send path maps an
-            # email-shaped id onto ``toPersonEmail`` — which delivers correctly but is
-            # a SECOND spelling of "this room", and the origin bind is matched by
-            # value (see ``_origin_mirror_link``): a nudge-written link in that
-            # spelling makes a later ``/unlink`` miss the binding. So the persisted
-            # link wins when there is one, and the email is only the first-turn
-            # fallback, where no binding exists to disagree with yet.
+        async def _resolve(transport: Any, sessions: Any, key: str, principal: str) -> str:
             existing = sessions.get_origin_link(key) if sessions is not None else None
-            room_id = getattr(existing, "channel_id", "") or await transport.resolve_conversation(
-                email
-            )
-            synthetic = WebexInbound(
-                person_email=email,
-                room_id=room_id,
-                text=tagged,
+            room = getattr(existing, "channel_id", "")
+            if room:
+                return str(room)
+            return str(await transport.resolve_conversation(principal))
+
+        def _build(principal: str, conversation_id: str, text: str) -> Any:
+            # Imported HERE, not at module scope: this file is on the gateway
+            # boot path, and it deliberately keeps every channel client behind
+            # TYPE_CHECKING so enabling one channel does not cost every launch
+            # the import of all of them. Reached only when a Webex loop fires.
+            from kiro_crew.webex.client import WebexInbound
+            from kiro_crew.webex.transport import ROOM_DIRECT
+
+            return WebexInbound(
+                person_email=principal,
+                room_id=conversation_id,
+                text=text,
                 room_type=ROOM_DIRECT,
             )
-            await asyncio.wait_for(
-                dispatcher.handle_message(synthetic, interpret_commands=False),
-                timeout=_NUDGE_TURN_TIMEOUT,
-            )
-            return True
-        except Exception:
-            logger.exception("AutoNudge: webex nudge failed (loop %s)", loop.id)
-            return False
+
+        result = await self._fire_dm_nudge(
+            loop,
+            _DmDispatchAdapter(
+                channel="webex",
+                supports_monitor=False,
+                authorize=lambda transport, _dispatcher, principal: bool(
+                    transport.is_authorized(principal)
+                ),
+                resolve_conversation=_resolve,
+                build_inbound=_build,
+            ),
+        )
+        # A plain nudge always normalizes to a bool through _delivery_result.
+        assert isinstance(result, bool)
+        return result
 
     async def _stop_message_loop_if_structural_terminal(
         self,
