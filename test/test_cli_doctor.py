@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -3222,3 +3222,117 @@ class TestCronHealth:
         self._run(monkeypatch, tmp_path)
 
         assert path.read_bytes() == before, "doctor must not mutate crons.json"
+
+
+class TestProjectSectionAndAuthRow:
+    """`kirocrew doctor` Project labels + the local-bind auth row.
+
+    The Project row resolves the Kiro Crew SOURCE CHECKOUT (``cli.py``
+    ``_PROJECT_MARKERS``), never the user's own workspace, so its labels must
+    say so. The Configuration auth row must not advertise a loopback
+    exemption: the dashboard middleware requires a valid token on every
+    request (``token_auth.py``), and local CLI/MCP callers authenticate with
+    the local secret instead.
+    """
+
+    def _run_doctor(self, tmp_path: Path, monkeypatch, capsys, *, project_dir: str) -> str:
+        """Drive the full ``_doctor()`` hermetically and return its output.
+
+        Mirrors the mock harness of ``test_cli.py``'s doctor tests: config
+        pinned to a pristine default, binaries "found", probes stubbed, so
+        the run is deterministic and spawns nothing.
+        """
+        from kiro_crew.config.loader import KiroCrewConfig
+
+        def _pristine() -> KiroCrewConfig:
+            cfg = KiroCrewConfig()
+            cfg.stt.enabled = False
+            return cfg
+
+        monkeypatch.setattr(KiroCrewConfig, "load", classmethod(lambda cls: _pristine()))
+        monkeypatch.setattr(KiroCrewConfig, "load_credentials", lambda self: {})
+
+        async def _probe(server):
+            server.status = "ok"
+            server.tools = []
+            return server
+
+        mock_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
+        with (
+            patch(
+                "kiro_crew.cli_doctor.shutil.which",
+                side_effect=lambda b, **_kw: f"/usr/local/bin/{b}",
+            ),
+            patch("kiro_crew.cli_doctor.KIRO_AGENTS_DIR", tmp_path),
+            patch("kiro_crew.cli_doctor.subprocess.run", return_value=mock_run),
+            patch("urllib.request.urlopen"),
+            patch("kiro_crew.cli_doctor.is_local_only", return_value=True),
+            patch("kiro_crew.cli_doctor.config_dir", return_value=tmp_path),
+            patch("kiro_crew.cli_doctor.probe_server", side_effect=_probe),
+            patch.dict(
+                "os.environ",
+                {
+                    "KIROCREW_PROJECT_DIR": project_dir,
+                    "SLACK_APP_TOKEN": "",
+                    "SLACK_BOT_TOKEN": "",
+                },
+                clear=False,
+            ),
+        ):
+            with pytest.raises(SystemExit):
+                cli_doctor._doctor()
+        return capsys.readouterr().out
+
+    def test_set_project_dir_is_labelled_source_checkout(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        # Carry both _PROJECT_MARKERS so the directory measurably IS a
+        # Kiro Crew source checkout.
+        (tmp_path / "skills").mkdir()
+        (tmp_path / "src" / "kiro_crew").mkdir(parents=True)
+        out = self._run_doctor(tmp_path, monkeypatch, capsys, project_dir=str(tmp_path))
+        assert f"source dir:  ✅ {tmp_path} (Kiro Crew source checkout)" in out
+        assert "project dir:" not in out
+        # tmp_path holds no .git — the warning names the checkout, so the
+        # adjacent row is not read as a finding about the user's workspace.
+        assert "git repo:    ⚠️  source checkout is not a git repo" in out
+
+    def test_partially_marked_dir_is_not_called_a_checkout(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        # A single marker must not qualify as a Kiro Crew source checkout.
+        (tmp_path / "skills").mkdir()
+        out = self._run_doctor(tmp_path, monkeypatch, capsys, project_dir=str(tmp_path))
+        assert f"source dir:  ✅ {tmp_path}" in out
+        assert "(Kiro Crew source checkout)" not in out
+        assert "git repo:    ⚠️  not a git repo" in out
+        assert "source checkout is not a git repo" not in out
+
+    def test_not_set_hint_names_checkout_and_wheel_installs(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        out = self._run_doctor(tmp_path, monkeypatch, capsys, project_dir="")
+        assert "source dir:  ⚠️  not set" in out
+        assert "not needed for wheel installs" in out
+        assert "run kirocrew setup from project root" not in out
+
+    def test_auth_row_never_advertises_loopback_exemption(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        # is_local_only is patched True, so this exercises the local-bind
+        # branch; its auth row must never advertise a loopback exemption.
+        out = self._run_doctor(tmp_path, monkeypatch, capsys, project_dir="")
+        assert "no token required" not in out
+        assert "loopback trusted" not in out
+        assert "auth:        token required — loopback is not exempt (CLI/MCP use the local secret)" in out
+
+    def test_auth_row_claim_is_grounded_in_the_middleware(self) -> None:
+        # The row's claim is prose; this pins it to production code so a
+        # reinstated loopback exemption for ordinary API routes reds a test
+        # instead of drifting the way the old row did. /api/status is the
+        # canonical gated route: it must never join the bypass sets.
+        from kiro_crew.dashboard import token_auth
+
+        assert "/api/status" not in token_auth._BYPASS_EXACT
+        assert "/api/status" not in token_auth._BYPASS_EXACT_METHODS
+        assert not any("/api/status".startswith(p) for p in token_auth._BYPASS_PREFIXES)

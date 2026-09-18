@@ -1758,7 +1758,7 @@ the destination's ordinary security checks and to the effective
 - First use: validates `exp` (5-min window), binds IP, marks consumed, sets `mc_token_{port}` cookie with `max_age` from `session_exp`
 - Subsequent requests: validates `session_exp` via cookie
 - `parse_duration()` caps at 20 hours max (MAX_SESSION_TTL_SECS = 72000)
-- Loopback access trusted only in local-only mode (SSH tunnel); on all-interfaces mode, all requests require a token
+- Loopback is not exempt: gated requests require a token in both bind modes; internal CLI/MCP callers authenticate via loopback + the `X-Internal-Secret` local secret
 - `token_auth_middleware(local_only)` — single boolean controls all auth behavior
 - **Secure cookie flag via `origin.is_https_request()`**: the `mc_token_<port>` cookie (and the refresh cookie) set `Secure` only when the request is HTTPS — `is_https_request(request)` returns True for a direct HTTPS request, or when `X-Forwarded-Proto: https` is present **and the immediate peer is loopback** (a TLS-terminating tunnel/proxy forwarding into the loopback-bound gateway). Plain-HTTP localhost must NOT set `Secure` or the browser refuses to send the cookie back
 

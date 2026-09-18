@@ -3949,21 +3949,36 @@ def _doctor(platform_boot_error: "Exception | None" = None, bundle: bool = False
             if saved and Path(saved).is_dir():
                 proj = saved
             else:
-                print(f"  project dir: ❌ stale — points to deleted {saved}")
+                print(f"  source dir:  ❌ stale — points to deleted {saved}")
                 print(f"               Fix: rm {config_dir() / 'project_dir'}")
                 issues.append("stale project_dir")
                 stale_project = True
     if proj and Path(proj).is_dir():
-        print(f"  project dir: ✅ {proj}")
+        # Only a directory carrying cli.py's ``_PROJECT_MARKERS`` is a Kiro
+        # Crew source checkout — claim it only when measured, so an explicit
+        # ``KIROCREW_PROJECT_DIR`` naming an unrelated repository is not
+        # mislabelled as the checkout.
+        from kiro_crew.cli import _PROJECT_MARKERS  # deferred: cli imports this module
+
+        is_checkout = all((Path(proj) / m).is_dir() for m in _PROJECT_MARKERS)
+        if is_checkout:
+            print(f"  source dir:  ✅ {proj} (Kiro Crew source checkout)")
+        else:
+            print(f"  source dir:  ✅ {proj}")
         # A git worktree or submodule stores ``.git`` as a FILE holding a
         # ``gitdir:`` pointer, not a directory, so accept both forms.
         git_marker = Path(proj) / ".git"
         if git_marker.exists():
             print("  git repo:    ✅")
+        elif is_checkout:
+            print("  git repo:    ⚠️  source checkout is not a git repo")
         else:
             print("  git repo:    ⚠️  not a git repo")
     elif not stale_project:
-        print("  project dir: ⚠️  not set (run kirocrew setup from project root)")
+        print(
+            "  source dir:  ⚠️  not set (set from a Kiro Crew checkout by"
+            " kirocrew setup; not needed for wheel installs)"
+        )
 
     cfg = KiroCrewConfig.load()
 
@@ -4027,7 +4042,10 @@ def _doctor(platform_boot_error: "Exception | None" = None, bundle: bool = False
     _local = is_local_only(_host, _has_slack)
     if _local:
         print("  bind:        127.0.0.1 (local-only, SSH tunnel for remote)")
-        print("  auth:        loopback trusted (no token required)")
+        print(
+            "  auth:        token required — loopback is not exempt"
+            " (CLI/MCP use the local secret)"
+        )
     else:
         print("  bind:        0.0.0.0 (all interfaces)")
         print("  auth:        ✅ token auth required (via !dashboard)")

@@ -978,7 +978,7 @@ Each step checks if the tool is already installed and skips if present.
 ## Doctor Checks
 
 1. `kiro-cli` binary in PATH
-2. Project directory and git repo
+2. Source directory (Kiro Crew checkout) and git repo
 3. Agent config installed
 4. Config values (provider, model, approval mode, dashboard port)
 5. **MCP tools**: `@kirocrew-cron` and `@kirocrew-core` in `tools`, `allowedTools`, and `mcpServers` — auto-fixes missing entries
