@@ -6918,6 +6918,20 @@ def kiro_internal_sandbox_enabled() -> bool:
         return False
 
 
+def kiro_internal_sandbox_switch() -> tuple[str, str]:
+    """The settings file and key that toggle kiro-cli's internal sandbox.
+
+    Returns ``(path, key)`` so a diagnostic can name the exact switch an
+    operator has to edit — ``kiro_internal_sandbox_enabled`` answers *whether*
+    delegation is on but not *where* it was decided, and a caller that spelled
+    either half itself would drift silently the day kiro-cli renames one.
+
+    Reads the module globals at call time, so a test that repoints
+    :data:`_KIRO_INTERNAL_SETTINGS_PATH` gets its own path back here too.
+    """
+    return _KIRO_INTERNAL_SETTINGS_PATH, _KIRO_INTERNAL_SANDBOX_KEY
+
+
 def delegated_workspace_exposes_agents_dir(work_dir: "str | os.PathLike[str] | None") -> str | None:
     """Reason a kiro-cli spawn must be refused because its workspace would leave
     the sealed kiro agents tree writable, or ``None`` when it may proceed.
@@ -7113,12 +7127,29 @@ def _delegate_to_kiro_internal_sandbox(
     # seatbelt and must not burn the warning for the first real delegation).
     if not _kiro_delegation_warned:
         _kiro_delegation_warned = True
-        logger.warning(
-            "SECURITY: delegating this %s kiro-cli spawn to kiro-cli's internal "
-            "sandbox and skipping Kiro Crew's OS wrapper. Env scrubbing still "
-            "applies.",
-            "Windows" if sys.platform == "win32" else "macOS",
-        )
+        if sys.platform == "win32":
+            logger.warning(
+                "SECURITY: delegating this Windows kiro-cli spawn to kiro-cli's "
+                "internal sandbox and skipping Kiro Crew's OS wrapper. Env scrubbing "
+                "still applies."
+            )
+        else:
+            # macOS delegation is decided by a settings file, so name it: the
+            # operator who has to change this cannot find it from "delegating"
+            # alone, and the symptom they arrive with is a denied read of a
+            # path OUTSIDE the workspace, which looks like a macOS privacy
+            # (TCC) problem and is not one.
+            logger.warning(
+                "SECURITY: delegating this macOS kiro-cli spawn to kiro-cli's "
+                "internal sandbox and skipping Kiro Crew's OS wrapper (%s sets "
+                '"%s": true). Env scrubbing still applies. kiro-cli owns file '
+                "access for these spawns, so a path its own profile does not allow "
+                'fails with "Operation not permitted" regardless of what macOS '
+                "privacy settings grant; set that key to false to hand isolation "
+                "back to Kiro Crew's profile.",
+                _KIRO_INTERNAL_SETTINGS_PATH,
+                _KIRO_INTERNAL_SANDBOX_KEY,
+            )
     if sys.platform == "win32":
         return list(argv), None
     unset_args = _sandbox_env_unset_args(sandbox_level, strip_python_env, forward_ssh_auth_sock)
