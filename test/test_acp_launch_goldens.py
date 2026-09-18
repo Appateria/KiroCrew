@@ -22,6 +22,7 @@ shows a reviewer which harness moved. The capture both share is
 
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 from pathlib import Path
@@ -184,6 +185,56 @@ def test_the_fixed_parent_never_carries_a_variable_spawn_sets() -> None:
     }
     overlap = contributed & set(capture_mod._PASSTHROUGH_ENV_KEYS)
     assert not overlap, f"the pass-through list can mask a contributed key: {overlap}"
+
+
+def test_a_derived_stub_accepts_exactly_what_the_real_collaborator_accepts() -> None:
+    """A stub's accepted arguments must track its target's, in BOTH directions.
+
+    A stub narrower than the thing it stubs rejects a call the spawn path really makes,
+    which fails every case here for a reason that is about this file rather than about
+    any harness. A stub wider than it -- ``**kwargs`` -- accepts a keyword the target
+    does not have, so an argument could reach the real collaborator only in production
+    and never be measured here. Both are pinned, so neither shape can pass.
+    """
+
+    def target(env, *, flavour: bool = False):
+        raise AssertionError("the capture must never run the real collaborator")
+
+    stub = capture_mod._stub_for(target, lambda call: call["env"])
+
+    assert stub({"A": "1"}, flavour=True) == {"A": "1"}
+    with pytest.raises(TypeError):
+        stub({"A": "1"}, nonesuch=True)
+
+
+def test_every_passthrough_stub_answers_with_an_argument_its_target_has() -> None:
+    """Each entry must name a parameter the live collaborator really declares.
+
+    The derivation makes a stub follow its target's signature, which leaves one way to
+    get the pairing wrong: answering with a name the target does not have. That stub
+    accepts the call and then cannot answer it, so it is checked here against the live
+    object rather than against a spelling in this file.
+    """
+    entries = {**capture_mod._PASSTHROUGH_STUBS, **capture_mod._ASYNC_PASSTHROUGH_STUBS}
+    assert entries, "the registry is empty, so this test checks nothing"
+
+    for name, answer in sorted(entries.items()):
+        real = getattr(client_mod, name)
+        call = {}
+        for param in inspect.signature(real).parameters.values():
+            if param.default is not inspect.Parameter.empty:
+                continue
+            if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+                continue
+            # argv is answered by handing the list back, so it has to be a list; every
+            # other required argument is only carried, and its value is never read.
+            call[param.name] = ["/opt/bin/x"] if param.name == "argv" else {"A": "1"}
+        try:
+            capture_mod._stub_for(real, answer)(**call)
+        except KeyError as exc:
+            raise AssertionError(
+                f"{name} is answered with {exc}, which it does not declare"
+            ) from exc
 
 
 # Referenced so the ids above are not the only use of the vocabulary this file
