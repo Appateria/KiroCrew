@@ -75,6 +75,7 @@ from kiro_crew.platform_compat import (
     IS_WINDOWS,
     first_linked_ancestor,
     is_link_or_junction,
+    pin_directory,
 )
 from kiro_crew.sandbox import (
     SandboxUnavailableError,
@@ -436,9 +437,30 @@ def _read_theme_bytes_nolink(slug: str, target: Path) -> bytes | None:
 
 
 def _path_is_at_or_under(path: Path, ancestor: Path) -> bool:
-    """True when *path* IS *ancestor* or lies underneath it (resolved)."""
+    """True when *path* IS *ancestor* or lies underneath it (resolved).
+
+    Lexical comparison is the fast path. On a miss, fall back to filesystem
+    identity: ``Path.resolve()`` preserves the caller's spelling while
+    ``PosixPath`` comparison is case-sensitive, so on a case-insensitive
+    filesystem (default macOS APFS) ``themes/LCARS/sub`` would lexically miss
+    ``themes/lcars`` even though they are the same directory on disk.
+    ``samestat`` compares inode identity, immune to spelling. A nonexistent
+    ancestor keeps the lexical answer (every ``stat`` raises → False).
+    """
     resolved, root = path.resolve(), ancestor.resolve()
-    return resolved == root or root in resolved.parents
+    if resolved == root or root in resolved.parents:
+        return True
+    try:
+        root_stat = root.stat()
+    except OSError:
+        return False
+    for candidate in (resolved, *resolved.parents):
+        try:
+            if os.path.samestat(candidate.stat(), root_stat):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _installed_theme_identity(slug: str) -> str | None:
@@ -486,6 +508,19 @@ def _installed_theme_identity(slug: str) -> str | None:
     return _theme_identity_source(data) or None
 
 
+def _tree_contains_directory(root: Path, expected_stat: os.stat_result) -> bool:
+    """Return whether *root* contains a directory matching *expected_stat*."""
+    for dirpath, dirnames, _filenames in os.walk(root):
+        base = Path(dirpath)
+        for candidate in (base, *(base / name for name in dirnames)):
+            try:
+                if os.path.samestat(candidate.stat(), expected_stat):
+                    return True
+            except OSError:
+                continue
+    return False
+
+
 def _do_install(stype: Any, source: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, int]:
     """Blocking theme-install worker — fetch → staged copy → validate the
     snapshot → promote. Runs OFF the
@@ -497,6 +532,8 @@ def _do_install(stype: Any, source: dict[str, Any]) -> tuple[dict[str, Any] | No
     dict and ``error`` is ``None``; on failure ``error`` is the message and
     ``status`` the HTTP code. Manages its own temp dir lifecycle.
     """
+    source_fd = -1
+    source_stat: os.stat_result | None = None
     tmp_root = Path(tempfile.mkdtemp(prefix="theme-install-"))
     try:
         if stype == "local":
@@ -526,6 +563,15 @@ def _do_install(stype: Any, source: dict[str, Any]) -> tuple[dict[str, Any] | No
         src_resolved = src.resolve()
         if src_resolved == themes_root or src_resolved in themes_root.parents:
             return None, "source directory must not contain the themes directory", 400
+        if stype == "local":
+            try:
+                source_fd = pin_directory(src)
+                source_stat = os.fstat(source_fd)
+            except OSError:
+                return None, "source directory is not accessible", 400
+            # The held handle blocks the rename the race needs on Windows; on
+            # POSIX its fstat identity stays authoritative regardless of
+            # pathname games.
         token = uuid.uuid4().hex[:12]
         stage = _themes_dir() / f".install-staging-{token}"
         try:
@@ -549,17 +595,33 @@ def _do_install(stype: Any, source: dict[str, Any]) -> tuple[dict[str, Any] | No
         slug = summary["slug"]
         identity = summary["identity"]
 
-        def _swap_onto(target_slug: str) -> None:
+        def _swap_onto(target_slug: str) -> bool:
             """Move the staged snapshot onto ``themes/<target_slug>/``.
 
             The caller MUST hold ``_theme_install_lock(target_slug)`` — this is
             the mutation the lock exists to serialize.
+
+            Returns ``True`` on success. Returns ``False`` when the pinned
+            source directory is found INSIDE the displaced tree: promotion
+            displaces the destination and deletes the displaced tree, so a
+            source that moved under the destination while the install ran
+            would be destroyed by that delete. On ``False`` the destination is
+            restored and the staging snapshot is removed; the caller refuses
+            the install.
             """
             dest = _installed_theme_dir(target_slug)
             old = dest.with_name(f".{target_slug}.old-{token}")
             try:
                 if dest.exists():
                     dest.replace(old)
+                if (
+                    old.exists()
+                    and source_stat is not None
+                    and _tree_contains_directory(old, source_stat)
+                ):
+                    old.rename(dest)
+                    shutil.rmtree(stage, ignore_errors=True)
+                    return False
                 stage.replace(dest)
             except OSError:
                 if not dest.exists() and old.exists():
@@ -567,6 +629,11 @@ def _do_install(stype: Any, source: dict[str, Any]) -> tuple[dict[str, Any] | No
                 shutil.rmtree(stage, ignore_errors=True)
                 raise
             shutil.rmtree(old, ignore_errors=True)
+            return True
+
+        _source_displaced = (
+            "source directory moved into the install destination during the install"
+        )
 
         # ── Legacy-pack continuity ──
         # An installed pack whose name filters to nothing sits at the CONSTANT
@@ -608,7 +675,8 @@ def _do_install(stype: Any, source: dict[str, Any]) -> tuple[dict[str, Any] | No
                     # deleted along with any sibling content. Fork instead.
                     and not _path_is_at_or_under(src, legacy_dest)
                 ):
-                    _swap_onto(_THEME_LEGACY_SLUG)
+                    if not _swap_onto(_THEME_LEGACY_SLUG):
+                        return None, _source_displaced, 400
                     slug = _THEME_LEGACY_SLUG
                     promoted = True
 
@@ -621,6 +689,22 @@ def _do_install(stype: Any, source: dict[str, Any]) -> tuple[dict[str, Any] | No
             if src.resolve() == dest.resolve():
                 shutil.rmtree(stage, ignore_errors=True)
                 return None, "source is already the installed theme directory", 400
+            # Promotion displaces dest to a `.old` dir and rmtree()s it. When
+            # dest is an ANCESTOR of the source, that displaced tree carries
+            # the source (and any unrelated siblings) with it, so the rmtree
+            # silently destroys them while still returning 200. There is no
+            # second slug to fall back to here, so refuse rather than fork the
+            # install elsewhere. This check needs the validated slug, so it
+            # cannot run before staging; like the neighbouring guards it must
+            # not leak the snapshot.
+            if _path_is_at_or_under(src, dest):
+                shutil.rmtree(stage, ignore_errors=True)
+                return (
+                    None,
+                    f"source directory is inside the install destination '{dest.name}'"
+                    " — installing would delete the source",
+                    400,
+                )
             with _theme_install_lock(slug):
                 # Collision check INSIDE the lock, immediately before promotion: an
                 # editor-created custom record with the same slug is a hard collision
@@ -632,7 +716,8 @@ def _do_install(stype: Any, source: dict[str, Any]) -> tuple[dict[str, Any] | No
                 if (_themes_dir() / f"{slug}.json").exists():
                     shutil.rmtree(stage, ignore_errors=True)
                     return None, f"a custom theme named '{slug}' already exists", 409
-                _swap_onto(slug)
+                if not _swap_onto(slug):
+                    return None, _source_displaced, 400
         return (
             {
                 "slug": slug,
@@ -645,6 +730,8 @@ def _do_install(stype: Any, source: dict[str, Any]) -> tuple[dict[str, Any] | No
             200,
         )
     finally:
+        if source_fd >= 0:
+            os.close(source_fd)
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 

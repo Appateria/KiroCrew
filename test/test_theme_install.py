@@ -30,7 +30,9 @@ import os
 import re
 import shutil
 import threading
+from contextlib import contextmanager
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -98,6 +100,31 @@ def _make_theme(
     varobj = _VALID_VARS if variables is None else variables
     _write(d / ("styles/variables.json" if styled else "variables.json"), varobj)
     return d
+
+
+def _allow_pinned_source_rename_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+    themes_module: ModuleType,
+    source: Path,
+) -> None:
+    """Model POSIX rename semantics when the Windows pin blocks renames."""
+    if not themes_module.IS_WINDOWS:
+        return
+    pinned_stat = source.stat()
+    fake_fd = 2_147_483_647
+    real_fstat = os.fstat
+    real_close = os.close
+    monkeypatch.setattr(themes_module, "pin_directory", lambda _path: fake_fd)
+    monkeypatch.setattr(
+        themes_module.os,
+        "fstat",
+        lambda fd: pinned_stat if fd == fake_fd else real_fstat(fd),
+    )
+    monkeypatch.setattr(
+        themes_module.os,
+        "close",
+        lambda fd: None if fd == fake_fd else real_close(fd),
+    )
 
 
 # A valid persona: within the length cap AND carries both mandatory clauses
@@ -649,6 +676,190 @@ class TestCopyInstalledTheme:
             theme, err, status = th_mod._do_install("local", {"path": str(bad)})
             assert theme is None and status == 400, (bad, err, status)
             assert not any(p.name.startswith(".install-staging-") for p in themes_root.iterdir())
+
+    def test_dest_ancestor_of_source_rejected_without_deleting_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Promotion displaces dest to `.old` and rmtree()s it. A source
+        # nested UNDER the directory its own slug names (dest is an ancestor)
+        # rides along in that displaced tree. Deleting the tree removes the
+        # source and unrelated siblings while the handler returns 200.
+        # The containment guard must return 400 with the source AND a sibling
+        # file intact and no staging residue. Status alone is not enough: a
+        # reject-after-delete implementation would still return 400.
+        import kiro_crew.dashboard.handlers.themes as th_mod
+        import kiro_crew.dashboard.theme_validate as tv_mod
+
+        monkeypatch.setattr(tv_mod, "config_dir", lambda: tmp_path / "cfg")
+        themes_root = tv_mod._themes_dir()
+        src = themes_root / "lcars" / "subpack"
+        src.mkdir(parents=True)
+        _write(
+            src / "theme.json",
+            {"slug": "lcars", "name": "LCARS", "emoji": "🖖", "level": 0, "formatVersion": 1},
+        )
+        _write(src / "variables.json", _VALID_VARS)
+        sibling = themes_root / "lcars" / "unrelated-sibling.txt"
+        sibling.write_text("precious", encoding="utf-8")
+
+        theme, err, status = th_mod._do_install("local", {"path": str(src)})
+
+        assert theme is None and status == 400, (theme, err, status)
+        assert err is not None and "inside the install destination" in err
+        assert (src / "theme.json").is_file(), "install deleted its own source"
+        assert sibling.is_file(), "install deleted an unrelated sibling"
+        assert not any(p.name.startswith(".install-staging-") for p in themes_root.iterdir())
+
+    def test_source_moved_under_dest_while_waiting_for_lock_is_preserved(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The source identity is pinned before lock acquisition. If the source
+        # moves beneath dest in that window, promotion restores the displaced
+        # tree and rejects the install without deleting source bytes.
+        import kiro_crew.dashboard.handlers.themes as th_mod
+        import kiro_crew.dashboard.theme_validate as tv_mod
+
+        monkeypatch.setattr(tv_mod, "config_dir", lambda: tmp_path / "cfg")
+        themes_root = tv_mod._themes_dir()
+        src = _make_theme(tmp_path / "source")
+        _allow_pinned_source_rename_on_windows(monkeypatch, th_mod, src)
+        expected_manifest = (src / "theme.json").read_bytes()
+        expected_variables = (src / "variables.json").read_bytes()
+        relocated = themes_root / "lcars" / "relocated-source"
+        real_install_lock = th_mod._theme_install_lock
+
+        @contextmanager
+        def _relocating_lock(slug: str):  # type: ignore[no-untyped-def]
+            relocated.parent.mkdir(parents=True, exist_ok=True)
+            src.rename(relocated)
+            with real_install_lock(slug):
+                yield
+
+        monkeypatch.setattr(th_mod, "_theme_install_lock", _relocating_lock)
+
+        theme, err, status = th_mod._do_install("local", {"path": str(src)})
+
+        assert theme is None and status == 400, (theme, err, status)
+        assert err is not None and "moved into the install destination" in err
+        assert (relocated / "theme.json").read_bytes() == expected_manifest
+        assert (relocated / "variables.json").read_bytes() == expected_variables
+        assert not list(themes_root.glob(".install-staging-*"))
+        assert not list(themes_root.glob(".lcars.old-*"))
+
+    def test_source_decoy_swap_while_waiting_for_lock_is_preserved(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import kiro_crew.dashboard.handlers.themes as th_mod
+        import kiro_crew.dashboard.theme_validate as tv_mod
+
+        monkeypatch.setattr(tv_mod, "config_dir", lambda: tmp_path / "cfg")
+        themes_root = tv_mod._themes_dir()
+        src = _make_theme(tmp_path / "source")
+        _allow_pinned_source_rename_on_windows(monkeypatch, th_mod, src)
+        expected_manifest = (src / "theme.json").read_bytes()
+        expected_variables = (src / "variables.json").read_bytes()
+        relocated = themes_root / "lcars" / "relocated-source"
+        real_install_lock = th_mod._theme_install_lock
+
+        def _swap_source() -> None:
+            relocated.parent.mkdir(parents=True, exist_ok=True)
+            src.rename(relocated)
+            src.mkdir()
+            (src / "decoy.txt").write_text("decoy", encoding="utf-8")
+
+        # The pathname hook makes the vulnerable late stat capture the decoy.
+        # The lock hook drives the same swap when identity comes from the early
+        # descriptor instead, so both implementations exercise one race.
+        real_path_stat = Path.stat
+
+        def _stat_with_pre_lock_swap(
+            path: Path, *args: object, **kwargs: object
+        ) -> os.stat_result:
+            if (
+                path == src
+                and not relocated.exists()
+                and any(themes_root.glob(".install-staging-*"))
+            ):
+                _swap_source()
+            return real_path_stat(path, *args, **kwargs)
+
+        def _swapping_lock(slug: str):  # type: ignore[no-untyped-def]
+            if not relocated.exists():
+                _swap_source()
+            return real_install_lock(slug)
+
+        monkeypatch.setattr(Path, "stat", _stat_with_pre_lock_swap)
+        monkeypatch.setattr(th_mod, "_theme_install_lock", _swapping_lock)
+
+        theme, err, status = th_mod._do_install("local", {"path": str(src)})
+
+        assert theme is None and status == 400, (theme, err, status)
+        assert err is not None and "moved into the install destination" in err
+        assert (relocated / "theme.json").read_bytes() == expected_manifest
+        assert (relocated / "variables.json").read_bytes() == expected_variables
+        assert (src / "decoy.txt").read_text(encoding="utf-8") == "decoy"
+        assert not list(themes_root.glob(".install-staging-*"))
+        assert not list(themes_root.glob(".lcars.old-*"))
+
+    def test_vanished_source_pin_returns_400_before_staging(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import kiro_crew.dashboard.handlers.themes as th_mod
+        import kiro_crew.dashboard.theme_validate as tv_mod
+
+        monkeypatch.setattr(tv_mod, "config_dir", lambda: tmp_path / "cfg")
+        themes_root = tv_mod._themes_dir()
+        src = _make_theme(tmp_path / "source")
+
+        def _missing_source(_path: object) -> int:
+            raise FileNotFoundError
+
+        monkeypatch.setattr(th_mod, "pin_directory", _missing_source)
+
+        theme, err, status = th_mod._do_install("local", {"path": str(src)})
+
+        assert theme is None and status == 400, (theme, err, status)
+        assert err == "source directory is not accessible"
+        assert not list(themes_root.glob(".install-staging-*"))
+        assert not list(themes_root.glob(".lcars.old-*"))
+
+    def test_dest_case_variant_ancestor_rejected_on_case_insensitive_fs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # On a case-insensitive filesystem (default macOS APFS),
+        # Path.resolve() preserves the caller's spelling while PosixPath
+        # comparison is case-sensitive: a source supplied as
+        # themes/LCARS/subpack lexically misses dest themes/lcars even though
+        # they are the same directory on disk. A lexical-only guard misses the
+        # case variant and promotion deletes the source. The inode fallback
+        # must catch it. Skipped where case spelling creates distinct paths.
+        probe = tmp_path / "CaseProbe"
+        probe.mkdir()
+        if not (tmp_path / "caseprobe").exists():
+            pytest.skip("requires a case-insensitive filesystem")
+        import kiro_crew.dashboard.handlers.themes as th_mod
+        import kiro_crew.dashboard.theme_validate as tv_mod
+
+        monkeypatch.setattr(tv_mod, "config_dir", lambda: tmp_path / "cfg")
+        themes_root = tv_mod._themes_dir()
+        src = themes_root / "lcars" / "subpack"
+        src.mkdir(parents=True)
+        _write(
+            src / "theme.json",
+            {"slug": "lcars", "name": "LCARS", "emoji": "🖖", "level": 0, "formatVersion": 1},
+        )
+        _write(src / "variables.json", _VALID_VARS)
+        sibling = themes_root / "lcars" / "unrelated-sibling.txt"
+        sibling.write_text("precious", encoding="utf-8")
+        case_variant = themes_root / "LCARS" / "subpack"
+
+        theme, err, status = th_mod._do_install("local", {"path": str(case_variant)})
+
+        assert theme is None and status == 400, (theme, err, status)
+        assert err is not None and "inside the install destination" in err
+        assert (src / "theme.json").is_file(), "install deleted its own source"
+        assert sibling.is_file(), "install deleted an unrelated sibling"
+        assert not any(p.name.startswith(".install-staging-") for p in themes_root.iterdir())
 
     def test_install_validates_the_staging_snapshot_not_the_source(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
