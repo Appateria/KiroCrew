@@ -23,14 +23,18 @@ run, while the FACT that the harness receives them is what is pinned.
 Every collaborator on the spawn path is stubbed to a fixed answer, including the
 resolvers, the sandbox wrapper and each harness's own routing read-back. The point is
 the argv and the env, so a real sandbox profile or a real read-back child would add
-host dependence and prove nothing this capture asks about.
+host dependence and prove nothing this capture asks about. A collaborator that answers
+with one of its own arguments is stubbed through :func:`_stub_for`, which reads what to
+accept off the live object, so this file holds no copy of a signature it does not own.
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -142,6 +146,69 @@ class _Recorder:
         self.stderr_label = ""
 
 
+def _stub_for(real: Any, answer: Callable[[dict[str, Any]], Any]) -> Callable[..., Any]:
+    """A stub for *real* that accepts exactly the arguments *real* accepts.
+
+    What the stub accepts is DERIVED from ``real``'s own signature, by binding each
+    call against it, so the stub tracks the thing it stubs: a keyword the spawn path
+    starts handing over is accepted here the moment ``real`` declares it, and one
+    ``real`` does not declare raises ``TypeError`` here exactly as it would there.
+
+    That derivation is the point. A parameter list typed out by hand is a second copy
+    of somebody else's signature, and it goes stale silently the moment the first copy
+    grows an argument -- a capture that stubs eight collaborators would hold eight such
+    copies. Widening to ``**kwargs`` is worse than a stale copy: it accepts anything,
+    so the drift stops being visible at all and this file stops measuring the argument
+    it claims to.
+
+    ``answer`` receives the bound arguments by name and returns what the stub returns,
+    which lets a stub answer with one of the call's own values.
+    """
+    signature = inspect.signature(real)
+
+    def _stub(*args: Any, **kwargs: Any) -> Any:
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        return answer(bound.arguments)
+
+    return _stub
+
+
+def _async_stub_for(real: Any, answer: Callable[[dict[str, Any]], Any]) -> Callable[..., Any]:
+    """:func:`_stub_for` for a collaborator the spawn path awaits."""
+    inner = _stub_for(real, answer)
+
+    async def _stub(*args: Any, **kwargs: Any) -> Any:
+        return inner(*args, **kwargs)
+
+    return _stub
+
+
+#: Collaborators the capture answers with one of the call's OWN arguments, and which
+#: argument each answers with. Every one of them reads the host otherwise -- the two
+#: env resolvers and the pod home remap read config and the real environment, the pod
+#: bundle wrap resolves a bundled runtime, and the cgroup wrap asks the OS for a scope
+#: -- while the argv and the env they are handed are the answers this file records. So
+#: each hands its own argument straight back.
+#:
+#: Keyed by attribute name so the stub is built from the live object: see
+#: :func:`_stub_for` for why the accepted arguments are derived rather than typed out.
+_PASSTHROUGH_STUBS: dict[str, Callable[[dict[str, Any]], Any]] = {
+    "scrub_agent_subprocess_env": lambda call: call["env"],
+    "_resolve_spawn_env": lambda call: call["env"],
+    "_apply_pod_home_remap": lambda call: call["env"],
+    "cgroup_scope_argv": lambda call: call["argv"],
+    "apply_pod_bundle_spawn": lambda call: (call["argv"], False),
+}
+
+#: The same, for the collaborator the spawn path awaits. It answers with the argv it
+#: was handed and no cleanup handle, so the sandbox wrap contributes nothing to the
+#: argv this file records.
+_ASYNC_PASSTHROUGH_STUBS: dict[str, Callable[[dict[str, Any]], Any]] = {
+    "wrap_argv_async": lambda call: (list(call["argv"]), None),
+}
+
+
 def _stub_common(stack: list, rec: _Recorder, tmp_path: Path) -> None:
     """Patch every collaborator that is not the answer under test."""
     proc = MagicMock()
@@ -156,9 +223,6 @@ def _stub_common(stack: list, rec: _Recorder, tmp_path: Path) -> None:
         rec.env = dict(kwargs.get("env") or {})
         return proc
 
-    async def _wrap_argv_async(argv, **_kw):
-        return list(argv), None
-
     async def _drain(_stream, *, label: str):
         rec.stderr_label = label
 
@@ -166,24 +230,28 @@ def _stub_common(stack: list, rec: _Recorder, tmp_path: Path) -> None:
         rec.spawn_label = label
         return True
 
+    # The pass-through collaborators, each accepting what the live object accepts.
+    stack.extend(
+        patch.object(client_mod, name, side_effect=_stub_for(getattr(client_mod, name), answer))
+        for name, answer in _PASSTHROUGH_STUBS.items()
+    )
+    stack.extend(
+        patch.object(
+            client_mod, name, side_effect=_async_stub_for(getattr(client_mod, name), answer)
+        )
+        for name, answer in _ASYNC_PASSTHROUGH_STUBS.items()
+    )
+
     stack.extend(
         [
             patch.object(client_mod, "create_subprocess_limited", side_effect=_factory),
-            patch.object(client_mod, "wrap_argv_async", side_effect=_wrap_argv_async),
-            patch.object(client_mod, "cgroup_scope_argv", side_effect=lambda argv: argv),
-            patch.object(
-                client_mod, "apply_pod_bundle_spawn", side_effect=lambda a, **_k: (a, False)
-            ),
             patch.object(client_mod, "finish_suspended_spawn", side_effect=_finish),
             patch.object(AcpClient, "_drain_stderr", side_effect=_drain),
             patch.object(AcpClient, "_prepare_spawn_workspace", return_value=None),
             patch.object(AcpClient, "_resolve_session_mcp_servers", return_value=[]),
-            patch.object(client_mod, "_resolve_spawn_env", side_effect=lambda env, **_k: env),
-            patch.object(client_mod, "scrub_agent_subprocess_env", side_effect=lambda env: env),
             patch.object(client_mod, "browser_session_env", return_value={}),
             patch.object(client_mod, "browser_socket_env", return_value={}),
             patch.object(client_mod, "inject_xdist_auto_cap", return_value=None),
-            patch.object(client_mod, "_apply_pod_home_remap", side_effect=lambda env, **_k: env),
             patch.object(client_mod, "_get_child_pids", return_value=[]),
             patch.object(client_mod.agent_scratch, "allocate_scratch", return_value=None),
             patch.object(client_mod, "_run_preflight_bounded", new=AsyncMock(return_value=())),
