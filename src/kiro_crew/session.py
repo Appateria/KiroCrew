@@ -954,6 +954,17 @@ class _Session:
     # Consumed one-shot by the next prompt builder to re-inject the skills
     # index so the model can still discover skills post-compaction.
     needs_context_reinjection: bool = False
+    # Set when this session's cold start consumed a replay suppression, so it
+    # started with NO conversation. Cleared by the compaction coordinator once
+    # the first confirmed reading is recorded below. Lives on the session so it
+    # dies with it: a successor that never reports leaves nothing behind.
+    floor_pending: bool = False
+    # First confirmed context reading of a session that started with no
+    # conversation: what a fresh session on this key reads before anyone has
+    # said anything. ``None`` until measured, and never for a session whose
+    # first turn replayed history. Read by the compaction coordinator to decide
+    # whether a reset could free anything at all.
+    floor_pct: float | None = None
 
     def adopt_provider(self, provider: LLMProvider) -> None:
         """Swap in a freshly-spawned *provider*, resetting conversation state.
@@ -981,6 +992,10 @@ class _Session:
         self.consecutive_failures = 0
         self.prev_turn_cancelled = False
         self.needs_context_reinjection = False
+        # A recycled provider replays history on its first turn, so its first
+        # reading is not a floor; the measurement belongs to the old provider.
+        self.floor_pending = False
+        self.floor_pct = None
         self.created_at = time.time()
         self.last_used = time.monotonic()
 
@@ -2335,14 +2350,21 @@ class SessionManager:
         key — an idle-timeout expiry, a gateway restart — silently amnesiac,
         which nobody asked for.
         """
+        folded = self._fold_key(key)
         if key in self._suppress_replay:
             self._suppress_replay.discard(key)
-            return True
-        folded = self._fold_key(key)
-        if folded in self._suppress_replay:
+        elif folded in self._suppress_replay:
             self._suppress_replay.discard(folded)
-            return True
-        return False
+        else:
+            return False
+        # The session that consumed the suppression starts with no history, so
+        # its first confirmed reading is this key's floor. Marked here, on the
+        # session itself, because this is the one place that knows the replay
+        # was actually skipped -- and the flag then dies with the session.
+        session = self._sessions.get(folded) or self._sessions.get(key)
+        if session is not None:
+            session.floor_pending = True
+        return True
 
     def set_recycle_callback(self, cb: _RecycleCallback | None) -> None:
         """Register the lifecycle recycle callback."""
