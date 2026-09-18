@@ -57,7 +57,7 @@ except ImportError:  # non-POSIX (Windows)
     _resource_mod = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
     from concurrent.futures import ThreadPoolExecutor
     from typing import Any
 
@@ -354,6 +354,17 @@ _CREW_HIDDEN_LEAVES: tuple[str, ...] = (
     # race. Precreating it would re-materialise the retired name on every machine.
     "ledgers",
     "cron-history",
+    # The single-use step-up nonce that authorizes recording a flagged-file
+    # delivery grant. Whole DIRECTORY (arm renames a sibling ``.tmp`` into place),
+    # with NO in-sandbox reader: the gateway writes it on arm and the host
+    # ``kirocrew file-delivery approve`` reads it. Masked because a same-UID agent
+    # could otherwise FORGE a nonce here with a runtime-constructed shell path
+    # (the file gate's text/argv matcher does not see such a path) and then drive
+    # the owner's loopback browser to POST that chosen nonce, recording a grant
+    # with no human present -- the exact self-approval hole the step-up exists to
+    # close. Deliberately NOT under ``trust/``, which is sandbox-visible for SEL
+    # appends.
+    "file-delivery-consent-pending",
     # The cron in-flight markers, masked rather than sealed read-only because
     # nothing in the sandbox reads one: they are written and cleared by the run
     # task in the GATEWAY process, and the boot-time loop-stall breaker that acts
@@ -1028,6 +1039,15 @@ _CREW_PRECREATE_READONLY_FILE_LEAVES: tuple[str, ...] = (
 #: any clone, so materialising it early changes nothing it relies on.
 _CREW_PRECREATE_HIDDEN_DIR_LEAVES: tuple[str, ...] = (
     "aws-control-staging",
+    # Same lazily-created shape as aws-control-staging: the file-delivery step-up
+    # nonce dir is created on demand only when the owner first ARMS a grant
+    # (``file_delivery_consent.arm_grant`` -> ``make_owner_only_dir(path.parent)``).
+    # On a fresh install with no prior arm the leaf is absent at spawn, the
+    # ``isdir``-guarded SENSITIVE_DIRS loop skips it, and a later dashboard arm
+    # materialises the nonce INSIDE a running sandbox's view -- where a same-UID
+    # agent reads it and drives the loopback /approve to self-grant. Precreated
+    # (empty, 0o700) before every spawn so the mask always has a name to bind over.
+    "file-delivery-consent-pending",
     "appearance-library",
     "quarantined-clones",
     # md-notebook's write-staging directory, for the same reason and by the same rule: a
@@ -9459,6 +9479,76 @@ def credential_mask_applies(mode: str) -> bool:
     # ENFORCED adapter reaches here at all: ``enforce_sandbox_floor`` returns early
     # for every harness this core does not enforce, so no first-class path changes.
     return False
+
+
+def spawn_delegates_masking() -> bool:
+    """Whether the agent spawn is DELEGATED, so Crew's own hidden-dir mask never runs.
+
+    :func:`credential_mask_applies` answers whether ``wrap_argv`` would thread
+    ``extra_hidden_dirs`` through the backend it selects. That is the right
+    question for a mode/backend hole and the wrong one for a DELEGATION hole: on
+    macOS with kiro-cli's internal sandbox enabled, a backend is present, so that
+    predicate answers True, and yet the spawn is handed to kiro-cli
+    (``_delegate_to_kiro_internal_sandbox``) and Crew's mask is not applied at
+    all. Native Windows delegates for the same reason with no Crew backend to
+    apply.
+
+    Kept here rather than in a caller, for the reason
+    :func:`credential_mask_applies` states about itself: a control whose security
+    argument depends on the mask must not carry its own copy of when the mask is
+    skipped. It is a SEPARATE predicate rather than a widening of that one
+    because the two answer different questions, and their existing callers depend
+    on the narrower answer -- a caller that only needs "would the backend carry
+    the mask" must not start refusing a delegated spawn it never cared about.
+
+    Read-only, and never raises: an unreadable delegation setting reads as
+    DELEGATED, which is the fail-closed direction -- a mask that may not run is
+    not trusted.
+    """
+    try:
+        if sys.platform == "win32":
+            return True
+        return bool(sys.platform == "darwin" and kiro_internal_sandbox_enabled())
+    except Exception:  # noqa: BLE001 -- an unverifiable setting is delegated, not trusted
+        return True
+
+
+def unconfined_live_agent_pid(pids: "Iterable[int]") -> int | None:
+    """The first pid among *pids* that is NOT actually confined, or ``None``.
+
+    Confinement is decided at SPAWN by :func:`wrap_argv`, and ``agent.sandbox``
+    is a live setting -- it carries no ``restart=True`` marker, so it reaches the
+    running gateway the moment it is saved. A session spawned while the tier was
+    ``off`` therefore stays unconfined after the config flips, and a control that
+    reads only :func:`configured_sandbox_mode` is asking about the NEXT spawn
+    while the hazard is a process already running. This asks about the processes.
+
+    Reuses the platform predicates ``member_memory_auth`` uses for the same
+    question rather than inventing a second answer: on Linux a confined child
+    holds different user/mount namespaces than the gateway, so MATCHING
+    namespaces mean unconfined; on macOS Seatbelt membership is read directly.
+    Both return ``None`` when the answer cannot be read, and an unreadable
+    process counts as UNCONFINED -- "cannot verify" is not "is confined".
+
+    Native Windows has no Crew confinement to verify, so every pid there answers
+    unconfined and a caller whose security argument needs the mask refuses on
+    that platform, which is the same posture ``spawn_delegates_masking`` takes.
+    """
+    for pid in pids:
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+            return pid if isinstance(pid, int) and not isinstance(pid, bool) else -1
+        try:
+            if sys.platform == "linux":
+                if platform_compat.process_namespaces_match(pid, os.getpid()) is not False:
+                    return pid
+            elif sys.platform == "darwin":
+                if platform_compat.process_is_sandboxed(pid) is not True:
+                    return pid
+            else:
+                return pid
+        except Exception:  # noqa: BLE001 -- unreadable is unconfined, never confined
+            return pid
+    return None
 
 
 def effective_sandbox_mode(mode: str) -> str:
