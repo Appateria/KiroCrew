@@ -1,4 +1,4 @@
-import { safeSetItem } from '../utils/safeStorage'
+import { safeSetItem, safeSetSessionItem } from '../utils/safeStorage'
 import { newerTs } from '../lib/slotReadRelay'
 import { jsonEqual } from '../utils/structuralEqual'
 import { createSlice, createAsyncThunk, createSelector, type PayloadAction } from '@reduxjs/toolkit'
@@ -169,7 +169,22 @@ const persistSharedUnread = (add: Record<string, string>, remove: readonly strin
       if (v === '') continue  // presence already recorded; never demote a watermark
       stored[k] = prev === '' ? v : (newerTs(prev, v) ?? prev)
     }
-    localStorage.setItem('mc-unread-shared', JSON.stringify(stored))
+    // safeSetItem, not a raw setItem: this write runs on the websocket
+    // onmessage -> dispatch -> re-render path, so a QuotaExceededError here
+    // would escape a React ErrorBoundary and white-screen the app. The helper
+    // reclaims a disposable tier and retries, so the record survives a full
+    // quota instead of being dropped beside reclaimable cache.
+    //
+    // The return value is load-bearing, and it is the one thing a plain
+    // conversion from the old raw call loses. The raw setItem THREW on a full
+    // quota, so the surrounding catch swallowed it and the projection write
+    // below never ran. A helper that reports the same failure by returning
+    // false does not stop the function, and the projection is strictly smaller
+    // than the record (keys only, no timestamps) — so on a quota it can free
+    // space and succeed where the record just failed, leaving the two persisted
+    // records disagreeing. restoreUnreadSince trusts the record; older tabs and
+    // the hub relay read the projection. Bail out before that can happen.
+    if (!safeSetItem('mc-unread-shared', JSON.stringify(stored))) return
     // Projection write bypasses safeSet's hub relay: the shared keys omit
     // this window's manual sentinels, so relaying their count would under-
     // report the hub switcher chip. The reducers relay the window's own
@@ -199,7 +214,7 @@ const clearSharedUnreadIfCovered = (slot: string, readTs: string | undefined): s
  *  would clobber siblings' reminder sets. */
 const persistManualSentinels = (unreadSince: Record<string, string>): void => {
   const manual = Object.fromEntries(Object.entries(unreadSince).filter(([, v]) => v === MANUAL_UNREAD))
-  try { sessionStorage.setItem('mc-unread-since', JSON.stringify(manual)) } catch { /* SecurityError / quota */ }
+  safeSetSessionItem('mc-unread-since', JSON.stringify(manual))
 }
 /** Boot restore for unreadSince (exported for tests): message watermarks
  *  from the ONE shared record, joined with this window's per-tab manual
@@ -221,7 +236,7 @@ export const restoreUnreadSince = (): Record<string, string> => {
       let legacy: string[]
       try { legacy = JSON.parse(localStorage.getItem('mc-unread-slots') ?? '[]') as string[] } catch { legacy = [] }
       for (const k of legacy) record[k] = ''
-      if (legacy.length > 0) localStorage.setItem('mc-unread-shared', JSON.stringify(record))
+      if (legacy.length > 0) safeSetItem('mc-unread-shared', JSON.stringify(record))
     }
     const since: Record<string, string> = {}
     for (const [k, v] of Object.entries(record)) if (v !== '') since[k] = v
