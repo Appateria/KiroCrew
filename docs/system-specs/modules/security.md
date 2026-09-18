@@ -121,6 +121,24 @@ switch and answers `503 store_unavailable`. A grant is immutable, so a pick that
 lands on a chat which already holds a grant for another store is refused before
 anything is committed (`409 private_memory_session_pinned`). A turn can only
 confirm an existing grant, never issue one.
+
+The menu pick reaches that helper with one thing already settled, because
+`session.eager_spawn` is on by default and pre-creates a session for a chat that
+is still on the default agent. That allocation publishes an ACP session id into
+`SessionMap`, and the switch's own reset preserves the persistence entry
+(`SessionManager.reset` clears the SID only while a live session is still
+registered), so the resume pointer outlives the pre-warm it belongs to. Read as
+a resumable runtime it stands for V1 context no transcript row shows, which on a
+chat that has never been sent a message is context that does not exist.
+`release_prewarmed_session` DISCARDS that pointer rather
+than waiving the check, so the runtime the helper sees is honestly absent and the
+first private turn cold-starts under the store it validated — nothing can resume
+the default agent's pre-warmed process into a member's private store. It runs
+only for a pick that names a private V2 member, only while no live provider is
+registered, and only on a transcript that reads as empty; a V1 pick, a live
+provider, an unreadable transcript and a transcript with rows each keep their
+resumable session, so a chat that is not provably empty loses nothing and still
+refuses.
 Subsequent
 turns, consolidation and restart require transcript metadata to agree with this
 record. Missing, malformed or changed metadata cannot become V1 or another

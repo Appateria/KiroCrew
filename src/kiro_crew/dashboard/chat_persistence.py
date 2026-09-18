@@ -843,31 +843,11 @@ def _pin_private_agent_assignment(
     before using this helper. The session-control route rejects private callers
     from these aggregate controls. Legacy members keep their declared V1 memory.
 
-    ``authorized_store`` is the store a caller's authorization actually covers,
-    for the one caller that HAS such a value: ``create_session`` runs
-    ``require_memory_delegation`` against ``bindings.memory_store_name``, so that
-    is the only store its creation is cleared for. The store pinned here is
-    derived from the SELECTED AGENT's config entry instead, and the two are not
-    the same value -- so without this fence the gate authorizes one store and the
-    pin writes another, and the new session runs on private memory its own
-    ``slot.memory_store`` does not name. Passing it makes the act match the check.
-
-    Left ``None`` by the owner's own agent picks, where the pick IS the authority
-    and there is no separately-authorized store to compare against.
+    ``authorized_store`` is passed through to :func:`_member_private_selection`,
+    which owns both the store classification and that fence.
     """
-    selected = agent or config.default_agent
-    if selected == "default":
-        return ""
-    member = config.agents.get(selected)
-    store = getattr(member, "memory_store", "")
+    selected, store = _member_private_selection(agent, config, authorized_store=authorized_store)
     if not store:
-        return ""
-    if authorized_store is not None and named_store_or_empty(store) != named_store_or_empty(
-        authorized_store
-    ):
-        return ""
-    record = config.memory_stores.get(store) if isinstance(store, str) else None
-    if record is None or record.memory_version != 2:
         return ""
     from kiro_crew.history import ConversationLog
     from kiro_crew.member_memory_auth import bind_private_session_store, read_private_session_store
@@ -896,6 +876,99 @@ def _pin_private_agent_assignment(
             )
     bind_private_session_store(session_key, store)
     return store
+
+
+def _member_private_selection(
+    agent: str, config: KiroCrewConfig, *, authorized_store: str | None = None
+) -> tuple[str, str]:
+    """Resolve a pick to ``(selected agent, private V2 store)``, or ``("", "")``.
+
+    The ONE spelling of "does this pick want a private grant, and for which
+    store". Both the grant itself and the pre-warm release read it, so neither
+    can drift into accepting a store the other refuses -- the divergence
+    ``named_store_or_empty`` exists to end, and the reason this is a shared
+    function rather than two blocks that happen to agree today.
+
+    ``authorized_store`` narrows the answer to what a caller's authorization
+    actually covers, for the one caller that HAS such a value: ``create_session``
+    runs ``require_memory_delegation`` against ``bindings.memory_store_name``, so
+    that is the only store its creation is cleared for, while the store resolved
+    here comes from the SELECTED AGENT's config entry. The two are not the same
+    value, so without this fence the gate authorizes one store and the grant
+    writes another, and the new session runs on private memory its own
+    ``slot.memory_store`` does not name. The owner's own agent picks leave it
+    ``None``: there the pick IS the authority and there is no separately
+    authorized store to compare against.
+    """
+    selected = agent or config.default_agent
+    if not selected or selected == "default":
+        return "", ""
+    store = getattr(config.agents.get(selected), "memory_store", "")
+    if not isinstance(store, str) or not store:
+        return "", ""
+    if authorized_store is not None and named_store_or_empty(store) != named_store_or_empty(
+        authorized_store
+    ):
+        return "", ""
+    record = config.memory_stores.get(store)
+    if record is None or record.memory_version != 2:
+        return "", ""
+    return selected, store
+
+
+async def release_prewarmed_session(
+    state: DashboardState, session_key: str, agent: str, config: KiroCrewConfig
+) -> bool:
+    """Drop a speculative pre-warm's resume pointer before a private grant.
+
+    ``session.eager_spawn`` is on by default, so opening a new chat pre-creates
+    a session for it while the chat is still on the default agent. That
+    allocation publishes the ACP session id into ``SessionMap``, and the agent
+    switch's own reset preserves the persistence entry
+    (``SessionManager.reset`` clears the SID only when a live session is still
+    registered). Read as a live or resumable runtime, that surviving pointer
+    stands for V1 context the transcript does not show -- but on a chat the
+    user has never sent a message in there is no such context, and the grant
+    the owner asked for is refused for a runtime nobody is using.
+
+    The pointer is discarded rather than ignored, so the invariant the guard
+    protects is satisfied in fact: nothing can resume the default agent's
+    pre-warmed process into the member's private store, and the first private
+    turn cold-starts under the store it validated. Returns whether a pointer
+    was dropped.
+
+    Every condition fails CLOSED, because a wrong "yes" here throws away a
+    conversation the user can still resume:
+
+    * a pick that is not a private V2 member keeps its pre-warm — a V1 chat
+      has nothing to grant and must not lose its resumable session;
+    * a live provider means the caller has not torn its session down, so this
+      is not the settled post-reset window this helper is written for;
+    * any transcript row, or a transcript that cannot be read at all, means
+      the chat is not provably empty. That is the same probe, and the same
+      unreadable-is-not-empty rule, that :func:`_pin_private_agent_assignment`
+      applies before it grants.
+
+    Ordered cheapest-first, and the no-pointer case returns before the
+    transcript read: a chat with nothing to drop must not pay a file read or a
+    map write on every private pick.
+    """
+    if not _member_private_selection(agent, config)[1]:
+        return False
+    sessions = getattr(state, "sessions", None)
+    log = state.conversation_log
+    if sessions is None or log is None:
+        return False
+    if not sessions.resumable_sid(session_key):
+        return False
+    if sessions.get_provider(session_key) is not None:
+        return False
+    try:
+        if await asyncio.to_thread(log.has_messages, session_key):
+            return False
+    except OSError:
+        return False
+    return bool(await asyncio.to_thread(sessions.forget_conversation, session_key))
 
 
 async def pin_private_agent_store(

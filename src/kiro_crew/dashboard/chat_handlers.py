@@ -66,6 +66,7 @@ from kiro_crew.dashboard.chat_persistence import (
     _validate_autocompact_pct,
     get_reasoning_effort_values,
     pin_private_agent_store,
+    release_prewarmed_session,
     save_slot_off_loop,
 )
 from kiro_crew.dashboard.chat_runner import (
@@ -7055,6 +7056,27 @@ async def api_chat_slot_agent(request: web.Request) -> web.Response:
                     # Off the loop: the create path loads it the same way, and
                     # the in-handler load above is not guaranteed to have run.
                     pin_cfg = await asyncio.to_thread(KiroCrewConfig.load)
+                    # The reset above tore this slot's session down but kept its
+                    # resume pointer, and a new chat is pre-warmed while it is
+                    # still on the default agent. Drop that pointer for a
+                    # private pick, or the pin reads it as V1 context and
+                    # refuses a chat with no messages in it. Re-checked after
+                    # the awaits below for the same reason the pin is.
+                    await release_prewarmed_session(state, pin_key, agent_name, pin_cfg)
+                    if (
+                        state._slots.get(slot.key) is not slot
+                        or slot.agent is not committed_agent
+                        or effective_session_key(slot) != pin_key
+                        or slot.messages
+                    ):
+                        await _unwind_pin_failure()
+                        return web.json_response(
+                            {
+                                "error": "slot changed during member assignment",
+                                "code": "session_rebound",
+                            },
+                            status=409,
+                        )
                     assigned_store = await pin_private_agent_store(
                         state, pin_key, agent_name, pin_cfg
                     )
