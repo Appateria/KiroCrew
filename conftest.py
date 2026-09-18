@@ -435,6 +435,84 @@ def _redirect_bytecode_cache() -> None:
     os.environ["PYTHONPYCACHEPREFIX"] = candidate
 
 
+class _AsyncFixtureScanGate:
+    """Run pytest-asyncio's fixture scan only when a fixture was registered since.
+
+    pytest-asyncio 0.20.3 hooks ``pytest_pycollect_makeitem`` and, for EVERY test
+    function name it sees, walks EVERY fixture definition the session has registered
+    so far to wrap the async ones (``_preprocess_async_fixtures``). Fixtures already
+    wrapped are skipped by a set lookup, but the ~1,400 synchronous ones are
+    re-inspected with ``asyncio.iscoroutinefunction`` on each call. That is
+    O(tests x fixtures): cProfile of a ``--collect-only`` over this suite (112,246
+    tests) counted 87,244 scans x ~1,420 fixtures = 123.8 million coroutine checks,
+    1,098 of the 1,285 profiled seconds -- 85% of collection. Every xdist worker pays
+    it in full, and under coverage instrumentation each check costs ~2.3x more, which
+    is what made the CI shards' ~33-minute "collection" phase.
+
+    The scan's result only changes when a fixture is ADDED, and pytest funnels every
+    registration -- conftest, module, class, unittest, plugin -- through
+    ``FixtureManager._register_fixture``. So this wraps that one method to raise a
+    dirty flag, and lets the scan through only while the flag is up. A scan on a clean
+    flag would iterate the same definitions and find nothing new: the async marker
+    (``_force_asyncio_fixture``) is set by the decorator at definition time and
+    ``asyncio_mode`` is fixed for the run, so the skip is behaviour-preserving.
+
+    Pinned to the plugin version it patches: upstream's own fix for this (v0.25.1,
+    then v1.0.0) sits behind the v0.23 event-loop-scope rework this suite has not
+    migrated to. When pytest-asyncio moves, delete this class and the install below.
+    """
+
+    def __init__(self, scan) -> None:
+        self._scan = scan
+        self.dirty = True
+        self.scans = 0
+
+    def mark_dirty(self) -> None:
+        self.dirty = True
+
+    def __call__(self, config, processed_fixturedefs) -> None:
+        if not self.dirty:
+            return
+        self._scan(config, processed_fixturedefs)
+        self.scans += 1
+        self.dirty = False
+
+
+def _gate_pytest_asyncio_fixture_scan() -> None:
+    """Install :class:`_AsyncFixtureScanGate` once per process (each xdist worker)."""
+    try:
+        import pytest_asyncio.plugin as pa
+    except ImportError:  # pragma: no cover - plugin absent; nothing to gate
+        return
+    from _pytest.fixtures import FixtureManager
+
+    scan = getattr(pa, "_preprocess_async_fixtures", None)
+    register = getattr(FixtureManager, "_register_fixture", None)
+    if isinstance(scan, _AsyncFixtureScanGate):
+        return  # already installed (pytest_configure re-entered in-process)
+    if scan is None or register is None:
+        # Both seams are private to their packages. A version that renamed either
+        # must not turn into a crash before collection; it turns into the slow
+        # collection this gate exists to remove, said out loud so the pin is revisited.
+        warnings.warn(
+            "pytest-asyncio fixture-scan gate not installed: a private seam moved "
+            "(pytest_asyncio.plugin._preprocess_async_fixtures / "
+            "_pytest.fixtures.FixtureManager._register_fixture); collection will be slow",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return
+    gate = _AsyncFixtureScanGate(scan)
+
+    @functools.wraps(register)
+    def _register_fixture(self, *args, **kwargs):
+        gate.mark_dirty()
+        return register(self, *args, **kwargs)
+
+    FixtureManager._register_fixture = _register_fixture
+    pa._preprocess_async_fixtures = gate
+
+
 def _root_can_create_real_symlink() -> bool:
     """Probe real-link capability for tests collected outside ``test/`` too.
 
@@ -1430,6 +1508,7 @@ def pytest_configure(config: pytest.Config) -> None:
     _prefer_short_tmp_base()
     _redirect_hypothesis_database()
     _redirect_bytecode_cache()
+    _gate_pytest_asyncio_fixture_scan()
     global _SESSION_CWD
     try:
         _SESSION_CWD = os.getcwd()
