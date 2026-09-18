@@ -16,7 +16,9 @@ every existing patch site.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import tempfile
 import time
@@ -80,9 +82,92 @@ from kiro_crew.validation import (
     validate_tool_args,
 )
 
+logger = logging.getLogger(__name__)
+
+#: The sentences in the two monitoring descriptors that decide WHICH SIDE has to
+#: justify itself before a supported pull request is armed.
+#: ``monitoring.prefer_structured_arming`` picks one; nothing else in either
+#: description moves, and neither tool is refused.
+#:
+#: The two positions are NOT two different routes. Both send evidence the typed
+#: provider cannot observe -- comments, advisory review findings -- to the prompt
+#: loop. What moves is the burden: off, the structured path is admissible only
+#: once the caller has satisfied itself the objective is fully typed-decidable,
+#: which is a judgement that leans to the loop whenever the caller is unsure; on,
+#: a supported pull request is enough and the loop is the exception that needs its
+#: own reason. Describing this as a swap of two defaults would be false, and the
+#: help text does not.
+#:
+#: Both positions are spelled out in full rather than built from a shared stem.
+#: The off text has to make a positive claim of its own, because a test can tell
+#: "the flag was read and resolved off" from "the flag was never read" only when
+#: the two positions say different things -- an off position that merely OMITS
+#: the structured wording is indistinguishable from a read that never happened.
+_ARMING_STEER_STRUCTURED_ON_CONDITION = (
+    "Use monitor_watch for supported pull-request review readiness only when "
+    "the objective is fully determined by typed provider facts. Use the prompt "
+    "loop when comments or advisory review evidence must be interpreted. "
+)
+_ARMING_STEER_STRUCTURED_BY_DEFAULT = (
+    "On a supported pull request this installation arms monitor_watch by "
+    "default, and this prompt loop is the exception: take it when comments or "
+    "advisory review evidence must be interpreted, which the typed provider "
+    "cannot observe. "
+)
+#: Appended to ``monitor_watch``'s own description in the on position, so the
+#: preference is stated on the tool it points AT and not only on the one it
+#: points away from.
+_WATCH_STEER_STRUCTURED_DEFAULT = (
+    " This installation arms this path by default for a supported pull request."
+)
+
+
+def _prefers_structured_arming() -> bool:
+    """Whether this installation arms the structured monitor by default.
+
+    Read fresh on every descriptor build. That is what keeps a Settings change
+    from needing a gateway restart: ``mcp_tools.build_tool_list`` rebuilds the
+    descriptors per call and deliberately does not cache them. It does NOT
+    reach a session that is already open, because kiro-cli caches a session's
+    tool list for that session's life -- the same limitation
+    ``mcp_tools/browser.py`` records for ``dashboard.use_builtin_browser``.
+
+    Skipped entirely when an event loop is running, the same rule
+    ``mcp_tools/spawn.py::_agent_roster_hint`` applies for the same caller: a
+    running loop means this is NOT the stdio server but
+    ``mcp_discovery._managed_tools_in_process``, calling ``_list_tools()`` from
+    ``async def probe_server`` on the gateway's loop. That caller keeps only tool
+    NAMES -- it returns ``t.get("name")`` per entry and discards every
+    description -- so reading config there could not change anything it uses, and
+    the read is skipped rather than charged to the loop. The process that
+    actually serves ``tools/list`` to a model is ``mcp_shared.run_mcp_stdio_loop``,
+    a plain select/readline loop that never imports asyncio, so no loop is running
+    there and the preference IS read.
+
+    Fails to the OFF position on any error: off is the shipped behaviour, and a
+    config a gateway cannot parse must not silently re-point every arming
+    decision it is about to advise on. The catch stays broad because this runs
+    inside the tool-list build, where an escaping exception would withdraw EVERY
+    tool rather than one sentence -- so the failure is logged instead of
+    narrowed, which is what keeps a defect here discoverable rather than
+    concealed.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass  # no loop: the stdio server, the one build whose text reaches a model
+    else:
+        return False
+    try:
+        return bool(KiroCrewConfig.load().monitoring.prefer_structured_arming)
+    except Exception:
+        logger.debug("monitoring.prefer_structured_arming unreadable; using off", exc_info=True)
+        return False
+
 
 def schemas() -> list[dict[str, Any]]:
     """Descriptors for the control tools."""
+    prefer_structured = _prefers_structured_arming()
     return [
         {
             "name": "task_run",
@@ -310,6 +395,7 @@ def schemas() -> list[dict[str, Any]]:
                 "is woken only when a new revision needs action; unchanged, pending, retry, "
                 "and terminal probes use no agent turn. Available from dashboard, Slack, and "
                 "Discord sessions. One structured monitor per session."
+                + (_WATCH_STEER_STRUCTURED_DEFAULT if prefer_structured else "")
             ),
             "inputSchema": {
                 "type": "object",
@@ -381,10 +467,12 @@ def schemas() -> list[dict[str, Any]]:
                 "including first-class self-session patrol by conductor agents. For "
                 "monitoring targets, this is also the legacy fallback for targets, "
                 "objectives, or required evidence unsupported by monitor_watch. "
-                "Use monitor_watch for supported pull-request review readiness only when "
-                "the objective is fully determined by typed provider facts. Use the prompt "
-                "loop when comments or advisory review evidence must be interpreted. "
-                "Start a prompt loop on YOUR CURRENT session: every "
+                + (
+                    _ARMING_STEER_STRUCTURED_BY_DEFAULT
+                    if prefer_structured
+                    else _ARMING_STEER_STRUCTURED_ON_CONDITION
+                )
+                + "Start a prompt loop on YOUR CURRENT session: every "
                 "interval_secs the given message is re-injected into this same "
                 "session as your next turn — same context, same tools, same "
                 "conversation. The countdown is deadline-preserving: user "

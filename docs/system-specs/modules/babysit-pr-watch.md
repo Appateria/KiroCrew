@@ -9,6 +9,14 @@ budgets, and wakes the owning session only for a new actionable fingerprint.
 Provider-fact-only GitHub review readiness therefore spends no agent turn while
 the pull request is unchanged.
 
+How strongly that preference reads is an installation's choice:
+`monitoring.prefer_structured_arming` (default off) decides whether the tool
+descriptions offer the structured path only once the objective is judged fully
+typed-decidable, or name it the default for a supported pull request with the
+prompt loop as the exception. It refuses neither tool, and in both positions
+evidence the typed provider cannot observe stays on the prompt loop. See
+`monitor-architecture.md` for the two costs of defaulting to the structured path.
+
 `monitor_start` creates a finite same-session AutoNudge loop for objectives or
 evidence the structured provider cannot decide, including generic comments and
 advisory review text. Its stateless directive is validated by

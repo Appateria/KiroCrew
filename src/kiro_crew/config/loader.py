@@ -228,6 +228,7 @@ from kiro_crew.config.sections import (  # noqa: F401
     MemoryConfig,
     MemoryStoreConfig,
     MessagingConfig,
+    MonitoringConfig,
     OrchestratorConfig,
     PublishConfig,
     ResolvedBindings,
@@ -3707,6 +3708,15 @@ class KiroCrewConfig:
         default_factory=HeartbeatConfig,
         metadata=_meta("Heartbeat", "Heartbeat background task queue delivery defaults."),
     )
+    monitoring: MonitoringConfig = field(
+        default_factory=MonitoringConfig,
+        metadata=_meta(
+            "Monitoring",
+            "How a session's choice between the two monitoring paths is framed. "
+            "Neither path is gated by this section; both are armable with it at "
+            "its default.",
+        ),
+    )
     watchdog: WatchdogConfig = field(
         default_factory=WatchdogConfig,
         metadata=_meta("Watchdog", "ACP per-session watchdog / liveness-oracle windows."),
@@ -4346,6 +4356,19 @@ class KiroCrewConfig:
         )
         if heartbeat_default_deliver not in ("slack", "dashboard"):
             heartbeat_default_deliver = "slack"
+        # A stored document written before this key existed has no "monitoring"
+        # object at all, and that is the case that must keep working: the miss
+        # resolves to the dataclass default, which is the off position. So an
+        # already-installed gateway needs nothing written to be correct here --
+        # only a gateway that wants the key ON writes it, and Settings does
+        # that. (The hazard this avoids belongs to a SHIPPED DEFAULT that
+        # CHANGES: config.json materializes every key, so the stored value
+        # outranks the new default forever. Adding a key has no stored value to
+        # outrank it.)
+        monitoring_data = _coerced_section(data, "monitoring", _degraded)
+        monitoring_prefer_structured_arming = _safe_bool(
+            monitoring_data.get("prefer_structured_arming"), False
+        )
         tunnel_data = _coerced_section(data, "tunnel", _degraded)
         skills_data = _coerced_section(data, "skills", _degraded)
         session_summary_data = _coerced_section(data, "session_summary", _degraded)
@@ -4583,6 +4606,9 @@ class KiroCrewConfig:
                 connect_timeout_raw, instances_data, mint_timeout_raw
             ),
             heartbeat=HeartbeatConfig(default_deliver=heartbeat_default_deliver),
+            monitoring=MonitoringConfig(
+                prefer_structured_arming=monitoring_prefer_structured_arming
+            ),
             skills=_build_skills_config(skills_data),
             session_summary=_build_session_summary_config(session_summary_data),
             slack_channels={
@@ -4833,6 +4859,7 @@ class KiroCrewConfig:
             "cron_history": asdict(self.cron_history),
             "knowledge": asdict(self.knowledge),
             "heartbeat": asdict(self.heartbeat),
+            "monitoring": asdict(self.monitoring),
             "skills": asdict(self.skills),
             "session_summary": asdict(self.session_summary),
             "telemetry": asdict(self.telemetry),

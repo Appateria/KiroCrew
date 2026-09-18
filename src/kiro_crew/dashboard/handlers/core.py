@@ -1919,6 +1919,12 @@ _EDITABLE_CONFIG: dict[str, dict] = {
     # opt-in. The cadence/cap fields (min_user_turns, max_intents, …) stay
     # config-file-only — they are power-user knobs, not first-run choices.
     "session_summary.enabled": {"type": "bool"},
+    # Which monitoring path a session arms by default. Safe on this generic
+    # route for the reason ``computer_use.enabled`` is NOT: this key grants no
+    # capability. Both monitoring paths are armable with it off, so flipping it
+    # cannot open an unattended path -- it only changes which of the two the
+    # monitor tool descriptions name as the default.
+    "monitoring.prefer_structured_arming": {"type": "bool"},
     "auto_update": {"type": "bool"},
     "dashboard.mcp_probe_timeout_secs": {
         "type": "int",

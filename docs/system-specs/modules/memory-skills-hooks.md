@@ -3720,7 +3720,9 @@ Its explicit trigger vocabulary covers babysit/watch/monitor phrasing for pull
 requests, so ordinary requests reach the recipe without placing the whole body in
 every prompt. The base prompt points long-lived pull-request readiness requests to
 this skill and prefers the structured path whenever typed provider facts fully
-determine the objective.
+determine the objective; `monitoring.prefer_structured_arming` decides whether the
+tool descriptions state that as a condition to satisfy or as the default for a
+supported pull request.
 For a supported GitHub, GitLab, Azure DevOps, or Bitbucket Cloud pull request
 with the `review_ready` objective it maps the canonical URL to one exact bounded
 `monitor_watch` call and makes retained inspection state authoritative; its
