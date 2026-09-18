@@ -1276,6 +1276,167 @@ def _opencode_uniform_permission(raw: object) -> object:
     return None
 
 
+#: How much of a refused read-back child's stderr is examined at all.
+#: A harness is free to write a screenful of banner, or a hundred megabytes, and
+#: this only ever needs the tail, where a launcher puts its verdict. Bounding the
+#: scan bounds the matching work; nothing outside the window is read.
+_READBACK_STDERR_SCAN_CHARS = 3200
+
+#: How many recognised fault shapes one refusal reports, most specific first.
+#: A shebang fault spells two at once (``bad interpreter: No such file or
+#: directory``) and both halves are worth having; past that a refusal is being
+#: padded rather than explained.
+_READBACK_FAULT_MAX_SHAPES = 2
+
+#: The CLOSED vocabulary of exec-failure shapes a refused read-back can report.
+#:
+#: Each entry pairs a pattern matched against the child's stderr with the phrase
+#: THIS MODULE publishes when it matches, so published text is always a literal
+#: written here and never a byte the child wrote. That is the point rather than a
+#: side effect. The child is a foreign harness binary and its stderr can hold
+#: whatever the operator's environment put in front of it, a credential included;
+#: any scheme that ECHOES those bytes has to prove no credential survives, which
+#: means proving a negative about arbitrary bytes against redactor patterns that
+#: need contiguity and label anchors. One inserted byte -- a line wrap, an SGR
+#: colour code -- breaks the anchor while leaving every character of the secret
+#: sitting in the text. With an SGR colour code inside a ``glpat-`` token body, 530
+#: of 700 splices leave the whole token readable that way: rejoining the run
+#: destroys the ``-`` the pattern anchors on, and not rejoining leaves the ``[31m``
+#: residue inside it. Reporting a MATCH removes the question instead of answering
+#: it -- there is no path from a child byte to published text, so there is nothing
+#: left to prove about the bytes.
+#:
+#: Covers what BOTH read-backs hit, which is why it reaches past exec failures: the
+#: pi read-back's launcher refuses an exec, while the opencode read-back parses a
+#: config document and can reject the flags it was handed. A shape neither of them
+#: produces is not worth carrying.
+#:
+#: Ordered most specific first, because the shapes overlap: a shebang fault reads
+#: ``bad interpreter: No such file or directory``, where the interpreter is the
+#: cause and the missing file only its symptom.
+#:
+#: What this deliberately drops is the DETAIL inside a recognised message -- which
+#: line of the config failed to parse, which path the OS refused. A capture would
+#: put child bytes back in the output and reopen the whole question for the sake of
+#: a number the harness repeats the moment the operator runs it themselves.
+#:
+#: Case-insensitive, and matched as substrings rather than whole lines, because the
+#: launcher's wording differs by platform -- ``/bin/sh``, ``dyld``, ``cmd.exe`` and
+#: Node each frame these differently -- while the fault underneath does not.
+_READBACK_FAULT_SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"bad interpreter", re.IGNORECASE),
+        "its shebang interpreter could not be run",
+    ),
+    (
+        re.compile(
+            r"bad CPU type|Exec format error|ENOEXEC|cannot execute binary file",
+            re.IGNORECASE,
+        ),
+        "it is built for a different CPU or executable format",
+    ),
+    (
+        re.compile(r"code ?signature|Killed: ?9", re.IGNORECASE),
+        "the OS killed it over its code signature",
+    ),
+    (
+        re.compile(r"Library not loaded|image not found|shared object file", re.IGNORECASE),
+        "a shared library it needs is missing",
+    ),
+    (
+        re.compile(r"unknown (?:flag|option|argument)|unrecognized (?:option|argument)", re.I),
+        "the gateway passed it a flag this harness version does not accept",
+    ),
+    (
+        re.compile(
+            r"cannot parse|parse error|syntax ?error|unexpected token|unexpected end of"
+            r"|invalid JSON|JSONDecodeError|YAMLException",
+            re.IGNORECASE,
+        ),
+        "its configuration could not be parsed",
+    ),
+    (
+        re.compile(r"Operation not permitted|EPERM", re.IGNORECASE),
+        "the OS denied the operation, as a sandbox, quarantine or privacy policy does",
+    ),
+    (
+        re.compile(r"Permission denied|EACCES", re.IGNORECASE),
+        "the OS refused to execute it",
+    ),
+    (
+        re.compile(r"Text file busy", re.IGNORECASE),
+        "the file was still being written",
+    ),
+    (
+        re.compile(r"Is a directory", re.IGNORECASE),
+        "the path is a directory, not a program",
+    ),
+    (
+        re.compile(r"Too many levels of symbolic links", re.IGNORECASE),
+        "its path loops through symlinks",
+    ),
+    (
+        re.compile(r"No such file or directory|ENOENT|not found", re.IGNORECASE),
+        "the path does not exist",
+    ),
+)
+
+
+def _readback_stderr_diagnosis(stderr: object) -> str:
+    """What a refused read-back child's stderr says went wrong, in this module's words.
+
+    A gate read-back that fails reports its child's exit code, and that code alone
+    names a verdict without a cause: on the pi read-back the launcher is ``/bin/sh``
+    exec'ing the resolved harness binary, so ``exit 126`` is the shell refusing the
+    exec, and an exec the OS denied (``Permission denied``), a shebang it cannot
+    resolve (``bad interpreter``) and a binary built for another architecture
+    (``Bad CPU type in executable``) are three different faults with three different
+    fixes. Only the child knows which one happened, so the refusal that reaches the
+    operator carries it.
+
+    What the refusal does NOT carry is the child's own bytes. The stderr is matched
+    against :data:`_READBACK_FAULT_SHAPES` and the phrase written there for the
+    matching shape is what gets published, so the output is drawn from a closed
+    vocabulary defined in this module. Nothing has to be proved about the child's
+    bytes because none of them are published -- see that constant for the measured
+    reason echoing the bytes cannot offer the same guarantee.
+
+    An unrecognised stderr answers ``""``, and the caller then reports the bare exit
+    code with no diagnosis. The caller still separates that from a SILENT child, so
+    "said something we do not recognise" and "said nothing at all" stay different
+    answers to the operator.
+
+    Non-strings and blank stderr answer ``""``.
+    """
+    if not isinstance(stderr, str) or not stderr:
+        return ""
+    window = stderr[-_READBACK_STDERR_SCAN_CHARS:]
+    matched: list[str] = []
+    for pattern, phrase in _READBACK_FAULT_SHAPES:
+        if pattern.search(window) and phrase not in matched:
+            matched.append(phrase)
+            if len(matched) == _READBACK_FAULT_MAX_SHAPES:
+                break
+    return "; ".join(matched)
+
+
+def _readback_detail_with_diagnosis(detail: str, stderr: object) -> str:
+    """*detail* plus what the child said about its own failure, when that is known.
+
+    Three outcomes, and the operator needs them apart. A recognised fault appends
+    the vocabulary phrase. Stderr holding something unrecognised says so without
+    quoting it, because "the harness explained itself and we could not read the
+    explanation" points at this vocabulary needing a shape, while a SILENT child
+    points at the harness. Nothing on stderr leaves *detail* alone.
+    """
+    diagnosis = _readback_stderr_diagnosis(stderr)
+    if diagnosis:
+        return f"{detail}: {diagnosis}"
+    if isinstance(stderr, str) and stderr.strip():
+        return f"{detail}, and its stderr holds no message this gateway recognises"
+    return detail
+
+
 def _scrub_observed(value: object) -> object:
     """Scrub a string that came out of the operator's own harness config.
 
@@ -5471,9 +5632,13 @@ class AcpClient:
                 _opencode_readback_remedy(),
             )
         if completed.returncode != 0:
+            # The child's own fault, same as the pi read-back below: an operator
+            # reading this refusal learns both that the harness failed and which
+            # recognised fault it hit.
+            detail = f"exit {completed.returncode}"
+            detail = _readback_detail_with_diagnosis(detail, completed.stderr)
             return (
-                "the resolved configuration could not be read back "
-                f"(exit {completed.returncode})",
+                f"the resolved configuration could not be read back ({detail})",
                 _opencode_readback_remedy(),
             )
         # The harness prints a banner before the document, so the object is found
@@ -5564,6 +5729,11 @@ class AcpClient:
         commands = _pi_commands_from_readback(completed.stdout)
         if commands is None:
             detail = f"exit {completed.returncode}" if completed.returncode != 0 else "no response"
+            # WHICH fault the child hit. The launcher is /bin/sh exec'ing the
+            # resolved harness binary, so its stderr is what separates an exec the
+            # OS refused from a shebang that cannot be resolved -- a distinction
+            # the exit code alone cannot carry.
+            detail = _readback_detail_with_diagnosis(detail, completed.stderr)
             return (
                 f"the harness's command registry could not be read back ({detail})",
                 _pi_readback_remedy(),
