@@ -259,11 +259,48 @@ def agents_spec_lock(agents_dir: Path) -> Iterator[None]:
     (not the spec's own fd) for the same reason update_config_locked uses one:
     atomic replace swaps the inode, so a lock on the spec fd would not
     serialize across the rename.
+
+    Both failure modes are REPORTED here before they propagate, because several
+    callers catch this as best-effort work at ``logger.debug``. Without a report
+    at a level an operator sees, a gateway that skipped its agent-spec install
+    reads in the log exactly like one that completed it. An unwritable lock path
+    (a read-only ``~/.kiro/agents`` mount) refuses at ``os.open``, before any lock
+    is attempted; ``platform_compat.file_lock`` bounds the acquire itself.
     """
     lock_path = agents_dir / ".kirocrew-agents.lock"
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        with platform_compat.file_lock(fd, exclusive=True, wait=True):
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as exc:
+        # Naming the path AND the errno is the point: "Read-only file system" on
+        # this specific path is what tells the operator to move KIRO_HOME, and it
+        # is not something retrying can recover.
+        logger.warning(
+            "cannot open the agent-spec lock %s (%s) — agent-spec writes cannot be "
+            "serialized, so this install is being skipped; point KIRO_HOME at a "
+            "writable directory if the filesystem is read-only",
+            lock_path,
+            exc.strerror or exc,
+        )
+        raise
+    try:
+        with contextlib.ExitStack() as stack:
+            # ``enter_context`` rather than a ``with`` around the yield, so this
+            # ``except`` covers the ACQUIRE ALONE. A caller-body OSError (an
+            # atomic spec write hitting ENOSPC, an unlink hitting EACCES) reaches
+            # the same handler if the yield sits inside it, and would then be
+            # logged as a lock problem -- sending an operator after a stuck holder
+            # while the real fault is the disk or the permission.
+            try:
+                stack.enter_context(platform_compat.file_lock(fd, exclusive=True, wait=True))
+            except OSError as exc:
+                # The bounded-acquire refusal. A stuck holder calls for a
+                # DIFFERENT operator action (find the process still holding it)
+                # than an unwritable path, so it must not be reported with the
+                # same remedy as above. BlockingIOError is a caller's own
+                # non-waiting choice, not a fault to report.
+                if not isinstance(exc, BlockingIOError):
+                    logger.warning("agent-spec lock %s: %s", lock_path, exc)
+                raise
             yield
     finally:
         os.close(fd)
