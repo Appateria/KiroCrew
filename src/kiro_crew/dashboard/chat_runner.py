@@ -11929,6 +11929,13 @@ async def _run_chat(
                 # site can tell a person's refusal from a host auto-decline.
                 _host_deny_cause = ""
                 _host_deny_reason = ""
+                # A turn cancelled mid-approval (slot deletion cancels the task)
+                # unwinds through the ``finally`` below with no cause set, so the
+                # decision would read as an anonymous rejection -- which the ledger
+                # scores as a person's answer. This flag lets that path attribute
+                # the decision to the host, the way the timeout and no-budget
+                # declines already do.
+                _host_cancelled = False
                 perm_meta = {
                     "request_id": str(event.request_id),
                     "tool_call_id": event.tool_call_id or "",
@@ -12130,6 +12137,37 @@ async def _run_chat(
                 # unattended deny-fast, and the double bound (ceiling and
                 # remaining budget) that `tool_approval_timeout_secs` applies —
                 # including its 0.0, which is what the no-budget branch reads.
+                # Recorded before the window computation below, and deliberately
+                # not at the future's registration further up. Everything between
+                # the two is cancellable -- the Slack mirror awaits a network post,
+                # and its `except Exception` cannot catch the CancelledError that
+                # slot deletion raises -- so an entry written up there could escape
+                # the try below entirely and leave a request that is never decided,
+                # in a file nothing rewrites. Written here the pair is bound by
+                # control flow: nothing between this call and that `try` awaits, so
+                # either both halves land or neither does. The trade is that a
+                # prompt cancelled during its Slack delivery goes unrecorded, which
+                # is a fact the log is missing rather than a pair it gets wrong. It
+                # is still before the decision on every surviving path, including
+                # the delivery failure that auto-decides above: that branch only
+                # resolves the future, and no decision is recorded until this try's
+                # `finally`.
+                #
+                # ABOVE the window computation on purpose, not just below it:
+                # `test_dashboard_approval_window.py` pins this branch's source
+                # shape by slicing a fixed-length window starting at that
+                # assignment, so anything inserted after it pushes the awaited
+                # call and both cards out of the window the test reads. For the
+                # same reason this comment does not quote the assignment itself:
+                # the test locates the window by searching for that text, and a
+                # second copy above it would move the window to the wrong place.
+                crew_log_emit.on_approval_requested(
+                    _ledger_sid,
+                    _ledger_turn_no,
+                    approval_id=str(event.request_id),
+                    tool=event.tool_name or "",
+                    reason=event.title or "",
+                )
                 _approval_window = min(
                     state.approval_timeout_for(slot), tool_approval_timeout_secs()
                 )
@@ -12204,6 +12242,14 @@ async def _run_chat(
                             _autonudge.notify_approval_stalled(slot.key)
                     except Exception:
                         logger.debug("autonudge.notify_approval_stalled failed", exc_info=True)
+                except asyncio.CancelledError:
+                    # The task itself was cancelled (slot deletion, shutdown) while
+                    # the prompt was still open. The decision is host-driven, not a
+                    # person's; flag it so the ``finally`` attributes it to the host
+                    # rather than emitting an anonymous rejection, then re-raise so
+                    # the cancellation is never swallowed.
+                    _host_cancelled = True
+                    raise
                 finally:
                     if _approval_card is not None:
                         try:
@@ -12211,6 +12257,63 @@ async def _run_chat(
                         except Exception:
                             logger.debug("Failed to render approval card", exc_info=True)
                     slot._approval_futures.pop(str(event.request_id), None)
+                    # The decision is final here and nowhere earlier: every path
+                    # out of the await above converges on this ``finally`` -- the
+                    # human's answer, the window expiring, the no-budget decline,
+                    # a failed Slack delivery, and a cancelled turn. Recording it
+                    # at the one convergence point is what keeps a single request
+                    # from being closed twice under two seqs.
+                    #
+                    # ``by`` is written only for a decision the HOST made, which
+                    # is the one attribution this site can prove:
+                    # ``_host_deny_cause`` is set exactly by the gateway's own
+                    # auto-declines, ``_host_cancelled`` marks the task being
+                    # cancelled out from under an open prompt, and
+                    # ``_approval_stopped`` carries the ids a STOP rejected. A
+                    # decision that arrived through the future by none of those
+                    # routes came from a person at the dashboard or in Slack and
+                    # this site cannot tell which, so it names nobody rather than
+                    # guessing "user".
+                    #
+                    # A stop resolves the future with an ordinary "rejected" and
+                    # raises nothing, so it is invisible to both flags; the id is
+                    # recorded where the stop resolves the future instead. Read
+                    # ONCE and discarded here, so a later human rejection on this
+                    # slot cannot inherit the host attribution. No ``cause`` is
+                    # written for it: the cause vocabulary is the user-facing
+                    # denial-message set whose lookup falls back to the policy
+                    # text, so borrowing a name from it would put a sentence about
+                    # policy in front of someone who simply pressed Stop.
+                    _approval_id = str(event.request_id)
+                    _host_stopped = _approval_id in slot._approval_stopped
+                    slot._approval_stopped.discard(_approval_id)
+                    #
+                    # ``decision`` is the coarse ledger enum, not the resolving
+                    # surface's wording: the future can carry ``approved_trust_reads``
+                    # (a scoped-trust approval), which the schema does not list, so
+                    # it folds to ``approved`` here -- the same reading the UI-mark
+                    # below takes. Emitting an unlisted value is schema-refused and
+                    # drops the closer entirely. ``rejected_once`` IS in the enum,
+                    # so it is carried through as itself: the UI-mark below keeps
+                    # that outcome distinct too, and folding it into ``rejected``
+                    # would discard a distinction both the schema and this site's
+                    # own paths hold.
+                    if outcome in ("approved", "approved_trust_reads"):
+                        _crew_log_decision = "approved"
+                    elif outcome == "rejected_once":
+                        _crew_log_decision = "rejected_once"
+                    else:
+                        _crew_log_decision = "rejected"
+                    crew_log_emit.on_approval_decided(
+                        _ledger_sid,
+                        _ledger_turn_no,
+                        approval_id=_approval_id,
+                        decision=_crew_log_decision,
+                        by=(
+                            "host" if (_host_deny_cause or _host_cancelled or _host_stopped) else ""
+                        ),
+                        cause=_host_deny_cause,
+                    )
                     # Backstop: the future is now gone, so the permission
                     # message MUST NOT be left reading pending — the UI would
                     # keep rendering an approval bar whose every button answers
@@ -12724,6 +12827,15 @@ async def _run_chat(
                     state.broadcast_ws(
                         "todo_update",
                         {"slot": slot.key, "todo": slot.todo_payload()},
+                    )
+                    # Gated on set_todo's own change test, which is what keeps a
+                    # turn that echoes an identical snapshot on several tool
+                    # results from writing the same list repeatedly. Inside the
+                    # gate the entry is a real change to the agent's plan.
+                    crew_log_emit.on_plan_updated(
+                        _ledger_sid,
+                        _ledger_turn_no,
+                        items=(event.todo or {}).get("tasks"),
                     )
             elif event.kind == EVENT_SUBAGENT_LIST:
                 # kiro-cli per-subagent state (native use_subagent crews).

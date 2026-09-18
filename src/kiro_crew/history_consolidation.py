@@ -1105,9 +1105,9 @@ class HistoryConsolidator:
 
             try:
                 result = (
-                    await self._call_llm(prompt, memory_store=store_name)
+                    await self._call_llm(prompt, memory_store=store_name, session_key=key)
                     if private_memory
-                    else await self._call_llm(prompt)
+                    else await self._call_llm(prompt, session_key=key)
                 )
             except _ConsolidationNotDispatched as exc:
                 # Nothing was sent, so nothing was billed. Charging this to the
@@ -2326,7 +2326,9 @@ class HistoryConsolidator:
                     metadata={"name": name, "reason": "update_failed"},
                 )
 
-    async def _call_llm(self, prompt: str, *, memory_store: str = "") -> dict | None:
+    async def _call_llm(
+        self, prompt: str, *, memory_store: str = "", session_key: str = ""
+    ) -> dict | None:
         """Call LLM for consolidation via the persistent background session.
 
         Uses the shared background kiro-cli process (no spawn/teardown cost).
@@ -2364,6 +2366,13 @@ class HistoryConsolidator:
                         self._sessions,
                         task="consolidation",
                         agent="kirocrew-lite",
+                        # This turn is spent on ONE session's transcript, so its
+                        # cost belongs in that session's log even though the user
+                        # never asked for it. Callers that pass no key -- skill
+                        # detection, the dedupe and merge judges -- are not charged
+                        # to a single session and record nothing.
+                        ledger_kind="memory_consolidation",
+                        crew_log_session_key=session_key,
                         **({"memory_store": memory_store} if memory_store else {}),
                     )
                 )

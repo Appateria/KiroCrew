@@ -41,16 +41,16 @@ its **Since** line. A type this kind owns with no emitter anywhere is under
 | [`step/completed`](#stepcompleted) | Closes one model call. | live | `gateway` | closer |
 | [`tool/called`](#toolcalled) | A tool call, arguments digested. | live | `acp` | opener of `tool/completed` |
 | [`tool/completed`](#toolcompleted) | A tool call's terminal frame. | live | `acp`, `gateway` | closer, by `call_id` |
-| [`approval/requested`](#approvalrequested) | A tool call is waiting on a human. | #11185 | `gateway` | opener of `approval/decided` |
-| [`approval/decided`](#approvaldecided) | How an approval resolved. | #11185 | `gateway` | closer, by `approval_id` |
+| [`approval/requested`](#approvalrequested) | A tool call is waiting on a human. | live | `gateway` | opener of `approval/decided` |
+| [`approval/decided`](#approvaldecided) | How an approval resolved. | live | `gateway` | closer, by `approval_id` |
 | [`model/selected`](#modelselected) | A model swap, and why. | live | `gateway` | — |
 | [`compaction/applied`](#compactionapplied) | A compaction, as context-usage percentages. | live | `gateway` | — |
-| [`plan/updated`](#planupdated) | The session's task list, as just restated. | #11185 | `acp` | — |
-| [`background/completed`](#backgroundcompleted) | A model call made on the session's behalf. | #11185 | `gateway` | — |
-| [`subagent/spawned`](#subagentspawned) | A child this session dispatched. | #11185 | `gateway` | opener |
-| [`subagent/steered`](#subagentsteered) | A correction sent into a running child. | #11185 | `gateway` | — |
-| [`subagent/completed`](#subagentcompleted) | A child finished its work. | #11185 | `gateway` | closer, by `agent_id` |
-| [`subagent/failed`](#subagentfailed) | A child did not finish its work. | #11185 | `gateway` | closer, by `agent_id` |
+| [`plan/updated`](#planupdated) | The session's task list, as just restated. | live | `acp` | — |
+| [`background/completed`](#backgroundcompleted) | A model call made on the session's behalf. | live | `gateway` | — |
+| [`subagent/spawned`](#subagentspawned) | A child this session dispatched. | live | `gateway` | opener |
+| [`subagent/steered`](#subagentsteered) | A correction sent into a running child. | live | `gateway` | — |
+| [`subagent/completed`](#subagentcompleted) | A child finished its work. | live | `gateway` | closer, by `agent_id` |
+| [`subagent/failed`](#subagentfailed) | A child did not finish its work. | live | `gateway` | closer, by `agent_id` |
 
 ## Session and turn
 
@@ -615,7 +615,7 @@ decision, so a request can never be lost while its decision is written.
 **Reader hint** — An unmatched request means the process died while a human was
 still deciding.
 
-**Since** — type #10091; emitter #11185.
+**Since** — type #10091; written by #11185.
 
 ### `approval/decided`
 
@@ -647,7 +647,7 @@ not read it as an unattributed decision.
 **Reader hint** — To count what a person actually approved, filter to entries with
 no `by`.
 
-**Since** — type #10091; emitter #11185.
+**Since** — type #10091; written by #11185.
 
 ## Model, compaction and plan
 
@@ -737,7 +737,7 @@ greater than `len(items)` means what is written is a prefix.
 **Reader hint** — Diff consecutive entries to see progress. Treat an empty `items`
 as "plan cleared", not as "no data".
 
-**Since** — type #10091; emitter #11185.
+**Since** — type #10091; written by #11185.
 
 ## Background work and children
 
@@ -772,7 +772,7 @@ missing dimension means zero, not unknown.
 `turn/completed`; it is real spend that belongs to no turn. Treat `kind` as an open
 set and keep an "other" bucket.
 
-**Since** — type #10091; emitter #11185.
+**Since** — type #10091; written by #11185.
 
 ### `subagent/spawned`
 
@@ -803,7 +803,7 @@ citation would name a file that does not exist.
 **Reader hint** — A missing `turn` is normal and does not mean the entry is
 damaged. Group children by `agent_id`, not by turn.
 
-**Since** — type #10091; emitter #11185.
+**Since** — type #10091; written by #11185.
 
 ### `subagent/steered`
 
@@ -829,7 +829,7 @@ none of its own.
 
 **Reader hint** — Several of these may sit between one spawn and its close.
 
-**Since** — type #10091; emitter #11185.
+**Since** — type #10091; written by #11185.
 
 ### `subagent/completed`
 
@@ -856,7 +856,7 @@ measures neither, so a child's cost is not recoverable from the parent's log.
 **Reader hint** — Do not attribute child cost from this entry. There is none to
 attribute.
 
-**Since** — type #10091; emitter #11185.
+**Since** — type #10091; written by #11185.
 
 ### `subagent/failed`
 
@@ -888,7 +888,7 @@ separates them.
 **Reader hint** — A spawn with no close at all means the parent died while the
 child was running and no liveness predicate was available.
 
-**Since** — type #10091; emitter #11185.
+**Since** — type #10091; written by #11185.
 
 ## Removed types
 

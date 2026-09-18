@@ -57,6 +57,14 @@ unset here -- see "Reconnect is not resume" below for what it is for.
 | `step/started` | the stream opening, and each tool-group-to-text transition | turn, step |
 | `step/completed` | the next transition, and `EVENT_COMPLETE` | turn, step, ms |
 | `message/queued` | `chat_delivery.queue_for_next_turn` | source, bytes, queue id -- no turn |
+| `approval/requested` | `_run_chat`, one statement before the try whose `finally` records the decision | turn, request id, tool name and the redacted title the human is shown, each omitted when the frame named neither |
+| `approval/decided` | the same prompt's `finally`, where every exit converges | turn, request id, decision, `by: host` and the host's `cause` for an auto-decline |
+| `plan/updated` | `EVENT_TODO_UPDATE`, inside `slot.set_todo`'s own change gate | turn, the whole task list as `{id, text, state}` |
+| `background/completed` | `run_bg_oneliner` and `background_turn`, at the point they record usage, against an owner pinned BEFORE the call | kind, served model, provider, the billed token dimensions, credits, ms -- no turn |
+| `subagent/spawned` | `_log_spawned`, the one site every started run passes and no rejection does | the turn that ASKED, read from the pin taken at acceptance; child id, agent, model, the three context-scope flags |
+| `subagent/steered` | `steer_run` after the provider accepted, `follow_up_run` after the queue accepted | child id, `interrupt` or `follow_up` |
+| `subagent/completed` | the exclusive terminal report, for outcome `completed` | child id, elapsed ms |
+| `subagent/failed` | the same report, for outcome `failed` or `stopped` | child id, reason, which outcome it was, elapsed ms |
 | `write/dropped` | writer recovery, before that session's next ordinary append | dropped count and bytes |
 
 `tool/called` and `tool/completed` gained payload accounting: `args_hash` and
@@ -470,16 +478,18 @@ injected crew log context -- have no opening marker for `split_blocks` to classi
 their characters land in its unclassified bucket, which this entry reports as a
 single `other` source. Three zeroed sources would claim a measurement nobody took.
 
-## Deferred to the next change, and why they are one problem
+## The resolver: which unit is this slot's work landing in
 
-Two families the design specifies are not emitted here, and they fail for the same
-reason `approval/*` already does: **this log is keyed by the ACP session id, and their
-sites hold only a slot key or a transcript key.**
+Several sites that produce facts about a session do not hold an ACP client. `kiro_crew.crew_log.resolve`
+is the one place that gap is closed, and its contract is narrower than it looks.
 
-| Family | Why not yet |
-|---|---|
-| `background/completed` | Every background model call runs on the shared `_bg` session. The session the work is FOR is known by slot or transcript key, so there is nothing to key the entry by. |
-| `subagent/*` | Spawn holds `parent_session_key`, a slot key; the child's own ACP session id is assigned later, so a spawn-time pointer into the child's log cannot exist yet; and subagent runs have no token or credit accounting to record. |
+A slot owns exactly one ACP session id **at a time**, not for its whole life. A plain resume
+replays the persisted id into `session/load`, but a reset, an agent/model/effort switch, a
+compaction that recycles the session, and a provider swap all tear the session down and the
+successor cold-starts a new id. So the resolver answers "which unit is this session's work landing in
+*now*", valid at the moment it is asked. That is exactly what an emit site needs, because every
+entry records what was observed at that site when it was observed. It is NOT enough to reconstruct
+which unit some earlier fact went to, and nothing uses it that way.
 
 The one lineage edge this log DOES carry is the `session_create` one, and it is
 written from the side that escapes the problem above. A created session's
@@ -505,11 +515,212 @@ over each session crew log's `session/opened`, keyed by SLOT (the creator's `sid
 changes when its slot recycles, so it is a citation of the unit that was live,
 not the tree key).
 
-So the next change is not more emitters. It is one slot-key-to-ACP-session-id
-resolver, which unblocks both of these and the approvals alongside them, where
-inventing it per family would build the same plumbing three times.
+The resolver has one level, and it is a synchronous registry read: `unit_for_session_key(sessions, key)` asks the
+session registry for that key's provider and reads the id off it. Every production caller holds a
+session KEY rather than a slot -- the subagent manager is handed `info.parent_session_key`, and the
+background helpers are handed the key the site was called with -- so a key is the only input the
+resolver needs.
 
-### Removed types
+An earlier draft had a second, slot-keyed level that read the slot's live `_acp_client` first and
+fell back to the registry. It is not shipped, and the reason is worth recording: the registry's
+provider IS the object the runner reads its own `_ledger_sid` from, so it answers the same id during
+a turn as between turns. The extra level asked no question the one level cannot, and no caller ever
+reached for it.
+
+The persisted `SessionMap` is deliberately not consulted. Its `get` repairs or removes an entry it
+finds stale, which makes describing a session mutate it, and it answers only for ids that reached
+disk -- missing exactly the live session being asked about. There is no reverse function either:
+`find_key_by_sid` is a scan over persisted ids and cannot answer for a live one, so it is not the
+cheap lookup a reverse direction would have to be.
+
+`unit_for_session_key` allows one retry, under a premise that makes it a lookup rather than a
+guess: a key containing no colon cannot already be namespaced (`dashboard:`, `slack:`, `subagent:`
+all carry one), so a bare slot name is retried in its dashboard form. A key that already carries a
+namespace is never rewritten -- that is how `slack:<ts>` would become the nonexistent
+`dashboard:slack:<ts>`.
+
+Unknown is an answer. Every function returns the empty string when the key has no live ACP session,
+and the emitter's own no-op guard turns that into "do not write". A ledger that omits a fact is
+behind; one that files a fact under the wrong session is wrong, and nothing downstream can tell.
+
+### Approvals were never a resolver problem
+
+The previous revision of this document said approvals had no emitter because "the approval
+coordinator carries a slot key, not a session id". That is true of `ApprovalCoordinator` and false
+of the site that actually raises the prompt: the permission-request arm lives inside `_run_chat`,
+where `_ledger_sid` and `_ledger_turn_no` have been in scope since the turn began. No resolver is
+involved.
+
+The request is recorded ONE STATEMENT before the `try` whose `finally` records the decision, and
+deliberately not at the future's registration further up. Everything between those two points is
+cancellable: the Slack mirror awaits a network post, and its `except Exception` cannot catch the
+CancelledError that slot deletion raises. A request written at registration could therefore escape
+that `try` entirely and stand forever undecided, in a file nothing rewrites. Written where it is, the
+pair is bound by control flow -- either both halves land or neither does. The cost is that a prompt
+cancelled during its Slack delivery goes unrecorded, which is a fact the log is missing rather than a
+pair it gets wrong.
+
+It is still recorded before the decision on every surviving path, including the delivery failure that
+auto-decides the approval: that branch only resolves the future, and nothing writes a decision until
+the `finally`. And that `finally` is the single point every exit converges on -- the human's answer,
+the window expiring, the no-budget decline, a failed Slack delivery, and a cancelled wait. One
+request, one decision, whichever path won.
+
+`by` is written only for a decision the host made, because that is the one attribution the site can
+prove: `_host_deny_cause` is set exactly by the gateway's own auto-declines. A decision that arrived
+through the future was made by a person at the dashboard or in Slack and the runner cannot see
+which, so it names nobody rather than asserting `user`. The host's reason code rides in its own
+`cause` field instead of replacing `decision`, so a reader still learns what was decided without
+knowing the reason vocabulary.
+
+### A child is pinned when accepted and written when it starts
+
+Two different moments, and conflating them produces two different defects.
+
+The **asking turn** is knowable only at acceptance: a spawn arrives as a tool call inside the
+parent's turn, while the child's own entries are produced long afterwards, usually while the parent
+is on a different turn. So `(session id, turn)` is pinned there and every later entry about that
+child reads it back.
+
+The **entry** may not be written there, because acceptance is not a start. Registration is followed
+by the spawn approval gate, and a decline returns through the finalize claim and the announce
+without ever reaching `_run` -- so an entry written at acceptance would be an opener nothing closes,
+for a run that never existed. `_log_spawned` is the codebase's own "this run is really starting"
+funnel: every auto-approve branch reaches it, and the approval branch reaches it only after a human
+said yes. That is where `subagent/spawned` is written, from the pin.
+
+The pin therefore carries an `opened` flag, which makes the ordering rule structural rather than a
+convention. Until the run starts the pin is invisible: a steer reads nothing, and a terminal report
+closes nothing while still dropping the pin. A declined spawn leaves no trace at all rather than an
+outcome with no cause.
+
+Pinning is idempotent, and that is load-bearing twice over. A member held behind the stagger or
+concurrency gate is accepted, returned as queued, and re-enters the spawn path under the same id
+when the queue drains -- one dispatch, two passes -- and a second `_log_spawned` cannot produce a
+second opener.
+
+One caller cannot use the live reading at all. A queued **follow-up** is dispatched by its watcher
+after the run it continues has finished, so no turn is asking at that moment and the parent may be
+on an unrelated one. Its asking ordinal is pinned where the follow-up was REQUESTED -- `spawn_steer`
+is itself a tool call inside the asking turn -- and carried to the dispatch on the run record, the
+same way `_preassigned_id` and the inherited context groups already ride that call. Without it the
+continuation would be filed under a turn that did not ask for it.
+
+Several follow-ups queued across several turns are delivered as ONE continuation, so that entry can
+name only one turn, and the pin it carries is the most recent ask's. That is a choice rather than a
+measurement, and it is the honest one available: the dispatch is a single child, the last ask is the
+one it was waiting on, and each individual ask is separately recorded as its own
+`subagent/steered` at the turn that made it.
+
+Some dispatches have no asking turn at all -- a slash command, a cron, a hook -- and those record
+the child with `turn` ABSENT rather than zero. Turns are numbered from one, so a literal `0` would
+name a turn that never existed. The child is still recorded, because it is a real child of that
+session and dropping it to keep a field populated would be the worse trade.
+
+The map holding the pins is bounded rather than tied to turn liveness, because its entries
+deliberately outlive the turn that created them, and a pin is released by the child's own terminal
+entry. A pin still held while its neighbours have gone therefore belongs to a child that never
+reported one -- a run lost to a crash, a member cancelled before it started -- and those collect at
+the old end, which is what would make the cap reachable by accumulation across long uptime rather
+than only by that many children genuinely running at once. So the cap asks the liveness probe over
+a bounded window of the oldest pins and drops a finished child's pin in preference: the entries that
+pin could still carry are never coming, so dropping it costs nothing. The window is bounded because
+answering takes a call into the subagent side per pin, and the probe is asked with the module's lock
+released, since holding a non-reentrant lock across a foreign call is how a deadlock is built.
+
+Only when every candidate is still running does the oldest go, and then the drop is COUNTED in
+`lost_child_origins()` and named in the log once. That child's opener or outcome will be absent, and
+an absence a reader cannot tell apart from a child that never existed is the one loss this module
+refuses to allow silently. Nothing is WRITTEN for it: no declared type describes a lost pin, and
+adding one would be a shape change made to record a bug rather than a fact of the session. The
+residual is bounded and visible: it takes the cap's worth of children running at once, and it
+reports itself when it happens. Admission is NOT gated on the cap -- this is a default-off log, and
+a log that refuses a real spawn to protect its own bookkeeping has become the more expensive
+failure.
+
+A cap on the NUMBER of pins bounds memory only when each pin's own fields are bounded, and the
+session id a pin carries is authored by the provider. So a pin whose session id is longer than the
+declared maximum is refused at the point of retention and counted the same way, rather than stored
+or shortened: an identity that has been cut down names a different unit or none at all, so a
+truncated copy would file that child's entries against the wrong ledger. The maximum sits far above
+any id this codebase produces, so it rejects nothing legitimate and exists only so a broken or
+hostile provider cannot make the count cap meaningless.
+### `subagent/spawned` carries no `ref`, and that is not a deferral
+
+The schema describes a `ref` into the child's log, and a child that had a ledger would deserve one.
+No subagent code path opens one: the only site that creates a session ledger is the dashboard turn
+path, and a subagent run does not go through it. A `ref` written now would cite a file that does not
+exist, which a reader cannot distinguish from one that was deleted. It becomes writable, unchanged,
+the day subagent sessions get ledgers of their own.
+
+`subagent/completed` likewise carries no `tokens` and no `credits`, and the absence is the record.
+The schema has both fields; nothing in the subagent runtime measures either. A run's record carries
+elapsed time and peak resource use, and the child's spend is never reported back to the parent.
+Zeros there would present the absence of a measurement as a measurement of zero.
+
+### A stopped child is not a completion and not a failure
+
+The runtime's canonical outcome is three-way -- `completed`, `failed`, `stopped` -- and its own
+docstring warns that the legacy `error ? failed : completed` idiom misreports a user-stopped agent
+as completed. The schema offers two closers. So `completed` closes as a completion, and `failed` and
+`stopped` both close through `subagent/failed` carrying which one it was in an additive `outcome`
+field. That keeps the two distinguishable without renaming a frozen type and without leaving the
+`subagent/spawned` entry open forever.
+
+### Background spend is recorded where it is already being counted
+
+Both background entry points -- the one-liner and the shared-session context manager -- already
+snapshot the turn's `TurnUsage` and its wall clock in their teardown, behind the same
+`usage_has_billing` gate the usage store uses. The ledger entry is written from that exact point, so
+a background call appears in a session's log precisely when it appears in the account's bill and the
+two cannot disagree about whether it happened.
+
+This corrects the earlier claim that these calls could not be measured. What they lacked was not a
+measurement but an OWNER: both helpers knew what the call cost and neither knew which session it was
+for. Both now take a kind and an owning session key, and write nothing unless given both -- because
+a background call is shared infrastructure by default. Titling is charged to the session it titles;
+a tip, a folder icon or a cron label is charged to nobody, and picking a session for one of those
+would put someone else's cost in a user's log. Three kinds are emitted today: `title`, `summary`,
+`memory_consolidation`.
+
+`background/completed` names no turn. The call runs after a turn ends, on a separate session, and
+naming the turn that happened to be last would attribute the cost to work that did not cause it.
+
+The OWNER is resolved before the call, not in the teardown that writes the entry, and the reason is
+the resolver's own contract: it answers which unit a slot's work is landing in *now*. A slot can be
+reset, switched or compacted while a model call is in flight, and the successor cold-starts a new ACP
+session id -- so a teardown-time lookup would hand this call's spend to a session that never incurred
+it, silently, in a file nothing rewrites. Reading it up front pins the unit that was current when the
+work was ordered. This is the general rule for every future emit site too: the resolver answers a
+question about the present, so anything that outlives the moment it was asked must carry the answer
+rather than ask again.
+
+**What this misses, and why the alternative is worse.** A background call charged to a session whose
+ACP session is already GONE -- idle-expired, reset, or a consolidation scheduled long after the tab
+closed -- resolves to no unit, so its spend reaches the usage store and never reaches the log. The
+ledger FILE still exists on disk; what is missing is any live thing that names its id, and finding
+one would take a persisted key-to-id index this change deliberately does not add.
+
+Resolving later does not fix it and makes something worse. Later is strictly no more likely to find a
+live session, and in the one interleaving where it finds one that an earlier read would have missed --
+the owner starting a fresh session WHILE this call runs -- that session was created after the work was
+ordered, so the entry would name a unit that did not incur the cost. An omission a reader can see is
+the smaller failure than a confident misattribution it cannot.
+
+### The plan records two states because the stream carries two
+
+`plan/updated` is written inside `slot.set_todo`'s own change gate, which is what keeps a turn that
+echoes an identical snapshot on several tool results from writing the same list repeatedly.
+
+Each task arrives with a plain `completed` boolean and no in-progress state, as the slot's own
+snapshot code documents, so `state` is `done` or `open`. A three-state vocabulary would read better
+and would be invented here. An update is a WHOLE list, not a delta, so the entry is the list as of
+this update and a reader diffs consecutive entries. An event carrying no task list writes nothing --
+that is absent data, not a plan of zero tasks -- while an event carrying an empty list is a cleared
+plan and is recorded as one. The entry is `ignorable`: the agent overwrites its plan freely and
+nothing later in the file depends on any single update having been read.
+
+## Removed types, and why each is gone
 
 Nine types the design named are gone from the session vocabulary: `session/seeded`,
 `message/steered`, `tool/searched`, `tool/loaded`, `skill/searched`, `skill/loaded`,
@@ -526,6 +737,11 @@ Any of them may come back when a real source exists: while the format is pre-rel
 (`crew-log-core.md` section 5) that is an ordinary change, and after the freeze point it is
 an additive one, since re-adding a type is exactly the case the `ignorable` marker and the
 unknown-type refusal already handle.
+
+With the families this revision emits, nothing the vocabulary still declares is left
+waiting for a site: `approval/*`, `background/completed`, `subagent/*` and `plan/updated`
+were the four the previous revision grouped as one resolver-shaped problem, and they are
+written here.
 
 Every compaction reaches the crew log on exactly one of those two paths. A reading kiro-cli
 reset to unknown mid-turn defers its verdict to the next confirmed reading, and that
@@ -588,9 +804,11 @@ middleware has already stamped the token's app on the request -- so it names the
 itself. A site that holds the fact and stays silent does not record a missing detail; the
 fallback fills it in, and the log states a person typed a message no person touched.
 
-`approval/requested` and `approval/decided` are DEFERRED. The functions exist and are
-tested, but no site calls them and none can yet: `ApprovalCoordinator` carries a slot key,
-not a session id, so there is nothing to key an entry by. They land with that plumbing.
+`approval/requested` and `approval/decided` ARE emitted, and no plumbing was needed for
+them -- see "Approvals were never a resolver problem" above. `ApprovalCoordinator` does
+carry only a slot key, but it is not the site that raises the prompt: that arm lives inside
+`_run_chat`, where the session id and the turn ordinal have been in scope since the turn
+began.
 
 ## What is deliberately not recorded
 

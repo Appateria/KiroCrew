@@ -1515,6 +1515,150 @@ def test_a_closer_names_every_unmatched_call_in_first_seen_order():
     assert closers[0].data["name"] == "execute_bash"
 
 
+def test_an_unmatched_approval_is_closed_with_an_unknown_decision():
+    # An approval is the one moment the agent stops and asks permission. A crash
+    # between the request and the answer leaves a request nothing ever decided,
+    # and a reader cannot tell that from a human who is still thinking.
+    led = _session()
+    led.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="gateway")
+    led.append("approval/requested", {"turn": 1, "approval_id": "ap-1"}, src="gateway")
+    led.append("approval/requested", {"turn": 1, "approval_id": "ap-2"}, src="gateway")
+    led.append(
+        "approval/decided",
+        {"turn": 1, "approval_id": "ap-1", "decision": "approved"},
+        src="gateway",
+    )
+    body = list(Ledger.open(lg.KIND_SESSION, SESSION, repair=True).iter_from(1))
+    closers = [e for e in body if e.type == "approval/decided" and e.data["decision"] == "unknown"]
+    # Only the one still open. The answered request keeps its real decision.
+    assert [e.data["approval_id"] for e in closers] == ["ap-2"]
+    assert [
+        e.data["decision"]
+        for e in body
+        if e.type == "approval/decided" and e.data.get("approval_id") == "ap-1"
+    ] == ["approved"]
+    # Decided before the turn is closed: that is the only order a live writer
+    # could have produced.
+    assert body.index(closers[0]) < next(
+        i for i, e in enumerate(body) if e.type == "turn/completed"
+    )
+
+
+def _gone_unless(*live: str):
+    """A stand-in for the repairing process's live subagent registry.
+
+    The store never asks the file whether a child is finished -- an unmatched
+    opener cannot answer that -- so every child-closing test has to say which
+    children are still running, the way the real predicate reads the registry.
+    """
+    return lambda agent_id: agent_id not in live
+
+
+def test_a_child_that_outlived_its_completed_turn_is_still_closed():
+    # The ORDINARY dangling case, and the reason a child is matched across the
+    # whole file rather than inside the open turn: a subagent routinely reports
+    # long after the turn that asked for it ended, so scoping its closer to an
+    # open turn would close only the rare child that died inside its own turn.
+    led = _session()
+    led.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="gateway")
+    led.append("subagent/spawned", {"turn": 1, "agent_id": "sub-1"}, src="gateway")
+    led.append("turn/completed", {"turn": 1, "stop_reason": "end_turn"}, src="acp")
+    body = list(
+        Ledger.open(lg.KIND_SESSION, SESSION, repair=True, child_gone=_gone_unless()).iter_from(1)
+    )
+    closers = [e for e in body if e.type == "subagent/failed"]
+    assert [e.data["agent_id"] for e in closers] == ["sub-1"]
+    assert closers[0].data["outcome"] == "unknown"
+    # No `turn`: a child's outcome is not an event of any one turn.
+    assert "turn" not in closers[0].data
+
+
+def test_a_dangling_child_alone_closes_no_turn():
+    # The turn completed on its own. Appending a second `turn/completed` would
+    # close a turn that already closed itself.
+    led = _session()
+    led.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="gateway")
+    led.append("subagent/spawned", {"turn": 1, "agent_id": "sub-1"}, src="gateway")
+    led.append("turn/completed", {"turn": 1, "stop_reason": "end_turn"}, src="acp")
+    body = list(
+        Ledger.open(lg.KIND_SESSION, SESSION, repair=True, child_gone=_gone_unless()).iter_from(1)
+    )
+    assert [e.type for e in body if e.type == "turn/completed"] == ["turn/completed"]
+    assert body[-1].type == "subagent/failed"
+
+
+def test_a_child_whose_terminal_landed_is_not_closed_again():
+    # Both real terminals must balance the opener, or a resume would append a
+    # second outcome for a child that already reported one.
+    for terminal, payload in (
+        ("subagent/completed", {"agent_id": "sub-1", "ms": 12}),
+        ("subagent/failed", {"agent_id": "sub-1", "outcome": "stopped"}),
+    ):
+        unit = f"balanced-{terminal.replace('/', '-')}"
+        led = _session(unit)
+        led.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="gateway")
+        led.append("subagent/spawned", {"turn": 1, "agent_id": "sub-1"}, src="gateway")
+        led.append(terminal, payload, src="gateway")
+        led.append("turn/completed", {"turn": 1, "stop_reason": "end_turn"}, src="acp")
+        before = lg.ledger_path(lg.KIND_SESSION, unit).read_bytes()
+        Ledger.open(lg.KIND_SESSION, unit, repair=True, child_gone=_gone_unless())
+        assert (
+            lg.ledger_path(lg.KIND_SESSION, unit).read_bytes() == before
+        ), f"repair appended a second outcome over a child already closed by {terminal}"
+
+
+def test_a_child_the_registry_still_reports_running_is_left_alone():
+    # The corruption this predicate exists to prevent. An unmatched opener does
+    # NOT mean the child finished: a same-process teardown can leave one running,
+    # and it will file its own real terminal later. Closing it here would put two
+    # outcomes for one agent_id in a file nothing rewrites, so a child the
+    # registry still lists is skipped even though its opener is unbalanced.
+    led = _session()
+    led.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="gateway")
+    led.append("subagent/spawned", {"turn": 1, "agent_id": "sub-1"}, src="gateway")
+    led.append("turn/completed", {"turn": 1, "stop_reason": "end_turn"}, src="acp")
+    before = lg.ledger_path(lg.KIND_SESSION, SESSION).read_bytes()
+    Ledger.open(lg.KIND_SESSION, SESSION, repair=True, child_gone=_gone_unless("sub-1"))
+    assert lg.ledger_path(lg.KIND_SESSION, SESSION).read_bytes() == before
+
+
+def test_a_predicate_that_cannot_answer_closes_no_child():
+    # A registry lookup that raises must not decide the child is gone. The repair
+    # reads a failed answer as "still running" for the same reason it defaults to
+    # it: an opener left standing is a reader behind, a wrong closer is a file
+    # that cannot be corrected.
+    def _raises(agent_id: str) -> bool:
+        raise RuntimeError("registry unavailable")
+
+    led = _session()
+    led.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="gateway")
+    led.append("subagent/spawned", {"turn": 1, "agent_id": "sub-1"}, src="gateway")
+    led.append("turn/completed", {"turn": 1, "stop_reason": "end_turn"}, src="acp")
+    before = lg.ledger_path(lg.KIND_SESSION, SESSION).read_bytes()
+    Ledger.open(lg.KIND_SESSION, SESSION, repair=True, child_gone=_raises)
+    assert lg.ledger_path(lg.KIND_SESSION, SESSION).read_bytes() == before
+
+
+def test_a_same_process_resume_leaves_a_child_opener_alone():
+    # The default, and the asymmetry the predicate exists for. "The writer is gone"
+    # closes a turn-scoped opener, because the turn died with its writer. It says
+    # nothing about a CHILD, which outlives its asking turn by design -- so a
+    # writer torn down inside a live process can leave one still running and still
+    # able to file its own real terminal. Closing it here would put two outcomes
+    # for one agent_id in a file nothing rewrites, so a resume that cannot rule
+    # that out must leave the opener standing.
+    led = _session()
+    led.append("turn/started", {"turn": 1, "actor": "user", "depth": 0}, src="gateway")
+    led.append("subagent/spawned", {"turn": 1, "agent_id": "sub-1"}, src="gateway")
+    led.append("approval/requested", {"turn": 1, "approval_id": "ap-1"}, src="gateway")
+    body = list(Ledger.open(lg.KIND_SESSION, SESSION, repair=True).iter_from(1))
+    assert [e.type for e in body if e.type == "subagent/failed"] == []
+    # The turn-scoped opener IS still closed on the same repair: this narrows what
+    # a repair may conclude about a child, it does not switch the repair off.
+    assert [e.data["decision"] for e in body if e.type == "approval/decided"] == ["unknown"]
+    assert body[-1].type == "turn/completed"
+
+
 def test_closers_reuse_the_last_real_entrys_time_and_continue_seq():
     # A closer describes what happened when the writer STOPPED. Stamping it with
     # the clock at open time would put a gap of arbitrary length inside a turn

@@ -1873,6 +1873,145 @@ def test_a_reconnect_after_an_eviction_does_not_repair(monkeypatch):
     assert types[-1] == "tool/completed"
 
 
+def test_a_resume_closes_a_child_the_registry_no_longer_lists():
+    # The reachability the registration exists for. A crashed gateway's successor
+    # has an empty registry, so a child that never reported is gone and its opener
+    # is closed. Without a registered probe the store closes nothing, which is what
+    # the next test pins -- so this asserts the wiring, not just the store.
+    emit.set_child_liveness(lambda agent_id: False)
+    try:
+        _open_session()
+        emit.on_turn_started(SESSION, 1, "user")
+        emit.on_subagent_spawned(SESSION, 1, agent_id="sub-1")
+        assert emit.flush()
+        emit.reset_caches()
+        emit.on_session_opened(SESSION, agent="kirocrew", resumed=True)
+        assert emit.flush()
+        closers = [e for e in _body() if e["type"] == "subagent/failed"]
+        assert [e["data"]["agent_id"] for e in closers] == ["sub-1"]
+        assert closers[0]["data"]["outcome"] == "unknown"
+    finally:
+        emit.set_child_liveness(None)
+
+
+def test_a_resume_leaves_a_child_the_registry_still_lists_alone():
+    # The same-process case that made an earlier revision corrupt the file: idle
+    # teardown, reset, resume -- while the child is still running and will file its
+    # own terminal. The registry still lists it, so the repair must not invent one.
+    emit.set_child_liveness(lambda agent_id: agent_id == "sub-1")
+    try:
+        _open_session()
+        emit.on_turn_started(SESSION, 1, "user")
+        emit.on_subagent_spawned(SESSION, 1, agent_id="sub-1")
+        assert emit.flush()
+        emit.reset_caches()
+        emit.on_session_opened(SESSION, agent="kirocrew", resumed=True)
+        assert emit.flush()
+        assert [e for e in _body() if e["type"] == "subagent/failed"] == []
+    finally:
+        emit.set_child_liveness(None)
+
+
+def test_the_child_probe_reports_present_while_this_session_owes_an_entry():
+    # The window the registry alone cannot answer. A child's terminal closer goes
+    # through the writer and `_submit` returns before it lands, so the child leaves
+    # the running set while its own outcome is still owed: the registry says gone
+    # and the file shows an unmatched opener. Closing then puts a synthesised
+    # `unknown` ahead of the real outcome, and both stand in a file nothing
+    # rewrites. The debt is keyed by session, so another session's backlog must not
+    # hold this one's children open.
+    emit.set_child_liveness(lambda agent_id: False)
+    try:
+        gone = emit._child_gone_probe(SESSION)
+        assert gone is not None
+        assert gone("sub-1") is True
+        with emit._lock:
+            emit._pending[SESSION] = [emit._PendingJob(job=lambda: None, what="debt")]
+        try:
+            assert gone("sub-1") is False
+        finally:
+            with emit._lock:
+                emit._pending.pop(SESSION, None)
+        with emit._lock:
+            emit._pending["other-session"] = [emit._PendingJob(job=lambda: None, what="debt")]
+        try:
+            assert gone("sub-1") is True
+        finally:
+            with emit._lock:
+                emit._pending.pop("other-session", None)
+    finally:
+        emit.set_child_liveness(None)
+
+
+def test_the_pin_cap_drops_a_finished_child_before_a_running_one():
+    # A pin is released by its child's terminal entry, so pins for children that
+    # never reported one collect at the old end -- and they are what makes this cap
+    # reachable by accumulation rather than by that many children genuinely running.
+    # The finished one goes first, and no running child's attribution pays for it.
+    emit.set_child_liveness(lambda agent_id: agent_id != "gone-1")
+    try:
+        emit.remember_child_origin("gone-1", SESSION, 1)
+        for i in range(2, emit._MAX_CHILD_ORIGINS + 2):
+            emit.remember_child_origin(f"live-{i}", SESSION, i)
+        assert "gone-1" not in emit._child_origin, "the finished child's pin is the one dropped"
+        assert "live-2" in emit._child_origin, "the oldest RUNNING child keeps its pin"
+        assert emit.lost_child_origins() == 0, "so nothing live was spent"
+    finally:
+        emit.set_child_liveness(None)
+
+
+def test_a_cap_full_of_running_children_drops_the_oldest_and_counts_the_loss():
+    # The residual this policy leaves: with every pin belonging to a child that is
+    # still running there is nothing free to drop, so the oldest goes. That child's
+    # remaining entries will be absent, which is exactly why the drop is counted
+    # instead of left for a reader to fail to notice.
+    emit.set_child_liveness(lambda agent_id: True)
+    try:
+        for i in range(emit._MAX_CHILD_ORIGINS + 1):
+            emit.remember_child_origin(f"live-{i}", SESSION, i + 1)
+        assert emit.lost_child_origins() == 1
+        assert "live-0" not in emit._child_origin
+        assert "live-1" in emit._child_origin
+    finally:
+        emit.set_child_liveness(None)
+
+
+def test_the_cap_counts_what_it_drops_even_with_no_probe_registered():
+    # With nothing able to say whether a child finished, the cap cannot prefer a
+    # dead pin. That is a reason to drop the oldest, not a reason to do it silently.
+    for i in range(emit._MAX_CHILD_ORIGINS + 1):
+        emit.remember_child_origin(f"c-{i}", SESSION, i + 1)
+    assert emit.lost_child_origins() == 1
+    assert "c-0" not in emit._child_origin
+
+
+def test_an_over_long_session_id_is_refused_and_counted():
+    # The count cap bounds memory only if a pin's own fields are bounded, and the
+    # session id comes from the provider. It is refused rather than shortened,
+    # because an identity that has been cut down names a different unit -- and the
+    # refusal is counted, because that child's entries are absent either way.
+    emit.remember_child_origin("huge-1", "s" * (emit._MAX_SESSION_ID_CHARS + 1), 1)
+    assert "huge-1" not in emit._child_origin, "an unbounded id is not retained"
+    assert emit.lost_child_origins() == 1, "and the refusal is not silent"
+    # Exactly at the bound is still retained, so it rejects nothing legitimate.
+    emit.remember_child_origin("ok-1", "s" * emit._MAX_SESSION_ID_CHARS, 1)
+    assert "ok-1" in emit._child_origin
+    assert emit.lost_child_origins() == 1
+
+
+def test_a_resume_with_no_registered_probe_closes_no_child():
+    # The default every embedder and test gets. Nothing answers "is this child
+    # alive", so the opener stands and a reader treats it as unknown.
+    _open_session()
+    emit.on_turn_started(SESSION, 1, "user")
+    emit.on_subagent_spawned(SESSION, 1, agent_id="sub-1")
+    assert emit.flush()
+    emit.reset_caches()
+    emit.on_session_opened(SESSION, agent="kirocrew", resumed=True)
+    assert emit.flush()
+    assert [e for e in _body() if e["type"] == "subagent/failed"] == []
+
+
 def test_a_resume_is_the_one_path_that_closes_an_open_turn():
     # `resumed=True` means this claim re-attached to a conversation a different
     # gateway process was writing, so a turn left open there belongs to a writer
@@ -3663,6 +3802,14 @@ def test_every_emitted_type_matches_the_documented_shape():
         "context/composed": {"turn", "sources", "chars", "tokens", "tokens_estimated"},
         "model/selected": {"model", "source"},
         "compaction/applied": {"pct_before", "pct_after", "freed_pct"},
+        "approval/requested": {"turn", "approval_id", "tool"},
+        "approval/decided": {"turn", "approval_id", "decision"},
+        "plan/updated": {"turn", "items"},
+        "background/completed": {"kind"},
+        "subagent/spawned": {"turn", "agent_id"},
+        "subagent/steered": {"agent_id"},
+        "subagent/completed": {"agent_id"},
+        "subagent/failed": {"agent_id"},
     }
     _open_session()
     emit.on_turn_started(SESSION, 1, "user")
@@ -3676,6 +3823,14 @@ def test_every_emitted_type_matches_the_documented_shape():
     emit.on_step_completed(SESSION, 1, step, ms=5)
     emit.on_model_selected(SESSION, "m", "fallback", turn=1)
     emit.on_compaction_applied(SESSION, pct_before=0.8, pct_after=0.4)
+    emit.on_approval_requested(SESSION, 1, approval_id="r1", tool="shell", reason="ls")
+    emit.on_approval_decided(SESSION, 1, approval_id="r1", decision="approved")
+    emit.on_plan_updated(SESSION, 1, items=[{"id": "a", "text": "t", "completed": False}])
+    emit.on_subagent_spawned(SESSION, 1, agent_id="ab12", agent="kirocrew", scope={"memory": True})
+    emit.on_subagent_steered(SESSION, agent_id="ab12", mode="interrupt")
+    emit.on_subagent_completed(SESSION, agent_id="ab12", duration_ms=7)
+    emit.on_subagent_failed(SESSION, agent_id="cd34", reason="boom", outcome="failed")
+    emit.on_background_completed(SESSION, kind="title", model="m", credits=0.1)
     emit.on_turn_completed(SESSION, 1, stop_reason="end_turn")
     emit.on_message_queued(SESSION, source="slack", size_bytes=3, queued_seq="q1")
     emit.on_turn_refused(SESSION, 2, "not_authorized")

@@ -10074,6 +10074,42 @@ class GatewayOrchestrator:
         )
         self.subagent_mgr.start_reaper()
 
+    def _register_child_liveness(self) -> None:
+        """Give the session ledger's repair a way to ask whether a child still runs.
+
+        The repair may close an unmatched ``subagent/spawned`` only for a child
+        with no outcome still coming, and this manager is the only thing that
+        knows which children are still running. It is registered from here rather
+        than inside the emitter, which cannot reach the manager -- the dependency
+        already runs in this direction, since the subagent side is what calls the
+        emitters.
+
+        Called AFTER the ``KIROCREW_READY`` print and never from an ``_init_*`` on
+        the boot path. Importing the emitter pulls the ledger store in with it, and
+        the ``no-new-work-on-gateway-boot-path`` rule counts an optional, flag-off
+        subsystem's import as boot work whatever the handler checks later; gating
+        the import behind the flag would satisfy the rule only while the flag is
+        off. Nothing needs the probe before this point: the repair runs when a
+        session opens its ledger, which is after readiness.
+
+        Registered UNCONDITIONALLY once here, because the flag is read at emit time
+        and a probe installed while the ledger is off costs nothing, while making
+        the registration itself conditional would leave a later flag flip with no
+        probe and a repair free to close a live child.
+        """
+        from kiro_crew.crew_log import emit as crew_log_emit
+
+        def _child_still_running(agent_id: str) -> bool:
+            mgr = self.subagent_mgr
+            if mgr is None:
+                # No registry to consult, so this cannot report a child finished.
+                # "Nothing is running" would be the same answer as a genuinely
+                # empty registry and would let the repair close a live child.
+                return True
+            return any(info.id == agent_id for info in mgr.running)
+
+        crew_log_emit.set_child_liveness(_child_still_running)
+
     def _start_adaptive_controller(self, cfg: KiroCrewConfig | None = None) -> None:
         """Run the adaptive concurrency controller beside the subagent manager.
 
@@ -13205,6 +13241,12 @@ class GatewayOrchestrator:
             # pass above binds no coordinator when it wired no admission.
             await self._ensure_subagent_coordinator()
             self._start_adaptive_controller()
+            # The manager exists and readiness is past, so the session ledger's
+            # repair can be given its child-liveness probe. Before the dashboard
+            # workers and cron start, so no session can open a ledger and repair
+            # it while the probe is missing -- which would let the repair close a
+            # child that is still running.
+            self._register_child_liveness()
 
         # Persisted Crew work and legacy channel agents can dispatch providers
         # immediately when resumed, so start them only after the shared memory

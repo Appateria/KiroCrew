@@ -768,7 +768,7 @@ class TestAccountingNeverResurrectsADeletedSession:
         c = _make_consolidator(log)
         path = log._path(KEY)
 
-        async def _delete_then_fail(_prompt):
+        async def _delete_then_fail(_prompt, *, memory_store: str = "", session_key: str = ""):
             path.unlink()
             return None
 
@@ -1440,7 +1440,7 @@ class TestTheCapDoesNotOutliveTheSpanItMeasured:
         log = _seed_log(tmp_path)
         c = _make_consolidator(log)
 
-        async def _append_then_fail(_prompt):
+        async def _append_then_fail(_prompt, *, memory_store: str = "", session_key: str = ""):
             with history_mod.allow_on_loop_persist():
                 log.append(KEY, "user", "arrived mid-turn")
             return None

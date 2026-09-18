@@ -240,13 +240,22 @@ class TestSteerConsumedClears:
         emitter exposes no steer entry point to call, and settling still works
         without one. Adding an emitter back at either site, without a resolver that
         owns both facts, reddens this test.
+
+        `subagent/steered` is a different type and is exempt: its site accepts the
+        steer and holds both the child's id and the mode at that moment, so there is
+        no second observer to wait for and no seq it could contradict. It is named
+        here as an exact set rather than skipped by a substring, so a second
+        steer-named entry point -- for either family -- still reddens this.
         """
         from kiro_crew.crew_log import emit as crew_log_emit
         from kiro_crew.dashboard.chat_runner import _settle_consumed_steers
 
-        assert not [
-            name for name in dir(crew_log_emit) if "steer" in name.lower()
-        ], "the emitter exposes a steer entry point, which no site can order correctly"
+        assert {name for name in dir(crew_log_emit) if "steer" in name.lower()} == {
+            "on_subagent_steered"
+        }, (
+            "the emitter's steer-named entry points changed; a message steer has no "
+            "site that can order one correctly"
+        )
 
         monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
         state = _make_state(tmp_path)

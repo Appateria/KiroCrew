@@ -2577,6 +2577,7 @@ class SubagentManager:
         _agent_prevalidated: bool = False,
         _from_queue: bool = False,
         _preassigned_id: str = "",
+        _crew_log_asked: "tuple[str, int] | None" = None,
         _memory_mode: str | None = None,
         _store_accepted: bool = False,
         _stop_before_claim: bool = False,
@@ -2610,6 +2611,7 @@ class SubagentManager:
             _agent_prevalidated,
             _from_queue,
             _preassigned_id,
+            _crew_log_asked=_crew_log_asked,
             _memory_mode=_memory_mode,
             _store_accepted=_store_accepted,
             _stop_before_claim=_stop_before_claim,
@@ -2764,6 +2766,7 @@ class SubagentManager:
         cwd: str = "",
         _preassigned_id: str = "",
         _memory_mode: str | None = None,
+        _crew_log_asked: "tuple[str, int] | None" = None,
     ) -> SubagentInfo | None:
         return self._continuation.continue_conversation_impl(
             conv_id,
@@ -2775,6 +2778,7 @@ class SubagentManager:
             cwd,
             _preassigned_id,
             _memory_mode=_memory_mode,
+            _crew_log_asked=_crew_log_asked,
         )
 
     async def continue_conversation_async(
@@ -2788,6 +2792,7 @@ class SubagentManager:
         cwd: str = "",
         _preassigned_id: str = "",
         _memory_mode: str | None = None,
+        _crew_log_asked: "tuple[str, int] | None" = None,
     ) -> SubagentInfo | None:
         return await self._continuation.continue_conversation_async_impl(
             conv_id,
@@ -2799,6 +2804,7 @@ class SubagentManager:
             cwd,
             _preassigned_id,
             _memory_mode,
+            _crew_log_asked,
         )
 
     def _continue_prelude(
@@ -2812,6 +2818,7 @@ class SubagentManager:
         cwd: str = "",
         _preassigned_id: str = "",
         _memory_mode: str | None = None,
+        _crew_log_asked: "tuple[str, int] | None" = None,
     ) -> "SubagentInfo | dict[str, Any] | None":
         return self._continuation._continue_prelude_impl(
             conv_id,
@@ -2823,6 +2830,7 @@ class SubagentManager:
             cwd,
             _preassigned_id,
             _memory_mode,
+            _crew_log_asked,
         )
 
     def recorded_cwd(self, conv_id: str) -> str:

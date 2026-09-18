@@ -1353,8 +1353,27 @@ class Ledger:
         )
 
     @classmethod
-    def open(cls, kind: str, unit_id: str, *, repair: bool = False) -> Ledger:
+    def open(
+        cls,
+        kind: str,
+        unit_id: str,
+        *,
+        repair: bool = False,
+        child_gone: "Callable[[str], bool] | None" = None,
+    ) -> Ledger:
         """Open an existing crew log, repairing a torn tail if there is one.
+
+        ``child_gone`` narrows what ``repair`` is allowed to conclude, and is the
+        only thing that lets it close an unmatched ``subagent/spawned``. A child
+        outlives its asking turn by design, so an unmatched opener does NOT mean
+        the child is finished -- a writer torn down inside a live process can leave
+        one still running and still able to file its own real terminal, which would
+        put two outcomes for one ``agent_id`` in a file nothing rewrites. No fact
+        derivable from the file answers this, and no flag does either: what settles
+        it is the live subagent registry of the process doing the repair, so the
+        caller that holds one passes a predicate over ``agent_id``. Omitted, no
+        child is closed -- the direction that leaves a reader behind rather than
+        wrong.
 
         A zero-byte file answers ``no_ledger``, the same answer ``create`` gives
         it. One meaning for an empty file across both paths is what keeps them
@@ -1422,7 +1441,7 @@ class Ledger:
             _mkdir_private(path.parent)
             lease_key = acquire_lease(path.parent / LEASE_FILE, kind=kind, unit_id=unit_id)
             try:
-                if _close_interrupted_tail(kind, unit_id, path):
+                if _close_interrupted_tail(kind, unit_id, path, child_gone=child_gone):
                     # The closers moved the tail, so this object's cached seq has to
                     # be re-read or its first append would collide with them.
                     tail = _scan_tail(path)
@@ -1439,16 +1458,19 @@ class Ledger:
             lease_key=lease_key,
         )
 
-    def repair_interrupted_turn(self) -> int:
+    def repair_interrupted_turn(self, *, child_gone: "Callable[[str], bool] | None" = None) -> int:
         """Close an open turn on this crew log. Returns how many closers landed.
 
         The method form of ``open(repair=True)``, for a caller that already holds
-        a handle. Same rule: only a resume calls it, never a live writer.
+        a handle. Same rule: only a resume calls it, never a live writer. And the
+        same ``child_gone`` meaning: without a predicate an unmatched
+        ``subagent/spawned`` is left open, because nothing else can rule out a live
+        child that is still about to report its own outcome.
         """
         # The closers are appends, so this takes write ownership exactly as one
         # does, and is refused the same way when another process holds the log.
         self._claim()
-        written = _close_interrupted_tail(self._kind, self._id, self._path)
+        written = _close_interrupted_tail(self._kind, self._id, self._path, child_gone=child_gone)
         # Refreshed unconditionally: the repair also TRUNCATES an unreachable chunk
         # group, which changes the tail without writing a closer, and a cached
         # ``last_seq`` past the end of the file would be served to a reader that only
@@ -2224,24 +2246,69 @@ def _truncate(path: Path, offset: int) -> None:
 STOP_REASON_INTERRUPTED = "interrupted"
 TOOL_STATUS_UNKNOWN = "unknown"
 
+#: The same "not knowable from the record" word, for the two other openers a
+#: session ledger can be left holding. Only the repair ever writes them: a live
+#: writer always knows what a human decided and how a child ended, so a reader
+#: seeing either value knows it is reading a reconstruction rather than an
+#: observation. Spelled as separate constants because they name different fields
+#: on different types, and a future change to one must not silently move the other.
+APPROVAL_DECISION_UNKNOWN = "unknown"
+SUBAGENT_OUTCOME_UNKNOWN = "unknown"
+
 
 @dataclass(frozen=True)
 class _OpenTail:
-    """What a session log's last turn left open, in first-seen order."""
+    """What a session log was left holding open, in first-seen order.
+
+    ``turn`` is None when the newest turn DID complete and the only thing still
+    open is a child that outlived it -- which is the ordinary shape for a subagent,
+    since a child routinely finishes turns after the one that spawned it.
+
+    ``calls`` and ``approvals`` are turn-scoped: both belong to the turn that
+    opened them and cannot outlive it, so they are collected only from inside an
+    open turn. ``children`` is FILE-scoped for the opposite reason -- a child's
+    whole point is that it runs past its asking turn, so scoping its closer to the
+    open turn would leave exactly the common case unclosed.
+    """
 
     turn: Any
     calls: tuple[dict[str, Any], ...]
     last_time: int
+    approvals: tuple[dict[str, Any], ...] = ()
+    children: tuple[dict[str, Any], ...] = ()
 
 
-def _open_tail(path: Path) -> "tuple[_OpenTail | None, str | None]":
+def _open_tail(
+    path: Path, *, child_gone: "Callable[[str], bool] | None" = None
+) -> "tuple[_OpenTail | None, str | None]":
     """The unbalanced tail and why a repair fold skipped a record, if it did.
 
-    Unbalanced means the newest ``turn/started`` has no ``turn/completed`` after
-    it: the writer stopped mid-turn. Unmatched ``tool/called`` entries are
-    collected only from INSIDE that turn -- an unmatched call in a turn that did
-    complete is a different anomaly, and inventing a result for it here would be
-    this reader editing history it was not asked about.
+    Three kinds of opener can be left unbalanced, and they are NOT scoped alike.
+
+    A ``turn/started`` with no later ``turn/completed`` means the writer stopped
+    mid-turn. Unmatched ``tool/called`` and ``approval/requested`` entries are
+    collected only from INSIDE that turn: both are turn-scoped by construction --
+    a call completes within its turn, and an approval is decided in the same
+    ``finally`` that the turn's own path runs through -- so an unmatched one in a
+    turn that DID complete is a different anomaly, and inventing an outcome for it
+    here would be this reader editing history it was not asked about.
+
+    An unmatched ``subagent/spawned`` is collected across the WHOLE file instead,
+    because a child is deliberately not turn-scoped: it starts, steers and reports
+    long after its asking turn ended, so the ordinary dangling case is a child
+    whose turn completed normally. Scoping it to the open turn would close only the
+    rare child that died inside its own turn and leave every common one open
+    forever.
+
+    Children are kept only when *child_gone* says so, and that asymmetry is the
+    point. "The writer is gone" is what a repair knows, and for a turn-scoped
+    opener that settles it -- the turn died with its writer. It does NOT settle a
+    child: a child outlives the turn that asked for it BY DESIGN, so a writer
+    torn down inside a live process can leave a child still running, still able to
+    file its own real terminal. Closing it from here would put two outcomes for one
+    ``agent_id`` in a file nothing rewrites. Nothing in the file distinguishes the
+    two, so the question goes to the caller's live subagent registry; with no
+    predicate the answer is "still running" and the opener stands.
 
     This fold feeds a mutation, so it reports every record the ordinary reader
     would skip. A repair cannot distinguish a truly open turn from one whose real
@@ -2251,6 +2318,8 @@ def _open_tail(path: Path) -> "tuple[_OpenTail | None, str | None]":
     open_turn: Any = None
     last_time = 0
     calls: dict[str, dict[str, Any]] = {}
+    approvals: dict[str, dict[str, Any]] = {}
+    children: dict[str, dict[str, Any]] = {}
     skipped: str | None = None
     try:
         with open(path, "rb") as source:
@@ -2266,9 +2335,11 @@ def _open_tail(path: Path) -> "tuple[_OpenTail | None, str | None]":
                 if entry.type == "turn/started":
                     open_turn = data.get("turn")
                     calls = {}
+                    approvals = {}
                 elif entry.type == "turn/completed":
                     open_turn = None
                     calls = {}
+                    approvals = {}
                 elif entry.type == "tool/called" and open_turn is not None:
                     call_id = data.get("call_id")
                     if isinstance(call_id, str) and call_id and call_id not in calls:
@@ -2281,14 +2352,56 @@ def _open_tail(path: Path) -> "tuple[_OpenTail | None, str | None]":
                     call_id = data.get("call_id")
                     if isinstance(call_id, str):
                         calls.pop(call_id, None)
+                elif entry.type == "approval/requested" and open_turn is not None:
+                    approval_id = data.get("approval_id")
+                    if (
+                        isinstance(approval_id, str)
+                        and approval_id
+                        and approval_id not in approvals
+                    ):
+                        approvals[approval_id] = {"approval_id": approval_id}
+                elif entry.type == "approval/decided" and open_turn is not None:
+                    approval_id = data.get("approval_id")
+                    if isinstance(approval_id, str):
+                        approvals.pop(approval_id, None)
+                elif entry.type == "subagent/spawned":
+                    agent_id = data.get("agent_id")
+                    if isinstance(agent_id, str) and agent_id and agent_id not in children:
+                        children[agent_id] = {"agent_id": agent_id}
+                elif entry.type in ("subagent/completed", "subagent/failed"):
+                    agent_id = data.get("agent_id")
+                    if isinstance(agent_id, str):
+                        children.pop(agent_id, None)
     except FileNotFoundError:
         return None, None
     except UnreadableRecord as exc:
         skipped = skipped or str(exc)
-    if open_turn is None:
+    # An unmatched opener says the file never recorded an outcome; only the caller
+    # can say whether one is still COMING. Without a predicate nothing is closed,
+    # and a predicate that raises is read as "still running" -- both leave the
+    # opener standing, which is the direction that loses nothing a reader cannot
+    # recover. Asking per surviving opener rather than per entry keeps the question
+    # to the children that are actually unbalanced.
+    if child_gone is None:
+        children.clear()
+    else:
+        for agent_id in list(children):
+            try:
+                gone = child_gone(agent_id)
+            except Exception:
+                gone = False
+            if not gone:
+                children.pop(agent_id, None)
+    if open_turn is None and not children:
         return None, skipped
     return (
-        _OpenTail(turn=open_turn, calls=tuple(calls.values()), last_time=last_time),
+        _OpenTail(
+            turn=open_turn,
+            calls=tuple(calls.values()),
+            last_time=last_time,
+            approvals=tuple(approvals.values()),
+            children=tuple(children.values()),
+        ),
         skipped,
     )
 
@@ -2296,9 +2409,16 @@ def _open_tail(path: Path) -> "tuple[_OpenTail | None, str | None]":
 def _closer_entries(tail: _OpenTail, first_seq: int) -> list[Entry]:
     """The closers for *tail*, in the order they are appended.
 
-    Unmatched calls first, then the turn -- a turn cannot be closed while a call
-    inside it is still open, so closing them the other way round would produce a
-    record no live writer could ever have produced.
+    Approvals, then unmatched calls, then children, then the turn. The order is
+    the one a LIVE writer could have produced: an approval is decided before the
+    call it gates completes, and a turn cannot be closed while a call inside it is
+    still open, so closing them the other way round would produce a record no live
+    writer could ever have produced.
+
+    The turn closer is written only when a turn was actually open. A child that
+    outlived a completed turn leaves this function with children and no turn, and
+    appending a ``turn/completed`` there would close a turn that already closed
+    itself.
 
     Every closer reuses the LAST REAL entry's ``time``. A closer describes
     something that happened when the writer stopped, not when a later process
@@ -2309,6 +2429,21 @@ def _closer_entries(tail: _OpenTail, first_seq: int) -> list[Entry]:
     """
     entries: list[Entry] = []
     seq = first_seq
+    for approval in tail.approvals:
+        entries.append(
+            Entry(
+                type="approval/decided",
+                seq=seq,
+                time=tail.last_time,
+                src="gateway",
+                data={
+                    "turn": tail.turn,
+                    "approval_id": approval["approval_id"],
+                    "decision": APPROVAL_DECISION_UNKNOWN,
+                },
+            )
+        )
+        seq += 1
     for call in tail.calls:
         entries.append(
             Entry(
@@ -2326,26 +2461,64 @@ def _closer_entries(tail: _OpenTail, first_seq: int) -> list[Entry]:
             )
         )
         seq += 1
-    entries.append(
-        Entry(
-            type="turn/completed",
-            seq=seq,
-            time=tail.last_time,
-            src="gateway",
-            data={"turn": tail.turn, "stop_reason": STOP_REASON_INTERRUPTED},
+    for child in tail.children:
+        # No `turn`: `subagent/failed` carries none, because a child's outcome is
+        # not an event of any one turn -- which is the same reason its opener is
+        # matched across the whole file rather than inside the open turn.
+        entries.append(
+            Entry(
+                type="subagent/failed",
+                seq=seq,
+                time=tail.last_time,
+                src="gateway",
+                data={
+                    "agent_id": child["agent_id"],
+                    "outcome": SUBAGENT_OUTCOME_UNKNOWN,
+                },
+            )
         )
-    )
+        seq += 1
+    if tail.turn is not None:
+        entries.append(
+            Entry(
+                type="turn/completed",
+                seq=seq,
+                time=tail.last_time,
+                src="gateway",
+                data={"turn": tail.turn, "stop_reason": STOP_REASON_INTERRUPTED},
+            )
+        )
     return entries
 
 
-def _close_interrupted_tail(kind: str, unit_id: str, path: Path) -> int:
-    """Append closers for an interrupted turn. Returns how many were written.
+def _close_interrupted_tail(
+    kind: str,
+    unit_id: str,
+    path: Path,
+    *,
+    child_gone: "Callable[[str], bool] | None" = None,
+) -> int:
+    """Append closers for an interrupted tail. Returns how many were written.
 
     Session logs only, and RESUME ONLY. A crash, a SIGKILL or a pod eviction
-    leaves the newest turn open, and every later reader then has to carry the same
-    special case: is this turn still running, or did its writer die? Closing the
-    tail when the crew log is LOADED after an interruption answers that once, in the
+    leaves openers unbalanced, and every later reader then has to carry the same
+    special case: is this still running, or did its writer die? Closing the tail
+    when the crew log is LOADED after an interruption answers that once, in the
     record, instead of in each reader.
+
+    Two openers are closed on any repair, each with the "not knowable from the
+    record" word its own type already uses: an unmatched ``tool/called`` and an
+    unmatched ``approval/requested``, both turn-scoped, both settled by the one
+    thing a repair knows -- that the writer is gone.
+
+    A third, ``subagent/spawned``, is closed only for an ``agent_id`` the caller's
+    *child_gone* predicate reports finished. A child is not turn-scoped, so a
+    writer torn down inside a LIVE process can leave a child still running and
+    still able to file its own real terminal; closing it from here would put two
+    outcomes for one ``agent_id`` in a file nothing rewrites. Only the repairing
+    process's own registry of running children can rule that out. This can
+    therefore fire on a file whose newest turn completed normally and whose only
+    open thing is a child that outlived it.
 
     "Loaded after an interruption" is the whole precondition, which is why this is
     never reached from a plain ``open``. An open turn is indistinguishable from a
@@ -2373,7 +2546,7 @@ def _close_interrupted_tail(kind: str, unit_id: str, path: Path) -> int:
         # Check the fold before any content-aware repair. A damaged completion can
         # look exactly like an open turn once the ordinary reader skips it, and a
         # closer appended from that fold would state an outcome no writer observed.
-        opened, skipped = _open_tail(path)
+        opened, skipped = _open_tail(path, child_gone=child_gone)
         if skipped is not None:
             _refuse_content_repair(unit_id, skipped)
             return 0
@@ -2393,7 +2566,7 @@ def _close_interrupted_tail(kind: str, unit_id: str, path: Path) -> int:
                 first_seq,
                 last_seq,
             )
-            opened, skipped = _open_tail(path)
+            opened, skipped = _open_tail(path, child_gone=child_gone)
             if skipped is not None:
                 _refuse_content_repair(unit_id, skipped)
                 return 0
@@ -2407,7 +2580,7 @@ def _close_interrupted_tail(kind: str, unit_id: str, path: Path) -> int:
             needs_newline = False
             written += 1
     logger.info(
-        "closed an interrupted turn in session log %r: %d closer(s) appended",
+        "closed an interrupted tail in session log %r: %d closer(s) appended",
         unit_id,
         written,
     )

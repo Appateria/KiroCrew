@@ -193,6 +193,30 @@ def test_run_publishes_ready_before_wait_and_starts_dispatchers_afterward():
     )
 
 
+def test_the_crew_log_child_liveness_probe_is_registered_after_ready():
+    """Registering the probe imports the emitter, so it stays off the boot path.
+
+    ``no-new-work-on-gateway-boot-path`` counts an optional, flag-off subsystem's
+    import as boot work whatever the handler checks later, and importing the
+    emitter pulls the ledger store in with it. Registering after the
+    ``KIROCREW_READY`` print keeps that cost out of every launch; registering
+    before the dashboard workers and cron start keeps it ahead of the first
+    session that could open a ledger and run its repair, which without a probe
+    would be free to close a child that is still running.
+    """
+    source = inspect.getsource(GatewayOrchestrator.run)
+    ready = source.index('print(f"KIROCREW_READY:')
+    register = source.index("self._register_child_liveness()")
+    dashboard_workers = source.index("self._start_dashboard_workers_after_memory_ready()")
+    assert ready < register < dashboard_workers
+
+    boot = inspect.getsource(GatewayOrchestrator._init_subagents)
+    assert "crew_log_emit" not in boot, (
+        "the emitter import belongs off the boot path: _init_subagents is an "
+        "_init_* reached from run() before the readiness print"
+    )
+
+
 def test_post_memory_dashboard_workers_resume_legacy_channels_once(monkeypatch):
     gateway = _gateway(monkeypatch)
     try:

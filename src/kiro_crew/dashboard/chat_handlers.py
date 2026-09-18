@@ -3286,6 +3286,13 @@ def _reject_pending_approvals(slot: _ChatSlot) -> None:
     """
     for aid, fut in list(slot._approval_futures.items()):
         if not fut.done():
+            # Mark BEFORE resolving. Resolving can wake the runner immediately,
+            # and the runner reads this set where it records who decided; marking
+            # after would race its own reader. The provenance is already known
+            # here -- the SEL line below calls it ``rejected_on_stop`` -- and the
+            # resolved value stays a plain "rejected" so no caller of this future
+            # has to learn a new one.
+            slot._approval_stopped.add(aid)
             fut.set_result("rejected")
             if _mark_permission_resolved(slot.messages, aid, "rejected"):
                 slot._dirty = True

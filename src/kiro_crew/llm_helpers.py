@@ -1317,6 +1317,8 @@ async def run_bg_oneliner(
     sel_session_key: str = "_bg",
     timeout: float | None = None,
     strict_model: bool = False,
+    ledger_kind: str = "",
+    crew_log_session_key: str = "",
 ) -> str:
     """Stream a single prompt through an ephemeral background session and return
     the accumulated text.
@@ -1340,6 +1342,12 @@ async def run_bg_oneliner(
     are audited under the generic ``"bg_oneliner"`` source rather than silently
     dropping the SEL event.
 
+    ``ledger_kind`` and ``crew_log_session_key`` name what this call is and which
+    session it is charged to, and BOTH are required for it to reach that session's
+    ledger. Most callers are not charged to any one session -- a tip, a folder icon,
+    a cron label -- so the default is to write nothing rather than attribute shared
+    work to whichever session happened to trigger it.
+
     Errors propagate to the caller (the ``_bg`` session is still ``destroy()``-ed
     in ``finally``): callers that want best-effort "" fallback wrap the call
     themselves, while callers that surface the failure (title/nav) get it
@@ -1347,6 +1355,13 @@ async def run_bg_oneliner(
     exposing ``get_bg_session()``) rather than statically imported, so this
     low-level helper stays free of a dashboard/session import cycle.
     """
+    # Pinned before the acquisition below, not in the teardown that writes it: a
+    # slot reset, switch or compaction gives the successor a new ACP session id,
+    # and a teardown-time lookup would file this spend under a session that never
+    # incurred it. The acquisition is itself a suspension point -- it can take the
+    # background runtime lock and start a runtime -- so resolving after it is
+    # already late enough to name the successor.
+    _crew_log_owner = _background_crew_log_owner(sessions, crew_log_session_key, ledger_kind)
     session = await sessions.get_bg_session()
     # The stats object as it stands BEFORE this turn. The runner replaces it when
     # a turn actually begins, so comparing identity at teardown separates a turn
@@ -1492,6 +1507,21 @@ async def run_bg_oneliner(
                 # cache tokens with zero credits AND zero fresh token counts;
                 # a gate testing only the kiro dimensions silently drops it.
                 if usage_has_billing(usage):
+                    _served = str(getattr(session, "served_model", "") or "").strip()
+                    _elapsed_ms = int((time.monotonic() - turn_started) * 1000)
+                    # Same numbers, second destination: the usage store answers
+                    # "what did the account spend", the owning session's ledger
+                    # answers "what was spent on THIS session's behalf". A caller
+                    # that names neither a kind nor an owner is work not charged to
+                    # any one session (tips, a cron label) and writes nothing.
+                    _record_background_crew_log(
+                        _crew_log_owner,
+                        ledger_kind,
+                        usage,
+                        model=_served,
+                        provider=_provider_label(session),
+                        elapsed_ms=_elapsed_ms,
+                    )
                     await persist_token_record_async(
                         sel_session_key,
                         # The model the session SERVED, never the one requested: a
@@ -1499,17 +1529,106 @@ async def run_bg_oneliner(
                         # above, so recording the request would bill the spend to a
                         # model that did not run. An unreadable served model falls
                         # through to model_source rather than naming a guess.
-                        str(getattr(session, "served_model", "") or "").strip(),
+                        _served,
                         usage,
                         _provider_label(session),
                         surface=f"bg:{sel_source}",
-                        elapsed_ms=int((time.monotonic() - turn_started) * 1000),
+                        elapsed_ms=_elapsed_ms,
                         model_source=session,
                     )
             except Exception:
                 logger.debug("bg oneliner accounting failed source=%s", sel_source, exc_info=True)
         finally:
             await session.destroy()
+
+
+def _background_crew_log_owner(sessions: Any, crew_log_session_key: str, ledger_kind: str) -> str:
+    """The ledger unit a background call is charged to, resolved BEFORE the call.
+
+    Resolution has to happen here rather than in the teardown that writes the
+    entry, and the reason is the resolver's own contract: it answers which unit a
+    slot's work is landing in NOW. A slot can be reset, switched, or compacted
+    while the model call is in flight, and the successor cold-starts a new ACP
+    session id -- so a teardown-time lookup would hand this call's spend to a
+    session that did not incur it, silently, in an append-only file. Reading it
+    before the call pins the unit that was current when the work was ordered.
+
+    Answers ``""`` when the caller named no owner or no kind, which is most of
+    them: a background call is shared infrastructure by default, and picking a
+    session for a tip or a cron label would put someone else's cost in a user's
+    log. Also ``""`` when the flag is off or the owner cannot be resolved.
+    """
+    if not crew_log_session_key or not ledger_kind:
+        return ""
+    try:
+        from kiro_crew.crew_log import emit as crew_log_emit
+        from kiro_crew.crew_log.resolve import unit_for_session_key
+
+        if not crew_log_emit.enabled():
+            return ""
+        # The session manager the caller already holds is the resolver's only input
+        # here, and it is enough: a background call runs BETWEEN the owner's turns,
+        # where the owning slot holds no live ACP client and the registry is the
+        # authoritative source anyway.
+        return unit_for_session_key(sessions, crew_log_session_key)
+    except Exception:
+        logger.debug(
+            "session ledger: resolving a background owner failed kind=%s",
+            ledger_kind,
+            exc_info=True,
+        )
+        return ""
+
+
+def _record_background_crew_log(
+    owner_sid: str,
+    ledger_kind: str,
+    usage: Any,
+    *,
+    model: str,
+    provider: str,
+    elapsed_ms: int,
+) -> None:
+    """File one background model call in the ledger of the session it served.
+
+    ``owner_sid`` is the unit :func:`_background_crew_log_owner` pinned before the
+    call, never a key resolved here -- see that function for why the timing is the
+    whole point. An empty value means "do not write", which covers an unnamed
+    caller, a disabled flag and an unresolvable owner alike.
+
+    Both background entry points -- the one-liner and the shared-session context
+    manager -- reach this from the same place in their teardown: after the turn's
+    usage has been snapshotted and the same ``usage_has_billing`` gate the usage
+    store uses has passed. So the two agree on WHETHER a call is billable, which is
+    the judgement that would otherwise drift. They do not agree on persistence: the
+    usage store writes on its own path and can fail there, and this entry is queued
+    for a writer that can drop it at a ceiling, so either side can be missing a call
+    the other recorded.
+
+    Best-effort, like the accounting beside it. This is describing spend, not
+    controlling it, and it must never be why a background task raises.
+    """
+    if not owner_sid or not ledger_kind:
+        return
+    try:
+        from kiro_crew.crew_log import emit as crew_log_emit
+
+        crew_log_emit.on_background_completed(
+            owner_sid,
+            kind=ledger_kind,
+            model=model,
+            provider=provider,
+            credits=float(getattr(usage, "credits", 0.0) or 0.0),
+            input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+            output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+            cache_read_tokens=int(getattr(usage, "cache_read_tokens", 0) or 0),
+            cache_write_tokens=int(getattr(usage, "cache_creation_tokens", 0) or 0),
+            duration_ms=int(elapsed_ms),
+        )
+    except Exception:
+        logger.debug(
+            "session ledger: recording a background call failed kind=%s", ledger_kind, exc_info=True
+        )
 
 
 def _billing_stats(provider: Any) -> Any:
@@ -1773,6 +1892,8 @@ async def background_turn(
     task: str,
     agent: "str | None" = None,
     memory_store: str = "",
+    ledger_kind: str = "",
+    crew_log_session_key: str = "",
 ) -> "AsyncIterator[Any]":
     """Take the shared background session for ONE turn, then release and account.
 
@@ -1805,6 +1926,12 @@ async def background_turn(
     from kiro_crew.session import BACKGROUND_AGENT, BACKGROUND_KEY  # circular import
 
     key = BACKGROUND_KEY
+    # Pinned before the first suspension point for the same reason the other
+    # background helper does it: the owning slot can be reset or recycled while
+    # this turn runs, and its successor is a different ledger unit. Everything the
+    # resolver reads is a parameter, so it does not need the session this function
+    # is about to acquire.
+    _crew_log_owner = _background_crew_log_owner(sessions, crew_log_session_key, ledger_kind)
     if memory_store:
         from uuid import uuid4
 
@@ -1880,6 +2007,14 @@ async def background_turn(
                 # shared predicate covers the claude seam's cost and cache
                 # dimensions alongside the kiro credits/token signals.
                 if usage_has_billing(usage):
+                    _record_background_crew_log(
+                        _crew_log_owner,
+                        ledger_kind,
+                        usage,
+                        model=str(getattr(client, "served_model", "") or "").strip(),
+                        provider=_provider_label(client),
+                        elapsed_ms=turn_elapsed_ms,
+                    )
                     await persist_token_record_async(
                         key,
                         "",

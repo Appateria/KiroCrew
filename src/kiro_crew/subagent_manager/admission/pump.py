@@ -36,6 +36,8 @@ class _PumpMixin(ManagerComponent):
         # Sibling-mixin methods this module reaches through ``self``; typing only.
         def taskq_store(self) -> "_taskq.TaskStore | None": ...
 
+        def _record_crew_log_spawn_started(self, info: "SubagentInfo") -> None: ...
+
     def _should_stagger_queue_impl(self, now: float) -> tuple[bool, bool]:
         """Decide whether a spawn arriving at *now* must be queued.
 
@@ -581,6 +583,12 @@ class _PumpMixin(ManagerComponent):
             info.error = "memory_unavailable: could not persist this run's memory binding"
             return
 
+        # Written HERE, past the folder write, for the reason the stat below is:
+        # this is the point a start is confirmed. A run whose memory binding
+        # could not be persisted settles as a failure without ever allocating a
+        # provider, and its pin was never opened, so nothing closes an opener
+        # that was never written.
+        self._record_crew_log_spawn_started(info)
         Stats().inc_subagent_spawned()
         # Beside that stat, and for the same reason: this is the confirmed-start
         # funnel. Every path reaches it only AFTER the spawn is approved -- the

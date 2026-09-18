@@ -2072,6 +2072,7 @@ class _ChatSlot:
         "_queue_persist_owed",
         "_last_enqueue_ts",
         "_approval_futures",
+        "_approval_stopped",
         "_trust",
         "_trust_scope",
         "_trust_reads",
@@ -2371,6 +2372,14 @@ class _ChatSlot:
         # ``_note_enqueue``.
         self._last_enqueue_ts: str = ""
         self._approval_futures: dict[str, asyncio.Future[str]] = {}  # type: ignore[type-arg]
+        # Approval ids a STOP rejected, rather than a person. A stop resolves the
+        # future with an ordinary "rejected", so the runner cannot tell the two
+        # apart at the point it records the decision, and its ledger entry would
+        # name a person who never answered. The id is added where the stop
+        # resolves the future and removed where the runner reads it, so nothing
+        # accumulates and a later human rejection on this slot cannot inherit the
+        # attribution. Ids rather than a flag, for exactly that reason.
+        self._approval_stopped: set[str] = set()
         self._trust: bool = False  # auto-approve tools for this slot
         # SafetyOverride scope key holding an EXPIRING, SEL-audited auto-approve
         # grant, for an unattended app worker with no human present to click
