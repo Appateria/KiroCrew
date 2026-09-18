@@ -1322,6 +1322,15 @@ export interface SubagentActivity {
   status: 'pending' | 'running' | 'tool' | 'done' | 'error' | 'stopped'
   streaming: string; lastTool: string
   startedAt: number; elapsed: number; error?: string
+  /** True when `startedAt` was ASSUMED rather than observed, which is the case
+   *  for an entry minted by `upsertSlotSub` from an incremental frame: that frame
+   *  carries no start time, so the entry records its arrival instant. The agent
+   *  may already have been running for minutes, so a row MUST NOT render an
+   *  elapsed figure derived from it -- a card reading "3s" for a five-minute run
+   *  is the two-numbers-disagree confusion the idle row exists to remove. Cleared
+   *  by any frame that supplies real timing: a `subagent_snapshot` replay carries
+   *  `started`, and `subagent_done` carries `elapsed`. */
+  startedAtAssumed?: boolean
   toolCount?: number      // observed tool calls (incl. auto-approved) — running-card progress
   stalled?: boolean       // reaper flagged this subagent as idle/stalled
   /** Seconds of no stream activity measured when the reaper raised `stalled`
