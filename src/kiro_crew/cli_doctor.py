@@ -1848,8 +1848,22 @@ _INDENT = "               "
 
 
 def _print_wrapped(text: str) -> None:
-    """Print ``text`` wrapped to the doctor's detail indent."""
-    for line in textwrap.wrap(text, width=80):
+    """Print ``text`` wrapped to the doctor's detail indent, never splitting a token.
+
+    ``textwrap``'s two splitting defaults are both off for every caller, because at width
+    80 they break a long data-home path across lines and insert a break after an embedded
+    hyphen -- which turns a remedy naming ``find <dir> -samefile <file>`` into fragments
+    that run as nothing. Doctor's details are diagnostics an operator PASTES, so a line
+    that overflows the width is the better failure: it can still be copied. That argument
+    holds for every detail this function prints, so it is not a per-caller choice -- a flag
+    here would leave the remedies that did not pass it broken for the same reason.
+    """
+    for line in textwrap.wrap(
+        text,
+        width=80,
+        break_long_words=False,
+        break_on_hyphens=False,
+    ):
         print(f"{_INDENT}{line}")
 
 
@@ -2207,6 +2221,87 @@ def _doctor_sandbox_backend(issues: list[str]) -> None:
                 "allow unconfined execution, or run `kirocrew setup` to be walked "
                 "through the decision."
             )
+
+
+def _doctor_live_target_pointer(issues: list[str]) -> None:
+    """Report a live-target pointer that will refuse the next agent spawn.
+
+    SILENT on a healthy host, like the installer-residue and cron-health sections: a
+    fit pointer is the normal state and a line for it every run would be noise.
+
+    It has a section at all because this condition is otherwise invisible until it bites.
+    ``sandbox._materialize_live_target_mask_target`` is fail-closed on every Linux spawn:
+    the pointer names the checkout the gateway ``execve``s into, a bind mask covers a NAME
+    rather than an inode, and a symlink or a second hard link therefore leaves a writable
+    path to those bytes inside every agent namespace. So the launcher refuses instead. The
+    refusal is correct and its text already names the remedy — but it reaches the operator
+    as a failed spawn plus a ``logger.warning`` in the gateway log, and the shapes that
+    trigger it are ORDINARY operation for something else on the host: ``cp -al``,
+    rsnapshot and other hard-link snapshot tools raise link counts on config files, and a
+    dotfile manager may keep the pointer as a link into its own tree. Nobody did anything
+    wrong, and the first symptom is that every agent stops starting. This is the place an
+    operator looks for that.
+
+    Linux only. The refusal is on the namespace launcher's path; a macOS Seatbelt profile
+    denies by path rule and never needs a mount target, so naming it there would report a
+    spawn outage that will not happen.
+
+    The sentence is the launcher's own (``sandbox.live_target_pointer_unfitness``), not a
+    paraphrase, so an operator who sees this line and later hits the refusal reads one
+    diagnosis rather than two.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        unfit = sandbox.live_target_pointer_unfitness()
+    except Exception as exc:  # noqa: BLE001 — doctor must survive a broken probe
+        print("\nLive Target Pointer")
+        print(f"  pointer:     ⚠️  could not check ({_safe_display(exc)})")
+        return
+    if unfit is None:
+        return
+    # The refusal lives on the namespace launcher's path, which ``wrap_argv`` reaches only
+    # when it actually WRAPS the child. On a host where it hands back an unwrapped argv,
+    # ``_materialize_live_target_mask_target`` never runs, so the pointer is unfit and
+    # NOTHING is currently refused. Reporting "spawns will be REFUSED" there is the same
+    # false promise of an outage as reporting this on macOS, which this section already
+    # declines to make.
+    #
+    # ``credential_mask_applies`` rather than a mode comparison of this module's own: it
+    # lives beside those branches precisely so a caller whose argument depends on the mask
+    # cannot drift from them, and it already counts BOTH unwrapped outcomes -- the "off"
+    # tier and a backend-less host -- where reading the mode alone sees only the first.
+    #
+    # Still reported when unwrapped, because it is a real latent outage that starts the
+    # moment the host confines a spawn -- but not counted as an issue, since nothing is
+    # broken yet and doctor's exit code answers "is this install healthy NOW".
+    try:
+        confined = sandbox.credential_mask_applies(sandbox.configured_sandbox_mode())
+    except Exception:  # noqa: BLE001 — an unreadable mode must not hide the pointer
+        confined = True
+    print("\nLive Target Pointer")
+    if confined:
+        print(f"  pointer:     ❌ agent spawns will be REFUSED — {unfit.path}")
+    else:
+        print(f"  pointer:     ⚠️  unfit, and will refuse spawns once confined — {unfit.path}")
+    # Whole tokens: the remedy names a path and a ``find`` invocation the operator copies,
+    # and the default wrap splits both.
+    _print_wrapped(unfit.detail)
+    if confined:
+        _print_wrapped(
+            "Until this is fixed every agent spawn on this host fails closed, and the "
+            "only other notice is a warning in the gateway log."
+        )
+        issues.append("live-target pointer")
+    else:
+        _print_wrapped(
+            "This pointer is not what stops a spawn on this host: the launcher reaches "
+            "the mask it would break only when it WRAPS a child, and this host hands the "
+            "command over unwrapped or refuses it for a different reason. Whether agents "
+            "start at all is the Sandbox section's answer, not this one. Fix the pointer "
+            "before the host starts confining spawns, or the first one that does fails "
+            "closed."
+        )
 
 
 def _linger_enabled(user: str) -> bool | None:
@@ -4096,6 +4191,12 @@ def _doctor(platform_boot_error: "Exception | None" = None, bundle: bool = False
     # Ahead of MCP Tools: the probes below spawn through the sandbox chokepoint,
     # so this verdict is the context for any probe failure they report.
     _doctor_sandbox(issues)
+
+    # ── Live-target pointer (silent unless it will refuse the next spawn) ──
+    # Immediately after Sandbox: the condition IS a sandbox refusal, and an operator
+    # who just read the backend verdict is the one who needs to know a spawn will be
+    # refused for a reason the backend line cannot express.
+    _doctor_live_target_pointer(issues)
 
     # ── Memory pressure preparedness (swap / userspace OOM killer) ──
     _doctor_memory_pressure(issues)
