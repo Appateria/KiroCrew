@@ -1608,7 +1608,9 @@
       "searching_ctrl_enter_held": "Searching… — Ctrl+Enter won’t send yet; press Esc, then Ctrl+Enter sends the message",
       "no_matches_ctrl_enter_sends": "No matching files — Ctrl+Enter sends the message",
       "no_matches_enter_sends": "No matching files — Enter sends the message",
-      "search_failed": "Couldn’t search files. Try again."
+      "search_failed": "Couldn’t search files. Try again.",
+      "outside_project_enter_sends": "This path ends up outside the project, so there is nothing to complete — Enter sends the message",
+      "outside_project_ctrl_enter_sends": "This path ends up outside the project, so there is nothing to complete — Ctrl+Enter sends the message"
     },
     "kiroAccountModal": {
       "account_details_unavailable": "Account details unavailable",

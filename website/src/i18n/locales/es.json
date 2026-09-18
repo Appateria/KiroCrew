@@ -6469,7 +6469,9 @@
       "searching_enter_held": "Buscando…: Enter aún no envía; pulsa Esc y luego Enter envía el mensaje",
       "type_2_chars_to_search_files_ctrl_enter_held": "Escribe 2+ caracteres para buscar archivos y carpetas…: Ctrl+Enter aún no envía; pulsa Esc y luego Ctrl+Enter envía el mensaje",
       "type_2_chars_to_search_files_enter_held": "Escribe 2+ caracteres para buscar archivos y carpetas…: Enter aún no envía; pulsa Esc y luego Enter envía el mensaje",
-      "search_failed": "No se pudieron buscar archivos. Inténtalo de nuevo."
+      "search_failed": "No se pudieron buscar archivos. Inténtalo de nuevo.",
+      "outside_project_enter_sends": "Esta ruta termina fuera del proyecto, así que no hay nada que completar — Enter envía el mensaje",
+      "outside_project_ctrl_enter_sends": "Esta ruta termina fuera del proyecto, así que no hay nada que completar — Ctrl+Enter envía el mensaje"
     },
     "fileRenderers": {
       "download": "Descargar",

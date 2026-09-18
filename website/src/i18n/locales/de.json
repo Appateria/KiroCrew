@@ -6369,7 +6369,9 @@
       "searching_enter_held": "Wird gesucht… — Enter sendet noch nicht; drücken Sie Esc, dann sendet Enter die Nachricht",
       "type_2_chars_to_search_files_ctrl_enter_held": "Geben Sie 2+ Zeichen ein, um Dateien und Ordner zu suchen… — Ctrl+Enter sendet noch nicht; drücken Sie Esc, dann sendet Ctrl+Enter die Nachricht",
       "type_2_chars_to_search_files_enter_held": "Geben Sie 2+ Zeichen ein, um Dateien und Ordner zu suchen… — Enter sendet noch nicht; drücken Sie Esc, dann sendet Enter die Nachricht",
-      "search_failed": "Dateien konnten nicht durchsucht werden. Bitte erneut versuchen."
+      "search_failed": "Dateien konnten nicht durchsucht werden. Bitte erneut versuchen.",
+      "outside_project_enter_sends": "Dieser Pfad endet außerhalb des Projekts, daher gibt es nichts zu vervollständigen — Enter sendet die Nachricht",
+      "outside_project_ctrl_enter_sends": "Dieser Pfad endet außerhalb des Projekts, daher gibt es nichts zu vervollständigen — Ctrl+Enter sendet die Nachricht"
     },
     "fileRenderers": {
       "download": "Herunterladen",

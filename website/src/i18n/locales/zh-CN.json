@@ -6269,7 +6269,9 @@
       "searching_enter_held": "搜索中… —— 按 Enter 暂时不会发送，按 Esc 关闭后可按 Enter 直接发送消息",
       "type_2_chars_to_search_files_ctrl_enter_held": "输入 2 个以上字符搜索文件和文件夹… —— 按 Ctrl+Enter 暂时不会发送，按 Esc 关闭后可按 Ctrl+Enter 直接发送消息",
       "type_2_chars_to_search_files_enter_held": "输入 2 个以上字符搜索文件和文件夹… —— 按 Enter 暂时不会发送，按 Esc 关闭后可按 Enter 直接发送消息",
-      "search_failed": "无法搜索文件。请重试。"
+      "search_failed": "无法搜索文件。请重试。",
+      "outside_project_enter_sends": "这个路径最终落在项目之外，因此没有可补全的内容 —— 按 Enter 直接发送消息",
+      "outside_project_ctrl_enter_sends": "这个路径最终落在项目之外，因此没有可补全的内容 —— 按 Ctrl+Enter 直接发送消息"
     },
     "fileRenderers": {
       "download": "下载",

@@ -6469,7 +6469,9 @@
       "searching_enter_held": "Recherche… — Enter n’envoie pas encore ; appuyez sur Esc, puis Enter envoie le message",
       "type_2_chars_to_search_files_ctrl_enter_held": "Saisissez 2 caractères ou plus pour rechercher des fichiers et dossiers… — Ctrl+Enter n’envoie pas encore ; appuyez sur Esc, puis Ctrl+Enter envoie le message",
       "type_2_chars_to_search_files_enter_held": "Saisissez 2 caractères ou plus pour rechercher des fichiers et dossiers… — Enter n’envoie pas encore ; appuyez sur Esc, puis Enter envoie le message",
-      "search_failed": "Impossible de rechercher les fichiers. Réessayez."
+      "search_failed": "Impossible de rechercher les fichiers. Réessayez.",
+      "outside_project_enter_sends": "Ce chemin aboutit en dehors du projet, il n’y a donc rien à compléter — Enter envoie le message",
+      "outside_project_ctrl_enter_sends": "Ce chemin aboutit en dehors du projet, il n’y a donc rien à compléter — Ctrl+Enter envoie le message"
     },
     "fileRenderers": {
       "download": "Télécharger",

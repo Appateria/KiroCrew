@@ -178,6 +178,7 @@ from kiro_crew.dashboard.handlers.files import (  # noqa: E402, F401
     api_outbox_download,
     api_outbox_list,
     api_outbox_notify,
+    api_path_complete,
     api_project_git,
     api_project_git_log,
     api_project_git_status,

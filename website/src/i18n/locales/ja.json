@@ -6269,7 +6269,9 @@
       "searching_enter_held": "検索中… — Enter ではまだ送信されません。Esc を押して閉じると、Enter でメッセージを送信できます",
       "type_2_chars_to_search_files_ctrl_enter_held": "ファイルとフォルダーを検索するには 2 文字以上入力してください… — Ctrl+Enter ではまだ送信されません。Esc を押して閉じると、Ctrl+Enter でメッセージを送信できます",
       "type_2_chars_to_search_files_enter_held": "ファイルとフォルダーを検索するには 2 文字以上入力してください… — Enter ではまだ送信されません。Esc を押して閉じると、Enter でメッセージを送信できます",
-      "search_failed": "ファイルを検索できませんでした。もう一度お試しください。"
+      "search_failed": "ファイルを検索できませんでした。もう一度お試しください。",
+      "outside_project_enter_sends": "このパスは最終的にプロジェクトの外に出るため、補完できるものがありません — Enter でメッセージを送信します",
+      "outside_project_ctrl_enter_sends": "このパスは最終的にプロジェクトの外に出るため、補完できるものがありません — Ctrl+Enter でメッセージを送信します"
     },
     "fileRenderers": {
       "download": "ダウンロード",
