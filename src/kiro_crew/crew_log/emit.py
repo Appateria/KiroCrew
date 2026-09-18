@@ -1193,6 +1193,34 @@ def _record_loss_locked(session_id: str, jobs: "list[_PendingJob]", mark: bool) 
         loss.dropped_bytes += max(0, job.nbytes)
 
 
+def _owed_loss_markers_locked() -> int:
+    """How many sessions are owed a ``write/dropped`` marker. ``_lock`` held.
+
+    A session's loss debt lives in one of two places and a count that names it has
+    to read both. It sits in :data:`_pending_loss` while no marker job exists for
+    it. Once one is built it TRAVELS IN THE JOB: :func:`_loss_marker_job` takes the
+    debt out of the map to serialize it, and an append that raises hands the job --
+    debt and all -- to :func:`_retain`, which puts it at the front of that
+    session's bucket in :data:`_pending`.
+
+    So a marker waiting to be retried is owed while the map is empty, and reading
+    only the map reports nothing owed at exactly that moment. That moment is not an
+    edge case for a bounded shutdown: a marker whose filesystem is still failing is
+    retained by every attempt the budget allows, and the budget is spent only if
+    enough paced attempts fit inside the caller's timeout.
+
+    Counted per SESSION, because one marker covers a session's whole interval --
+    the same grain the map's own length carries.
+    """
+    owed = set(_pending_loss)
+    owed.update(
+        session_id
+        for session_id, jobs in _pending.items()
+        if any(job.loss is not None for job in jobs)
+    )
+    return len(owed)
+
+
 def _loss_marker_job(session_id: str, loss: _PendingLoss) -> _PendingJob:
     """Build the marker that must lead this session's next drain."""
 
@@ -1730,7 +1758,7 @@ def drain_for_shutdown(timeout: float = _SHUTDOWN_DRAIN_SECONDS) -> bool:
     if not drained:
         with _lock:
             held = _pending_count
-            loss_markers = len(_pending_loss)
+            loss_markers = _owed_loss_markers_locked()
             running = _writer_busy_locked()
         logger.warning(
             "session log did not finish writing within %.1fs of shutdown; "

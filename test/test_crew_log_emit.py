@@ -2860,6 +2860,47 @@ def test_shutdown_reports_owed_loss_when_its_marker_cannot_land(monkeypatch, cap
         assert loss.dropped_count == 1, "the original counted loss was not folded forward"
 
 
+def test_shutdown_names_a_marker_still_waiting_to_be_retried(monkeypatch, caplog):
+    """A marker held for retry is owed, and the warning has to say so.
+
+    The other lifecycle point. A budget that is not spent leaves the marker JOB at
+    the front of its session's bucket, and the debt rides inside that job: the map
+    the count reads is empty while a marker is very much owed. The warning is the
+    only record of how short the log's tail is at exit, so a zero there tells an
+    operator nothing is missing when something is.
+
+    This is the state a bounded shutdown reaches whenever the retry budget outlasts
+    the window, which is a property of the host. Constructed here instead of raced
+    for: a budget of 10,000 attempts cannot be spent, so the marker is retained
+    however many passes the window buys.
+
+    Mutation guard: counting only ``_pending_loss`` reports ``0 loss marker(s)
+    owed`` and reddens the assertion below.
+    """
+    _open_session()
+    assert emit.flush()
+    _leave_spent_retry_loss_owed()
+
+    def _fail_marker(self, *args, **kwargs):
+        raise OSError("filesystem still unavailable")
+
+    monkeypatch.setattr(lg.Ledger, "append", _fail_marker)
+    monkeypatch.setattr(emit, "_MAX_WRITE_ATTEMPTS", 10_000)
+    # Both windows bounded to a hair: the point is which state the warning
+    # describes, not how long the drain spins before describing it.
+    monkeypatch.setattr(emit, "_SECOND_CHANCE_DRAIN_SECONDS", 0.01)
+    with caplog.at_level(logging.WARNING, logger=emit.logger.name):
+        drained = emit.drain_for_shutdown(timeout=0.01)
+
+    assert drained is False, "shutdown reported success with a marker still retained"
+    with emit._lock:
+        assert emit._pending_loss == {}, "the debt is meant to be riding in the retained job"
+        jobs = emit._pending.get(SESSION) or []
+        assert jobs and jobs[0].loss is not None, "the marker job was not retained"
+        assert jobs[0].loss.dropped_count == 1, "the retained marker lost its count"
+    assert "1 loss marker(s) owed" in caplog.text
+
+
 def test_a_close_under_a_live_turn_leaves_that_turn_its_open_calls():
     """A teardown may not erase state the running turn still needs.
 

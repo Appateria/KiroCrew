@@ -344,8 +344,18 @@ the writer rather than racing it.
 **The residual:** a batch a wedged writer still holds cannot be finished from the
 shutdown thread, and the entries buffered behind it are left alone rather than written
 out of order. A False return means exactly that -- some entries did not land and the
-log's tail is short by them -- and the warning names the buffered count and whether a
-batch was in flight, so the gap is attributable rather than silent.
+log's tail is short by them -- and the warning names the buffered count, how many
+sessions are still owed a `write/dropped` marker, and whether a batch was in flight, so
+the gap is attributable rather than silent.
+
+The owed-marker count reads both places a session's loss debt lives. It sits in the
+pending-loss map while no marker job exists for that session; once one is built the debt
+travels INSIDE the job, because building the marker takes the debt out of the map to
+serialize it and a failed append hands the job back to the retained batch. A marker
+waiting to be retried is therefore owed while the map is empty, and that is a state a
+bounded shutdown reaches on its own schedule: the retry budget is spent only if enough
+paced attempts fit inside the caller's timeout, which is a property of the host. Counting
+the map alone reports nothing owed at exactly the moment a marker is owed.
 
 The drain runs on EVERY gateway mode, not only where a dashboard exists. The dashboard
 registers a cleanup hook, but a mode that builds no dashboard app never runs one and the
