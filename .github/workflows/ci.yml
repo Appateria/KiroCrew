@@ -464,6 +464,24 @@ jobs:
         # --group pulls [dependency-groups].dev from pyproject.
         run: uv pip install --system -e ".[voice]" --group dev
 
+      # Python vulnerability visibility. The repository had none: the step this
+      # replaces ran an unpinned `pip install pip-audit`, and pip-audit is now
+      # pinned in the dev group installed immediately above, so the audit needs no
+      # install of its own and two runs a week apart audit with the same tool.
+      #
+      # continue-on-error: this REPORTS on day one. Widening dependency auditing
+      # and making it block in the same change is how a gate ends up switched off
+      # by whoever it first stopped, and pip-audit reaches the network, so a
+      # registry blip would otherwise fail unrelated PRs. What makes this
+      # different from the advisory step it replaces is the baseline: the script
+      # compares the count against python-audit-baseline.json and says so when it
+      # rises, which turns a standing wall of known advisories into a number that
+      # only moves when someone moves it. Dropping continue-on-error is the
+      # follow-up once a count is recorded and has held steady.
+      - name: Python dependency audit (pinned, report-only)
+        continue-on-error: true
+        run: python3 scripts/check_python_audit.py
+
       # black IS enforced, behind a shrinking baseline. A bare `black --check`
       # cannot be turned on here: 1,420 files under src/ and test/ are not
       # black-clean, so the bulk pass it waits on is ~95,800 lines and has been

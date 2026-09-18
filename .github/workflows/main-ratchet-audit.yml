@@ -114,6 +114,17 @@ jobs:
         # interpreter (no venv); --group pulls [dependency-groups].dev.
         run: uv pip install --system -e ".[voice]" --group dev
 
+      # Mirrored from ci.yml backend-lint, and this lane is where it matters most:
+      # an advisory appears because a database was updated, with no diff anywhere,
+      # so main's integrated tree is the only place the count can be observed
+      # drifting on its own. continue-on-error for the same reason as on a PR --
+      # the audit queries that database over the network, and a service blip is not
+      # ratchet drift.
+      - name: Python dependency audit (pinned, report-only)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: python3 scripts/check_python_audit.py
+
       # Each gate is a SEPARATE step so a failure names exactly which ratchet
       # drifted. Same commands as ci.yml backend-lint, whole-tree scoped, and
       # the set of gate scripts is pinned equal to backend-lint's by
