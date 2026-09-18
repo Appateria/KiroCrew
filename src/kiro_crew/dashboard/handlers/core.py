@@ -2440,7 +2440,26 @@ async def api_kirocrew_config_patch(request: web.Request) -> web.Response:
 
 
 def _unix_peer_is_self(request: web.Request) -> bool:
-    """True iff the request's Unix peer is this process's own principal."""
+    """True iff *request* arrived on an ``AF_UNIX`` socket AND the kernel
+    positively confirms the peer runs as this process's own principal.
+
+    Transport-admission twin of ``is_loopback`` for the local-secret endpoints:
+    an ``AF_UNIX`` request has an EMPTY ``request.remote``, so the
+    loopback test alone 403s the transport that is strictly HARDER to reach
+    than loopback TCP — the dashboard's socket sits ``0600`` inside a ``0700``
+    owner-only directory, and the kernel reports who connected, which loopback
+    TCP cannot. Because ``/api/token/local`` is ``token_auth``-bypassed, this
+    admission is deny-by-default via ``check_peer_is_self``: ``MISMATCH``
+    (another principal reached our socket — exactly when the directory gate
+    has failed and refusing matters most) and ``UNVERIFIABLE`` (no mechanism,
+    failed syscall) are BOTH refused, so a platform without peer credentials
+    never silently widens the gate. This admits a TRANSPORT, never a caller —
+    the ``X-Local-Secret`` check downstream is unchanged.
+
+    Transport discrimination is delegated to ``token_auth._unix_request_socket``,
+    the one shared definition of "arrived on the dashboard's unix socket" for
+    the CSRF and token-auth layers.
+    """
     sock = _unix_request_socket(request)
     return sock is not None and check_peer_is_self(sock) is PeerCredResult.MATCH
 
