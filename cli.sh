@@ -539,11 +539,34 @@ else
   MANIFEST_URL="$FEED_BASE/feed/$CHANNEL_PATH/latest-cli.json"
   echo "Resolving KiroCrew ($CHANNEL channel) ..."
 fi
+# A pinned miss is policy far more often than it is a broken CDN: releases
+# published before manifest signing was enabled carry no signed manifest and are
+# permanently unpinnable. The URL alone reads as infrastructure failure, which
+# sends an operator whose rollback runbook names such a release to file a CDN bug
+# instead of to the migration path. There is deliberately no version arithmetic
+# here: stock macOS sort has no -V, so the numeric floor lives in the
+# documentation this points at and the immutable manifest stays the only thing
+# this script enforces. Kept as a helper so the fetch below stays a bare `curl`
+# line, which is what test_installer_fetches_authenticated_urls_without_redirects
+# scans for when it proves every authenticated fetch refuses redirects.
+manifest_miss() {
+  # 22 is what `curl -f` returns when the host answered with an HTTP error, so
+  # it is the only status that means the manifest is genuinely absent rather
+  # than unreachable. On a connect, DNS or timeout failure curl has already
+  # printed the transport error and the cutoff is not the operator's problem, so
+  # claiming it there would blame policy for an outage.
+  if [ "$1" = 22 ] && [ -n "$PIN_VERSION" ]; then
+    echo "kirocrew-install: '$PIN_VERSION' cannot be pinned: it either predates signed CLI manifests or was never published." >&2
+    echo "kirocrew-install: Pinning policy and the minimum pinnable release: https://github.com/kirodotdev/KiroCrew/blob/main/docs/guides/install.md#pinning-an-exact-version" >&2
+    echo "kirocrew-install: Re-run without --version to install the current $CHANNEL release." >&2
+  fi
+  err "signed CLI manifest not found at $MANIFEST_URL"
+}
 # Bound unauthenticated metadata before it reaches disk. curl 7.58+ enforces
 # --max-filesize against received bytes even without a Content-Length header.
 curl -fsS --proto '=https' --max-filesize 65536 "$MANIFEST_URL" \
   -o "$TMP/cli-manifest.json" \
-  || err "signed CLI manifest not found at $MANIFEST_URL"
+  || manifest_miss $?
 
 # The signature covers canonical JSON containing every field except the
 # signature itself. Reject duplicate/extra/missing keys, decode into bounded

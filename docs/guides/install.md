@@ -154,7 +154,7 @@ curl -fsSL https://download.crew.kiro.dev/cli.sh | sh
 
 ```bash
 curl -fsSL https://download.crew.kiro.dev/cli.sh | sh -s -- --channel insider
-curl -fsSL https://download.crew.kiro.dev/cli.sh | sh -s -- --version 0.1.0
+curl -fsSL https://download.crew.kiro.dev/cli.sh | sh -s -- --version 0.6.0
 ```
 
 `stable` suits everyone, `insider` is for power users who want features days to
@@ -163,6 +163,30 @@ untested `main` HEAD for us and contributors. The
 [Release channels](../../README.md#release-channels) table has the full
 comparison; re-running the installer with a different `--channel` is how a CLI
 install moves between lanes.
+
+#### Pinning an exact version
+
+**The minimum pinnable release is `0.1.2`.** `--version` resolves an immutable
+per-version signed manifest, and a pinned install fails closed when that
+manifest does not exist. Manifest signing was enabled during the `0.1.x` line,
+so `0.1.0` and `0.1.1` are published but carry no signed manifest and cannot be
+installed by the installer. Every release from `0.1.2` onward can be pinned.
+
+**These two releases will not be backfilled.** Signing an already-published
+digest today would create a fresh attestation for bytes that no signing
+pipeline produced, which asserts a provenance the project cannot re-establish
+after the fact. [SECURITY.md](../../SECURITY.md) already limits active support
+to the latest release, so the trust surface would widen for two releases that
+are several minor versions behind current `stable` and are supported by nobody.
+Their artifacts stay published and their `SHA256SUMS` stays fetchable for
+archival inspection, but the installer has no checksum-only path, so it will
+not install them.
+
+If a rollback runbook pins `0.1.0` or `0.1.1`, change it to `0.1.2` or later,
+or drop `--version` to take the current `stable` release. A pinned run that
+cannot resolve a manifest prints this policy and that remedy rather than only
+the URL it tried, because the same failure also covers a version string that
+was never published at all.
 
 The installer verifies the wheel's digest against the signed manifest and
 refuses to install on a mismatch; there is no checksum-only fallback. It uses

@@ -152,8 +152,15 @@ handled by an agent. Operational enablement is a human/infrastructure step:
    with one that refuses the feeds it is pointed at.
 
 Pinned versions released before enablement have no immutable signed manifest and
-therefore fail closed under the new installer unless an authorized backfill signs
-the already-published digest. Do not replace the KMS key in place: schema v1 pins
+therefore fail closed under the new installer. The project's disposition is a
+documented cutoff rather than a backfill: `0.1.0` and `0.1.1` are the only
+published releases without a manifest, the minimum pinnable release is `0.1.2`,
+and the user-facing statement of that is `docs/guides/install.md` ("Pinning an
+exact version"). A backfill would sign an already-published digest with the
+operational key, minting an attestation for bytes that no signing pipeline
+produced. Reversing that decision is a release operation, not a code change: the
+only code-side facts are the floor stated in that section and the pinned
+examples that cite it. Do not replace the KMS key in place: schema v1 pins
 one key. For rotation, first ship an installer revision that trusts both old and
 new public keys, then switch the publisher, and retire the old key only after the
 overlap window. The same key also verifies the gateway's feature-video manifest

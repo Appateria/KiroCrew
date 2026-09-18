@@ -161,8 +161,13 @@ curl -fsSL https://download.crew.kiro.dev/cli.sh | sh -s -- --channel insider
 Pin an exact version:
 
 ```bash
-curl -fsSL https://download.crew.kiro.dev/cli.sh | sh -s -- --version 0.1.0
+curl -fsSL https://download.crew.kiro.dev/cli.sh | sh -s -- --version 0.6.0
 ```
+
+Pinning resolves an immutable signed manifest, so the minimum pinnable release
+is `0.1.2`; `0.1.0` and `0.1.1` predate manifest signing and cannot be
+installed. See
+[Pinning an exact version](docs/guides/install.md#pinning-an-exact-version).
 
 **Managed Python by default.** The installer runs Kiro Crew on a fully managed
 Python instead of the system one: it fetches a SHA-256-pinned

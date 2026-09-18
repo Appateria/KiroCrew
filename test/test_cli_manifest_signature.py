@@ -430,6 +430,13 @@ def _write_fake_tools(root: Path) -> tuple[Path, Path, Path]:
         """#!/bin/sh
 set -eu
 touch "$FAKE_CURL_MARKER"
+# Real `curl -f` separates an HTTP error (22) from a transport failure (7, 6,
+# 28), and cli.sh reads that difference, so this fake has to keep them apart
+# instead of collapsing both into one status.
+if [ -n "${FAKE_CURL_FORCE_EXIT:-}" ]; then
+  echo "curl: forced transport failure" >&2
+  exit "$FAKE_CURL_FORCE_EXIT"
+fi
 out=""
 url=""
 while [ "$#" -gt 0 ]; do
@@ -444,6 +451,8 @@ case "$url" in
   *) echo "unexpected URL: $url" >&2; exit 9 ;;
 esac
 [ -n "$out" ] || exit 10
+# An absent artifact is this CDN's 404, so answer as `curl -f` would.
+[ -f "$FAKE_CDN_ROOT/$rel" ] || exit 22
 cp "$FAKE_CDN_ROOT/$rel" "$out"
 """,
         encoding="utf-8",
@@ -498,6 +507,7 @@ def _run_installer(
     root: Path,
     cdn: Path,
     *args: str,
+    curl_exit: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     if os.name == "nt":
         pytest.skip("cli.sh is supported on macOS and Linux only")
@@ -511,6 +521,9 @@ def _run_installer(
             "FAKE_CDN_ROOT": str(cdn),
             "FAKE_CURL_MARKER": str(curl_marker),
             "FAKE_INSTALL_MARKER": str(install_marker),
+            # Always set, so an ambient value cannot reach a run that did not
+            # ask for a forced failure.
+            "FAKE_CURL_FORCE_EXIT": curl_exit or "",
         }
     )
     result = run_bounded(["sh", str(script), "--cdn", CDN_BASE, *args], env, cwd=str(root))
@@ -637,6 +650,103 @@ def test_installer_refuses_when_signed_manifest_is_missing(
     assert result.returncode == 1
     assert "signed CLI manifest not found" in result.stderr
     assert not install_marker.exists()
+
+
+@pytest.mark.parametrize("case", ["pinned-absent", "unpinned-absent", "pinned-unreachable"])
+def test_only_a_pinned_manifest_the_host_denied_is_attributed_to_the_cutoff(
+    tmp_path: Path, test_key: SigningKey, case: str
+) -> None:
+    """A pinned miss must name the cutoff, and nothing else may.
+
+    Failing closed on a missing manifest is correct, but a bare URL reads as a
+    broken CDN, so an operator whose rollback runbook names a pre-signing release
+    files an infrastructure bug instead of migrating off it. The guidance has to
+    stay off the other two refusals that reach the same line: an unpinned run,
+    where this means the channel feed is gone and pinning policy is not the
+    reader's problem, and an unreachable host, where blaming the cutoff would
+    attribute an outage to policy and send the operator to a doc that cannot
+    help.
+    """
+    pinned = case.startswith("pinned")
+    wheel = tmp_path / WHEEL_NAME
+    wheel.write_bytes(b"wheel")
+    manifest = _build_manifest(tmp_path, test_key, wheel)
+    cdn = _stage_cdn(tmp_path, manifest, wheel, include_feed=False)
+    if case == "pinned-absent":
+        (cdn / "cli" / CHANNEL / VERSION / "cli-manifest.json").unlink()
+    script = _patched_installer(tmp_path, test_key)
+
+    extra = ("--version", VERSION) if pinned else ()
+    # 7 is curl's connect failure, the transport case cli.sh must not attribute.
+    forced = "7" if case == "pinned-unreachable" else None
+    result, _, install_marker = _run_installer(
+        script, tmp_path / "run", cdn, *extra, curl_exit=forced
+    )
+
+    assert result.returncode == 1
+    assert not install_marker.exists()
+    assert "signed CLI manifest not found" in result.stderr
+    guidance = (
+        f"'{VERSION}' cannot be pinned",
+        "docs/guides/install.md#pinning-an-exact-version",
+        "Re-run without --version",
+    )
+    for line in guidance:
+        if case == "pinned-absent":
+            assert line in result.stderr, f"a denied pinned manifest must explain: {line}"
+        else:
+            assert line not in result.stderr, f"{case} must not claim the cutoff: {line}"
+
+
+def test_no_documented_cli_pin_is_below_the_declared_cutoff() -> None:
+    """No documented pin may sit below the floor the policy declares.
+
+    A pin below the cutoff has no signed manifest, so the installer fails closed
+    on it: a documented example there is a command that cannot succeed for any
+    reader who copies it. Derive the floor from the policy prose and hold two
+    things to it: the three documents state the same floor, and no
+    ``cli.sh --version`` example anywhere in the docs sits below it. Changing the
+    floor then has to move the examples with it instead of stranding them.
+    """
+    guide = ROOT / "docs" / "guides" / "install.md"
+    stated = re.compile(r"minimum pinnable release\s+is\s+`([0-9]+(?:\.[0-9]+)+)`")
+
+    declared = stated.search(guide.read_text(encoding="utf-8"))
+    assert declared, f"{guide.name} no longer declares a minimum pinnable release"
+    floor_text = declared.group(1)
+    floor = tuple(int(part) for part in floor_text.split("."))
+
+    # One floor, stated wherever a reader or a release operator will look for
+    # it. Left to drift, these disagree and the cutoff stops being a policy.
+    for path in (ROOT / "README.md", ROOT / "packaging" / "signing" / "README.md"):
+        echoed = stated.search(path.read_text(encoding="utf-8"))
+        assert echoed, f"{path.relative_to(ROOT)} does not state the minimum pinnable release"
+        assert echoed.group(1) == floor_text, (
+            f"{path.relative_to(ROOT)} states floor {echoed.group(1)}, "
+            f"{guide.name} states {floor_text}"
+        )
+
+    # `playwright-cli.sh --version` is a different installer on its own version
+    # line, so the lookbehind keeps `-cli.sh` suffixes out of the scan.
+    invocation = re.compile(r"(?<![\w.-])cli\.sh\b")
+    pin = re.compile(r"--version[= ]([0-9]+(?:\.[0-9]+)+)")
+
+    scanned = 0
+    offenders: list[str] = []
+    for doc in sorted(ROOT.glob("*.md")) + sorted((ROOT / "docs").rglob("*.md")):
+        for number, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
+            if not invocation.search(line):
+                continue
+            for found in pin.findall(line):
+                scanned += 1
+                if tuple(int(part) for part in found.split(".")) < floor:
+                    offenders.append(f"{doc.relative_to(ROOT)}:{number} pins {found}")
+
+    assert not offenders, (
+        "documented pins below the cutoff have no signed manifest and cannot be "
+        f"installed: {'; '.join(offenders)}"
+    )
+    assert scanned, "no documented cli.sh --version example found; this scan went blind"
 
 
 def test_installer_refuses_corrupted_embedded_public_key_before_network(
