@@ -170,7 +170,8 @@ async def _wait_durable_terminal(svc: WorkflowService, run_id: str):
     """An orderly restart waits for the driver's terminal flush, not just RAM status."""
     handle = svc.registry.get(run_id)
     assert handle is not None and handle.task is not None
-    await asyncio.wait_for(asyncio.shield(handle.task), timeout=3.0)
+    # The driver settles on causality; the cap only turns a hang into a failure.
+    await asyncio.wait_for(asyncio.shield(handle.task), timeout=_HANG_GUARD_SECS)
     snap = svc.status(run_id)
     assert snap and snap["status"] != "running"
     return snap
@@ -1117,11 +1118,12 @@ async def test_start_launches_run_and_injects_on_done(monkeypatch) -> None:
     svc = WorkflowService(sessions=FakeSessions([]), on_done=on_done)
     out = await svc.start(GOOD_SCRIPT, name="demo", session_key="slot:main")
     assert "run_id" in out
-    snap = await _wait_terminal(svc, out["run_id"])
+    # The driver settles only after the durable flush and the result-to-chat
+    # callback, so this wait is causal — not a wall-clock cover for disk I/O.
+    snap = await _wait_durable_terminal(svc, out["run_id"])
     assert snap["status"] == "finished"
     assert snap["result"] == {"ok": True}
-    # Terminal state precedes the durable flush and result-to-chat callback.
-    await asyncio.wait_for(notified.wait(), timeout=3.0)
+    assert notified.is_set()
     assert done and done[0]["session_key"] == "slot:main"
 
 
