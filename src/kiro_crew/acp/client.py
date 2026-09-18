@@ -166,6 +166,7 @@ from kiro_crew.acp.types import (
     JsonRpcRequest,
     effort_config_option_id,
     model_registry_namespace,
+    overlay_project_scope,
 )
 from kiro_crew.agent import (
     DerivedSpecSnapshot,
@@ -4792,7 +4793,12 @@ class AcpClient:
         """
         try:
             stubbed: Collection[str] = injection_server_names(
-                self._mcp_gateway_overlay, self._agent
+                # The same checkout the projection below resolves the agent SPEC
+                # against: a project agent's stubs must be read from the file the
+                # session is running, not from the user-level agent of that name.
+                self._mcp_gateway_overlay,
+                self._agent,
+                **overlay_project_scope(self.backend, self._work_dir),
             )
         except Exception:
             logger.warning(
@@ -4849,7 +4855,12 @@ class AcpClient:
         is per client and is re-bound — not re-minted — by every ``rekey()``.
         """
         return attach_stub_session_token(
-            pooled_session_servers(self._mcp_gateway_overlay, self._agent, self._channel_id),
+            pooled_session_servers(
+                self._mcp_gateway_overlay,
+                self._agent,
+                self._channel_id,
+                **overlay_project_scope(self.backend, self._work_dir),
+            ),
             self._stub_session_token,
         )
 

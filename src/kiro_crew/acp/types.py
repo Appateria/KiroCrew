@@ -48,9 +48,11 @@ from kiro_crew.acp_backends import (  # noqa: F401 - re-exported for existing im
     ACP_BACKENDS_STEER,
     ACP_BACKENDS_STRUCTURED_REFUSAL,
     ACP_BACKENDS_TOOL_SEARCH_OVERLAY,
+    ACP_BACKENDS_USER_LEVEL_AGENT_SPECS_ONLY,
     acp_runtime_backends,
     effort_config_option_id,
     model_registry_namespace,
+    overlay_project_scope,
     selectable_backends,
 )
 

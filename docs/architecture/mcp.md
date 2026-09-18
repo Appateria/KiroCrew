@@ -801,6 +801,120 @@ Fingerprint schema 5 regenerates cached plain-flag overlays on upgrade. The
 interpreter path in the entry's `command` is the one value the codec cannot
 cover: the CLI runs it, not the stub.
 
+### Overlay scope: user-level agents only
+
+The rewriter reads `~/.kiro/agents/` and writes one overlay per agent NAME, so the
+overlay directory describes user-level agents and nothing else. kiro-cli also
+resolves `--agent` against `<project>/.kiro/agents/`, which means a session can be
+running an agent of that same name from a different file. `session_servers`
+therefore takes the session's checkout: an agent the checkout declares has no
+overlay, the lookup answers nothing, and the session launches the servers its
+project spec declares.
+
+Injecting the user-level stub instead handed that session servers the project
+never declared, and left the project's own declaration of a same-named server
+unlaunched, because a session-injected entry outranks the spec entry it shadows.
+The scope reaches `pooled_session_servers` and `injection_server_names` through
+one guard, because the second is what a mirror withholds from its own projection:
+a name withheld but not injected costs the session that server entirely. Which
+names a checkout declares is read from `agent_discovery.project_agent_files` and
+`project_agent_name`, the same pair `acp/session_mcp.py` resolves the session's
+agent spec through, so the two cannot disagree about which file the session runs.
+
+Those servers run unpooled -- outside the pool, outside caller-identity
+attribution, outside broker governance -- the same direction every other
+unvouchable stub takes here, and the lookup says so at WARNING rather than debug:
+this is an ordinary configuration rather than an error path, so at debug the
+governance downgrade would be exactly as silent as the defect it replaces. Brokering them instead is not an overlay change:
+`gatewayd` resolves a backend command from `KIROCREW_MCP_TARGET_<SERVER>` in its
+OWN process env, written at daemon launch from the rewriter's `target_env`, and a
+stub never tells the daemon its target. An overlay written for a project agent
+after launch therefore has no target the daemon can resolve, so closing that half
+needs a channel for a target the daemon was not started with.
+
+One host is the exception, and for it the scope must NOT be applied. KAS projects
+the agent spec itself from `paths.kiro_agents_dir()` alone
+(`acp/kas_agents.load_agent_spec`), refusing a project-only agent at session start
+rather than projecting it, so the user-level agent IS the one a KAS session runs
+even when the checkout declares that name. Scoping its lookup would collapse the
+stub set to empty, the projection would declare the user-level servers
+un-subtracted, and they would run outside the broker while the operator has the
+gateway switched on -- the governance loss inverted. Membership lives in
+`ACP_BACKENDS_USER_LEVEL_AGENT_SPECS_ONLY` and is read through
+`agent_sdk.backends.overlay_project_scope` rather than as "is KAS", so a host added
+later that reads the user level alone joins the set instead of needing a branch.
+The KAS harness's own call passes `work_dir=None` for the same reason, which keeps
+both halves of that session -- what is injected and what is withheld -- on one
+answer.
+
+The checkout is only half of that scope. `project_agent_files` scans the `*.json`
+and `*.md` spec forms alike, because whether a checkout's spec may be projected is
+a governance question for its consumers rather than a question of form; this
+lookup is narrower, since it is deciding whether the agent the session RUNS came
+from the checkout. kiro-cli discovers `*.json` in a checkout, so a project
+`foo.md` with no JSON twin must not suppress a user-level `foo.json`'s stubs: that
+would leave the servers kiro-cli does activate running with no pool, no
+caller-identity attribution and no governance, which is the same loss this scope
+exists to prevent, reached from the other side. `overlay_project_scope` therefore answers
+in keywords -- the checkout together with `markdown_specs` -- and every call site
+splats that one mapping, so no site can take the checkout without its format rule.
+
+`markdown_specs` is `has_mirror`, the same registry read both call paths already
+use to decide whether a projection happens at all, because the hosts genuinely
+disagree and each answer is right for the host holding it. A MIRRORED host's array
+is composed by Crew from a spec `acp/session_mcp.py` resolves through
+`project_agent_files`, which honours the markdown form: a project `foo.md`
+declaring `gitlab` comes back from `_agent_spec_for` with that server. For those
+hosts the markdown file IS the agent running, so its shadow must suppress the
+overlay -- otherwise the user-level `foo.json`'s stub survives, outranks the
+project's own declaration, and mounts that stub's command and credentials under the
+checkout's agent. A host with no mirror resolves no project spec through Crew at
+all, so it takes the JSON-only answer for the same reason kiro-cli does.
+
+`ACP_BACKENDS_MARKDOWN_AGENT_SPECS` -- a host reading the markdown form from a
+checkout itself -- is deliberately not OR-ed in, because its only member also reads
+the user level alone and leaves with no checkout, so the term would have no caller
+able to reach it. `test_agent_sdk_capabilities` pins that containment, so a host
+which breaks it fails there naming the decider.
+
+That kiro-cli discovers project `*.json` and not project `*.md` is MEASURED on the
+shipped binary rather than read off a document, because the documents disagree: the
+vendored upstream reference describes the IDE 1.0 / CLI 3.0 schema and says the
+filename without `.json` or `.md` becomes the agent name, while
+`agent_spec_format`'s own header records markdown as the v3 engine's form. On
+kiro-cli 2.22.0, `kiro-cli agent list` run inside a checkout holding both
+`probe-json.json` and `probe-md.md` lists exactly one workspace agent, `probe-json`;
+`probe-md` does not appear. A newer CLI that does discover project markdown would
+make this backend a member of the markdown set, which is the condition the
+containment pin names. That measurement is not a one-off: the
+`KIROCREW_E2E_REAL_KIRO_CLI`-gated suite pins it beside the session/new precedence
+guard, and its failure message names the set to join, so an upgrade that adds
+project markdown discovery reports the remedy rather than silently reopening the
+defect.
+
+The parse requirement travels with the form set, because both answer one question:
+WHICH RESOLVER decides this session's spec. A mirrored host's spec comes from
+`session_mcp._project_spec_path_for`, which scans both forms and matches on
+`project_agent_name` -- filename fallback included -- and which, once it matches a
+project file, returns that file's read without falling back to the user level. So a
+malformed project spec leaves a mirrored session with NO spec: no `tools` allowlist,
+no project servers. The overlay must not fill that gap with the user-level agent's
+stubs, so a mirrored host takes `dispatchable_only=False` and suppresses on the
+malformed file. kiro-cli resolves the checkout itself, reports a malformed spec as an
+error and runs the user-level agent instead, so it takes `dispatchable_only=True` and
+keeps the stubs that belong to the agent it is actually running. The two hosts take
+OPPOSITE answers on the same file, and `overlay_project_scope` computes both facets
+from one `has_mirror` read so neither can be set without the other.
+
+A project spec that does not PARSE is not a shadow for a kiro session either.
+`project_agent_name` falls back to the filename stem for a malformed file, so a
+broken `foo.json` matched `foo` and withheld a good user-level agent's stubs, while
+kiro-cli reports that file as an error and offers no such mode -- measured the same
+way: a malformed project spec yields `Error: Json supplied at ... is invalid` and
+zero workspace agents. `_project_shadow_of` takes `dispatchable_only` for that, and
+its default is unchanged so the governance refusal in `agent.py`, for which a file
+in any state is a claim on the name, keeps refusing.
+
 ## How app agents reach MCP servers
 
 An app declares MCP servers in its manifest, and

@@ -99,6 +99,7 @@ from kiro_crew.acp.types import (
     JsonRpcMessage,
     JsonRpcRequest,
     backends_retired_by_host_logout,
+    overlay_project_scope,
 )
 from kiro_crew.agent import ensure_agent_materialized, markdown_spec_for_agent
 from kiro_crew.agent_sdk.tool_search import (
@@ -4623,7 +4624,13 @@ class AcpRuntime:
         active_agent = agent or self._agent
         try:
             stubbed = await asyncio.to_thread(
-                injection_server_names, self._mcp_gateway_overlay, active_agent
+                injection_server_names,
+                self._mcp_gateway_overlay,
+                active_agent,
+                # Same checkout the projection below resolves the agent SPEC
+                # against, so the withheld set and the injected set are read from
+                # one agent file rather than two.
+                **overlay_project_scope(self.acp_backend, work_dir),
             )
         except Exception:
             # Same direction as the AcpClient path: an empty set re-declares a stubbed
@@ -4639,6 +4646,7 @@ class AcpRuntime:
             self._mcp_gateway_overlay,
             active_agent,
             channel_id or None,
+            **overlay_project_scope(self.acp_backend, work_dir),
         )
         stubs, stub_token = await self._own_stub_session(stubs, session_key)
         projection = await asyncio.to_thread(
@@ -4834,7 +4842,10 @@ class AcpRuntime:
                 mirrored_snapshot = mirrored.derived_spec_snapshot
             else:
                 mcp_servers = await asyncio.to_thread(
-                    pooled_session_servers, self._mcp_gateway_overlay, agent or self._agent
+                    pooled_session_servers,
+                    self._mcp_gateway_overlay,
+                    agent or self._agent,
+                    **overlay_project_scope(self.acp_backend, session_work_dir),
                 )
                 mcp_servers, stub_token = await self._own_stub_session(mcp_servers, session_key)
         else:
@@ -5451,7 +5462,10 @@ class AcpRuntime:
             mirrored_snapshot = mirrored.derived_spec_snapshot
         else:
             mcp_servers = await asyncio.to_thread(
-                pooled_session_servers, self._mcp_gateway_overlay, active_agent
+                pooled_session_servers,
+                self._mcp_gateway_overlay,
+                active_agent,
+                **overlay_project_scope(self.acp_backend, session_work_dir),
             )
             mcp_servers, stub_token = await self._own_stub_session(mcp_servers, session_key)
         if member_session_key:

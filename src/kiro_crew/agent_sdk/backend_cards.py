@@ -314,6 +314,17 @@ OFF_CARD_SETS: Mapping[str, str] = {
         "whether an advertised <model>[<effort>] id is applied as two writes. The "
         "model switch either lands or is refused, which its own line already says"
     ),
+    "ACP_BACKENDS_USER_LEVEL_AGENT_SPECS_ONLY": (
+        "which directory a host resolves its agent specs from, and therefore "
+        "whether the session's project checkout scopes the broker-overlay lookup. "
+        "Both states are correct behaviour for the host that holds them, and "
+        "neither is a feature a reader would choose a harness for: a member's "
+        "sessions keep their brokered servers, a non-member's project agent gets "
+        "the servers it actually declared. A wrong membership is a defect either "
+        "way -- a project agent running the user-level agent's servers, or a "
+        "member's servers dropping out of pool and caller-identity attribution "
+        "while the operator has the gateway switched on"
+    ),
     "ACP_BACKENDS_MCP_CONFIG_HOT_RELOAD": (
         "whether a freshly installed MCP server reaches a RUNNING session. The one "
         "set whose membership this card cannot honestly project: it is version-gated "

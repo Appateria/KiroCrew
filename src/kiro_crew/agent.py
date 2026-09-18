@@ -45,6 +45,7 @@ from typing import Any, Iterator, Literal, MutableMapping, NamedTuple
 
 from kiro_crew import agent_state, platform_compat
 from kiro_crew.agent_discovery import (
+    _declared_project_agent_name,
     _read_agent_spec,
     project_agent_files,
     project_agent_name,
@@ -7633,16 +7634,46 @@ def _file_identity(path: Path) -> str | None:
     return f"{st.st_mtime_ns}-{st.st_size}-{st.st_ino}"
 
 
-def _project_shadow_of(agent: str, work_dir: str | Path | None) -> Path | None:
+def _project_shadow_of(
+    agent: str,
+    work_dir: str | Path | None,
+    *,
+    markdown_specs: bool = True,
+    dispatchable_only: bool = False,
+) -> Path | None:
     """A checkout's own spec for *agent*, or ``None``.
 
-    ``<work_dir>/.kiro/agents/*.json`` is the ONLY project location kiro-cli resolves
+    ``<work_dir>/.kiro/agents/`` is the ONLY project location kiro-cli resolves
     ``--agent`` against (see ``docs/reference/kiro-cli/custom-agents``, and
     :func:`agent_discovery.project_agent_files`, which states the same rule for every
     other consumer). There is no parent walk to match: a spec one directory up is not
     dispatchable, so it is not a shadow. The declared ``name`` beats the filename, which
     is why the comparison goes through :func:`agent_discovery.project_agent_name` rather
     than the stem -- a file called anything at all can declare ``kirocrew-worker``.
+
+    Two keywords narrow WHICH project files count, and the default of each is the
+    behaviour this function had before they existed. Both matter to a caller asking
+    "would the host dispatch this", and neither matters to one asking "does the
+    checkout make any claim on this name" -- a governance refusal, say, for which a
+    file in any form and any state is a claim.
+
+    ``markdown_specs=False`` narrows to the JSON form, for a host that dispatches
+    that alone. The narrowing happens INSIDE the scan, not to its result:
+    ``project_agent_files`` sorts by stem and this returns the first declared-name
+    match, so a differing-stem pair (``a.md`` and ``z.json``, both declaring ``foo``)
+    yields the markdown file first. Filtering afterwards would answer "no shadow"
+    while a dispatchable ``z.json`` sat right there. The same-stem pair needs no such
+    care: ``iter_agent_spec_files`` already drops ``<stem>.md`` when ``<stem>.json``
+    exists.
+
+    ``dispatchable_only=True`` additionally skips a spec that does not PARSE.
+    :func:`agent_discovery.project_agent_name` falls back to the filename stem for a
+    malformed file, so a broken ``foo.json`` otherwise matches ``foo`` and shadows a
+    perfectly good user-level agent of that name -- while kiro-cli, which reports it
+    as an error and offers no such mode, runs the user-level one. The distinction is
+    :func:`agent_discovery._declared_project_agent_name`, whose ``None`` means exactly
+    "does not parse" and which already applies the filename fallback for a spec that
+    parses without a ``name`` field.
 
     Never raises: an unreadable checkout answers "no shadow", and the caller's own
     fail-closed rule covers what it cannot see.
@@ -7651,6 +7682,12 @@ def _project_shadow_of(agent: str, work_dir: str | Path | None) -> Path | None:
         return None
     try:
         for spec in project_agent_files(work_dir):
+            if not markdown_specs and is_markdown_spec(spec):
+                continue
+            if dispatchable_only:
+                if _declared_project_agent_name(spec) == agent:
+                    return spec
+                continue
             if project_agent_name(spec) == agent:
                 return spec
     except OSError:

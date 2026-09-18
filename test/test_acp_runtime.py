@@ -178,10 +178,14 @@ def kas_readiness_wire(monkeypatch, tmp_path):
         servers = injected if injected is not None else [{"name": "kirocrew-dashboard"}]
         if resume:
             # Load gets the session injection through the existing overlay seam.
+            # ``**_kw``: the real signature takes the session's checkout as
+            # ``work_dir``, and a double that refuses it makes ``load_session``
+            # raise before it ever reaches the wire, so every assertion below
+            # fails as a handshake timeout instead of naming the double.
             monkeypatch.setattr(
                 runtime_mod,
                 "pooled_session_servers",
-                lambda *_: servers,
+                lambda *_, **_kw: servers,
             )
             start = rt.load_session("", "ready-session", **kwargs)
         else:
@@ -5681,7 +5685,9 @@ class TestAcpRuntimeLoadSession:
         loop_thread = threading.current_thread()
         seen: list[threading.Thread] = []
 
-        def _recording_pooled(overlay_dir, agent, channel_id=None):
+        def _recording_pooled(overlay_dir, agent, channel_id=None, **_kw):
+            # ``**_kw`` so the double keeps mirroring the real signature, which
+            # takes the session's checkout as ``work_dir``.
             seen.append(threading.current_thread())
             return []
 

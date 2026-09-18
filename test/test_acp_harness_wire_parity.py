@@ -177,7 +177,12 @@ async def _capture(backend: str, monkeypatch: pytest.MonkeyPatch) -> dict[str, A
     # session/load resolves its own roster from the gateway overlay, which stats
     # files. Pin it to the same roster session/new is given so the two requests
     # are comparable and neither moves with the host's gateway configuration.
-    monkeypatch.setattr(runtime_mod, "pooled_session_servers", lambda overlay, agent: _MCP_ROSTER)
+    # ``**_kw`` keeps the double mirroring the real signature, which takes the
+    # session's checkout as ``work_dir``; a double that refuses it would make the
+    # capture fall through to a different code path than the one under test.
+    monkeypatch.setattr(
+        runtime_mod, "pooled_session_servers", lambda overlay, agent, **_kw: _MCP_ROSTER
+    )
 
     # Pin the per-session identity token, for the same reason the work dir and the
     # session ids above are pinned: it is minted from ``secrets`` on every session
