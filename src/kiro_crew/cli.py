@@ -2737,7 +2737,11 @@ Examples:
     agent_update.add_argument("--kiro-agent", help="New kiro agent name")
     agent_update.add_argument("--workspace", help="New workspace name")
     agent_update.add_argument(
-        "--memory-store", help="Existing memory store identity (cannot be changed)"
+        "--memory-store",
+        help=(
+            "Existing memory store identity (cannot be changed, except to 'default' "
+            "from a store name the config refuses)"
+        ),
     )
     agent_update.add_argument(
         "--provision-memory",

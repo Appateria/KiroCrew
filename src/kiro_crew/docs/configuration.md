@@ -494,7 +494,13 @@ end in a dot or a space. A name that breaks any of those is reported when the co
 loads and no memory directory is created for it — guessing what was meant is how two
 crews would end up sharing one directory. Your entry stays in `config.json` exactly as
 you wrote it so you can fix the spelling; until you do, a member bound to it
-refuses execution with an explicit memory error.
+refuses execution with an explicit memory error. A member stuck on such a name has
+two ways out, and neither needs the gateway stopped: choose empty private memory
+for it (member settings, or `kirocrew agent update <name> --provision-memory`), or
+move it to Global Memory V1 with `kirocrew agent update <name> --memory-store=default`.
+Both leave your declaration and anything under `memory_stores/` untouched; they are
+the only two moves an existing binding ever permits, and only for a name no resolver
+can use.
 
 An undeclared name, mismatched owner, missing directory or unreadable database
 also refuses execution. There is no fallback to `default_memory_store` or Global

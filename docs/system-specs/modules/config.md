@@ -290,7 +290,17 @@ agent sync provisions newly discovered members too. An absent, empty or `default
 create field is accepted for client compatibility and requests automatic private
 allocation. A supplied named store is rejected. `PUT /api/agents/{name}` and CLI
 update reject rebinding: an echoed current store is accepted, another identity
-(including global) is not.
+(including global) is not — with one exception, `unusable_legacy_binding`. A
+member whose binding names a store the shape rule refuses
+(`memory_store_name_defect` is not `None`) on a record with no ownership claim
+(`owner_member == ""`, `memory_version == 1`, or no record at all) may move to
+`default`, on both surfaces. Nothing is protected on that binding: no resolver
+composes a path for the name, so nothing under `memory_stores/` is read, replaced
+or removed by leaving it, and the member cannot run a turn on it. Any other
+destination is still `private_memory_immutable`, with an error naming the defect
+rather than calling a V1 name private, and a record claiming ownership under such a
+name stays refused because its ownership cannot be verified. The dead declaration
+itself is left in `memory_stores` verbatim, like every reported name.
 
 The typed `memory.private_provisioning_enabled` boolean defaults to true. The
 existing owner config PATCH API accepts only JSON booleans; the loader normalizes
@@ -309,6 +319,11 @@ binding. They may opt in to empty V2 memory through `PUT /api/agents/{name}` wit
 Their previous Global or named memory remains untouched. Unchanged legacy
 bindings permit unrelated metadata edits, including description and avatar.
 Broken existing V2 ownership requires recovery instead of another allocation.
+The dashboard opt-in validates the prior binding with `require_member_memory_store`
+before retiring idle providers, except when `unusable_legacy_binding` answers for
+it: that check would refuse the very name the opt-in is the way out of, and
+`provision_member_memory` re-runs the private-evidence half itself while skipping
+the legacy-file half for a name that composes no path.
 
 An actual dashboard V1-to-V2 opt-in returns `new_conversation_required: true`.
 The owner must finish or stop visible member work and its attached children

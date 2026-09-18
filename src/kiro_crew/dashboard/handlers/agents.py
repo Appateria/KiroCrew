@@ -131,8 +131,10 @@ from kiro_crew.memory_stores import (
     memory_store_namespace_lock,
     persist_member_config,
     provision_member_memory,
+    require_member_memory_store,
     retire_unpublished_member_memory_store,
     rollback_member_memory_archive_if_active,
+    unusable_legacy_binding,
 )
 from kiro_crew.platform.governance import sanitize_agent_config_governance
 from kiro_crew.sandbox import (
@@ -4304,7 +4306,10 @@ async def _retire_failed_member_allocations(
     for owner, prior in prior_stores.items():
         try:
             store = config.agents[owner].memory_store
-            if store == prior:
+            # The global store is never an allocation of this operation: a member
+            # moving OFF a dead name lands on it, and a failed move must not be
+            # read as an unpublished private store to retire.
+            if store == prior or store == DEFAULT_MEMORY_STORE:
                 continue
             await _drained_to_thread(retire_unpublished_member_memory_store, store, owner)
         except BaseException:
@@ -4964,14 +4969,34 @@ async def api_kirocrew_agent_update(request: web.Request) -> web.Response:
             except CapabilityError as exc:
                 return web.json_response({"error": exc.code, "code": exc.code}, status=exc.status)
         prior_memory_store = agent.memory_store
+        # A binding is immutable in both directions -- a private store is never
+        # shared or rebound, and a live V1 binding is kept until the owner opts in
+        # -- with one exception: a V1 binding whose name no resolver composes
+        # (``unusable_legacy_binding``) may move to the global store. Nothing is
+        # protected on it: the name resolves no directory, so the member cannot
+        # run a turn on it, and the same name is what refused every repair.
+        dead_binding = None
         if "memory_store" in body and body["memory_store"] != prior_memory_store:
-            return web.json_response(
-                {
-                    "error": "A member's private memory cannot be rebound or shared",
-                    "code": "private_memory_immutable",
-                },
-                status=409,
-            )
+            dead_binding = unusable_legacy_binding(cfg, name)
+            if dead_binding is None:
+                return web.json_response(
+                    {
+                        "error": "A member's private memory cannot be rebound or shared",
+                        "code": "private_memory_immutable",
+                    },
+                    status=409,
+                )
+            if body["memory_store"] != DEFAULT_MEMORY_STORE:
+                return web.json_response(
+                    {
+                        "error": f"memory store {prior_memory_store!r} is unusable "
+                        f"({dead_binding}); this member can move only to "
+                        f"{DEFAULT_MEMORY_STORE!r} or to private memory",
+                        "code": "private_memory_immutable",
+                    },
+                    status=409,
+                )
+            agent.memory_store = DEFAULT_MEMORY_STORE
         prior_record = cfg.memory_stores.get(prior_memory_store)
         if body.get("provision_memory") and (
             prior_record is None or prior_record.memory_version != 2
@@ -5157,12 +5182,25 @@ async def api_kirocrew_agent_update(request: web.Request) -> web.Response:
         setup_refusal = None
         try:
             try:
+                if dead_binding is not None:
+                    # Validate the binding the member is MOVING TO, here rather than
+                    # inside ``persist_member_config``: that writer re-runs the same
+                    # check, but a refusal raised there is a 500, and a member with
+                    # a stale private declaration or directory of its own is exactly
+                    # the case it refuses (a lost private binding is restored, never
+                    # papered over with the global store).
+                    await _drained_to_thread(require_member_memory_store, cfg, name)
                 if body.get("provision_memory"):
                     prior_record = cfg.memory_stores.get(prior_memory_store)
                     if prior_record is None or prior_record.memory_version != 2:
-                        from kiro_crew.memory_stores import require_member_memory_store
-
-                        await _drained_to_thread(require_member_memory_store, cfg, name)
+                        # The precondition validates the binding being REPLACED, so
+                        # it must not run on one that only fails by name: that is
+                        # the state this opt-in is the way out of, and
+                        # ``provision_member_memory`` re-checks the private-evidence
+                        # half itself and skips the file half for such a name. After
+                        # a move to the global store the check above already ran.
+                        if dead_binding is None and unusable_legacy_binding(cfg, name) is None:
+                            await _drained_to_thread(require_member_memory_store, cfg, name)
                         setup_refusal = await _retire_legacy_member_contexts(
                             request, cfg, name, prior_memory_store
                         )

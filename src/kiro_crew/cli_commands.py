@@ -103,6 +103,7 @@ from kiro_crew.memory_stores import (
     resolve_declared_store,
     retire_unpublished_member_memory_store,
     rollback_member_memory_archive_if_active,
+    unusable_legacy_binding,
 )
 from kiro_crew.port_resolution import resolve_client_port_ex
 from kiro_crew.project_scope import scope_is_admissible, scope_selector_is_inadmissible
@@ -1159,7 +1160,9 @@ def _finding_store_suffix(finding: dict) -> str:
 def _retire_failed_cli_member_allocation(cfg: KiroCrewConfig, name: str, prior_store: str) -> None:
     try:
         store = cfg.agents[name].memory_store
-        if store == prior_store:
+        # The global store is never this command's allocation; a failed move onto
+        # it from a dead name has nothing to retire.
+        if store == prior_store or store == DEFAULT_MEMORY_STORE:
             return
         retire_unpublished_member_memory_store(store, name)
     except BaseException:
@@ -1223,8 +1226,24 @@ def _handle_agent(args: argparse.Namespace) -> None:
         agent = cfg.agents[args.name]
         prior_memory_store = agent.memory_store
         if args.memory_store is not None and args.memory_store != prior_memory_store:
-            print("Error: a member's private memory cannot be rebound or shared", file=sys.stderr)
-            sys.exit(1)
+            # Same rule as ``PUT /api/agents/{name}``: only a V1 binding whose name
+            # no resolver composes may move, and only to the global store.
+            dead_binding = unusable_legacy_binding(cfg, args.name)
+            if dead_binding is None:
+                print(
+                    "Error: a member's private memory cannot be rebound or shared",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if args.memory_store != DEFAULT_MEMORY_STORE:
+                print(
+                    f"Error: memory store {prior_memory_store!r} is unusable ({dead_binding}); "
+                    f"this member can move only to {DEFAULT_MEMORY_STORE!r} or to private "
+                    "memory (--provision-memory)",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            agent.memory_store = DEFAULT_MEMORY_STORE
         if args.kiro_agent is not None:
             agent.kiro_agent = args.kiro_agent
         if args.workspace is not None:

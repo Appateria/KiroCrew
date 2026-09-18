@@ -1277,7 +1277,10 @@ store before publication. Automatic discovery registers agents on Global V1.
 Existing members keep their exact V1 binding until the
 owner chooses private memory. Store ownership and algorithm version are recorded
 in config, the protected manifest and the database. Private stores cannot be
-shared or rebound. Choosing V2 preserves the V1 source and imports nothing
+shared or rebound. The one binding that may move is a V1 binding on a name the
+shape rule refuses, and only to `default` or to fresh V2 memory — see
+[config](config.md#named-memory-stores-memory_storespy), `unusable_legacy_binding`.
+Choosing V2 preserves the V1 source and imports nothing
 automatically. Ownership validation is specified in
 [config](config.md#named-memory-stores-memory_storespy).
 
