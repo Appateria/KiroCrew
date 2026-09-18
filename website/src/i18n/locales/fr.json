@@ -146,6 +146,9 @@
     }
   },
   "app": {
+    "app_job_failed": "Une tâche planifiée de cette application a échoué - voir Planification",
+    "app_job_running": "Une tâche planifiée de cette application est en cours",
+    "app_job_succeeded": "Une tâche planifiée de cette application vient de réussir",
     "apps": "Applications",
     "auto_update_on_restart": "Mise à jour automatique au redémarrage",
     "bonus_credits": "Crédits bonus",

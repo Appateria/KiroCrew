@@ -146,6 +146,9 @@
     }
   },
   "app": {
+    "app_job_failed": "Un lavoro pianificato di questa app non è riuscito - vedi Pianificazione",
+    "app_job_running": "Un lavoro pianificato di questa app è in esecuzione",
+    "app_job_succeeded": "Un lavoro pianificato di questa app è appena riuscito",
     "apps": "App",
     "auto_update_on_restart": "Aggiornamento automatico al riavvio",
     "bonus_credits": "Crediti bonus",

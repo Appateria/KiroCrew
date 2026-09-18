@@ -146,6 +146,9 @@
     }
   },
   "app": {
+    "app_job_failed": "Un trabajo programado de esta aplicación ha fallado - consulta Programación",
+    "app_job_running": "Un trabajo programado de esta aplicación está en ejecución",
+    "app_job_succeeded": "Un trabajo programado de esta aplicación acaba de finalizar correctamente",
     "apps": "Apps",
     "auto_update_on_restart": "Actualizar automáticamente al reiniciar",
     "bonus_credits": "Créditos de bonificación",

@@ -144,6 +144,9 @@
     }
   },
   "app": {
+    "app_job_failed": "此应用的计划任务失败 - 请查看计划",
+    "app_job_running": "此应用的计划任务正在运行",
+    "app_job_succeeded": "此应用的计划任务刚刚成功",
     "apps": "应用",
     "auto_update_on_restart": "重启时自动更新",
     "bonus_credits": "赠送额度",

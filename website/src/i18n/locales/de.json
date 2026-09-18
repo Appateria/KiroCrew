@@ -145,6 +145,9 @@
     }
   },
   "app": {
+    "app_job_failed": "Ein geplanter Job dieser App ist fehlgeschlagen - siehe Zeitplan",
+    "app_job_running": "Ein geplanter Job dieser App läuft",
+    "app_job_succeeded": "Ein geplanter Job dieser App war gerade erfolgreich",
     "apps": "Apps",
     "auto_update_on_restart": "Automatische Aktualisierung beim Neustart",
     "bonus_credits": "Bonus-Credits",

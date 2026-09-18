@@ -146,6 +146,9 @@
     }
   },
   "app": {
+    "app_job_failed": "Uma tarefa agendada deste aplicativo falhou - consulte Agendamento",
+    "app_job_running": "Uma tarefa agendada deste aplicativo está em execução",
+    "app_job_succeeded": "Uma tarefa agendada deste aplicativo acabou de ser concluída com êxito",
     "apps": "Apps",
     "auto_update_on_restart": "Atualizar automaticamente ao reiniciar",
     "bonus_credits": "Créditos bônus",

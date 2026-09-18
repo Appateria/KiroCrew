@@ -145,6 +145,9 @@
     }
   },
   "app": {
+    "app_job_failed": "A scheduled job of this app failed - see Schedule",
+    "app_job_running": "A scheduled job of this app is running",
+    "app_job_succeeded": "A scheduled job of this app just succeeded",
     "bonus_credits": "Bonus credits",
     "builder_id": "Builder ID",
     "check_logs_for_details": "Check logs for details.",

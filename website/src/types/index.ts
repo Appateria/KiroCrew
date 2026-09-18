@@ -427,6 +427,13 @@ export interface CronJob {
   skip_dates?: string[] | null
   script?: string | null; command?: string | null; last_result?: string | null; last_error?: string | null
   is_running?: boolean; running_since?: number | null
+  /** The installed app that owns this job, or null/absent for a person-owned
+   * one. Host-derived from the job's `created_by` stamp, which an app never
+   * supplies, so it cannot be used to claim another app's jobs. Absent on an
+   * older gateway. */
+  app?: string | null
+  /** True only when the USER paused the job; execution never sets it. */
+  user_paused?: boolean
   /** Operator-granted vault secrets injected into a script/command job's env at
    * fire time: env-var name -> vault secret NAME (values never leave the vault).
    * Absent/null when the job holds no grant. */

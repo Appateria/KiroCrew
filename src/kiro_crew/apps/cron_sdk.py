@@ -108,13 +108,45 @@ def _run_sync_mutator(
     )
 
 
+#: Prefix the host writes into a cron job's ``created_by`` to mark the job as
+#: owned by an installed app, rather than by a person.
+#:
+#: ``created_by`` is shared with a human creator's Slack user ID, so the prefix
+#: is what separates the two readings. An app never supplies the value --
+#: :class:`CronSDK` stamps it from the app name the host resolved -- so an app
+#: can neither claim another app's jobs nor disguise its own as a person's.
+APP_OWNER_PREFIX = "app:"
+
+
+def owner_tag(app_name: str) -> str:
+    """The ``created_by`` value marking a cron job as owned by *app_name*."""
+    return f"{APP_OWNER_PREFIX}{app_name}"
+
+
+def app_owner_name(created_by: str | None) -> str:
+    """The app owning a job with this ``created_by``, or ``""`` if not app-owned.
+
+    Returning the empty string rather than ``None`` for "not an app" keeps the
+    result usable in a boolean test without the caller distinguishing an absent
+    field from a person-owned one: both mean the same thing here.
+
+    A bare ``"app:"`` names no app and is rejected. It is reachable: the stamp
+    is built from a resolved app name, and an empty name would otherwise yield
+    an empty key that matches no app while still reading as app-owned.
+    """
+    value = created_by or ""
+    if not value.startswith(APP_OWNER_PREFIX):
+        return ""
+    return value[len(APP_OWNER_PREFIX) :]
+
+
 class CronSDK:
     """App-scoped cron job management."""
 
     def __init__(self, app_name: str, cron_service: Any) -> None:
         self._app_name = app_name
         self._cron = cron_service
-        self._owner_prefix = f"app:{app_name}"
+        self._owner_prefix = owner_tag(app_name)
 
     @property
     def app_name(self) -> str:

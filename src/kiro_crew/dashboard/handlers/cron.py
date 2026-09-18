@@ -2745,6 +2745,12 @@ async def api_lessons_delete(request: web.Request) -> web.Response:
 
 
 async def api_crons(request: web.Request) -> web.Response:
+    # Function-local for the reason the cron helpers above are: importing
+    # `kiro_crew.apps.cron_sdk` executes `kiro_crew.apps.__init__`, which pulls
+    # `bridges` and its documented mcp_cron cycle. Nothing on the boot path
+    # needs this symbol, so paying for it per request keeps that cycle out of
+    # module import order entirely.
+    from kiro_crew.apps.cron_sdk import app_owner_name
     from kiro_crew.cron import compute_next_run_ts, format_schedule, get_local_tz  # noqa: F811
 
     state: DashboardState = request.app["state"]
@@ -2779,6 +2785,21 @@ async def api_crons(request: web.Request) -> web.Response:
             "every_secs": j.schedule.every_secs if j.schedule.kind == "every" else None,
             "created_ts": j.created_ts or None,
             "last_status": j.last_status,
+            # The installed app that owns this job, or None for a person-owned
+            # one. Derived from `created_by` rather than serialized raw: that
+            # field doubles as a human creator's Slack user ID, which this
+            # endpoint has no reason to disclose, and the app reading is the
+            # only one a consumer here wants. Host-written at creation, so an
+            # app cannot claim another app's jobs by supplying it.
+            "app": app_owner_name(j.created_by) or None,
+            # Whether the USER paused this job, as opposed to execution pausing
+            # it after repeated failures. Both land as `enabled=False`, so
+            # `enabled` alone cannot tell them apart -- and the difference is the
+            # whole signal for a consumer judging health: a job the user paused
+            # on purpose is not a health signal, while one auto-paused after
+            # consecutive failures is the WORST one, which `unhealthy_jobs_from_disk`
+            # already treats that way by skipping only user pauses.
+            "user_paused": j.user_paused,
             "agent": redact_credentials(redact_exfiltration_urls(j.agent_id or "")[0])[0] or None,
             "member_id": j.member_id or None,
             "memory_store": j.memory_store or None,
