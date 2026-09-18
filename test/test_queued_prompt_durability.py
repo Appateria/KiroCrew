@@ -969,9 +969,11 @@ class TestHandoverDoesNotSilentlyDropAQueuedPrompt:
 
         saved = AsyncMock(return_value=True)
         monkeypatch.setattr(chat_handlers, "save_slot_off_loop", saved)
+        monkeypatch.setattr(state, "notify", MagicMock())
 
-        assert await chat_handlers._persist_handover_tail(state, "s1", slot) is True
+        result = await chat_handlers._persist_handover_tail(state, "s1", slot)
 
+        assert result.rows_committed is True
         saved.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -991,14 +993,29 @@ class TestHandoverDoesNotSilentlyDropAQueuedPrompt:
         # Commits, but carries the replacement's line: the rows-only path defers
         # every slot-owned field, so the queue is still owed afterwards.
         monkeypatch.setattr(chat_handlers, "save_slot_off_loop", AsyncMock(return_value=True))
+        notify = MagicMock()
+        monkeypatch.setattr(state, "notify", notify)
 
         with caplog.at_level("WARNING"):
-            assert await chat_handlers._persist_handover_tail(state, "s1", slot) is True
+            result = await chat_handlers._persist_handover_tail(state, "s1", slot)
+
+        assert result == chat_handlers._HandoverDrainResult(rows_committed=True, prompts_lost=2)
 
         messages = [r.getMessage() for r in caplog.records if "were not carried" in r.getMessage()]
         assert len(messages) == 1
         assert "2 queued prompt(s)" in messages[0]
         assert "s1" in messages[0]
+
+        # The log is not reachable by the person whose words were dropped, so the
+        # same fact goes to the notification feed — as a COUNT, never the text:
+        # the entries may belong to a restricted session.
+        assert notify.call_count == 1
+        args = notify.call_args.args
+        body = args[2]
+        assert "2 queued prompt(s)" in body
+        assert "s1" in body
+        assert "first" not in body and "second" not in body
+        assert notify.call_args.kwargs["meta"]["count"] == 2
 
     @pytest.mark.asyncio
     async def test_a_carried_queue_is_not_reported(self, tmp_path, monkeypatch, caplog) -> None:
@@ -1013,12 +1030,17 @@ class TestHandoverDoesNotSilentlyDropAQueuedPrompt:
             return True
 
         monkeypatch.setattr(chat_handlers, "save_slot_off_loop", _real_save)
+        notify = MagicMock()
+        monkeypatch.setattr(state, "notify", notify)
 
         with caplog.at_level("WARNING"):
-            assert await chat_handlers._persist_handover_tail(state, "s1", slot) is True
+            result = await chat_handlers._persist_handover_tail(state, "s1", slot)
+
+        assert result == chat_handlers._HandoverDrainResult(rows_committed=True, prompts_lost=0)
 
         # The entries reached disk, so there is nothing to report.
         assert not [r for r in caplog.records if "were not carried" in r.getMessage()]
+        notify.assert_not_called()
         assert slot.queue_persist_pending is False
 
     @pytest.mark.asyncio
@@ -1034,11 +1056,252 @@ class TestHandoverDoesNotSilentlyDropAQueuedPrompt:
         saved = AsyncMock(return_value=True)
         monkeypatch.setattr(chat_handlers, "save_slot_off_loop", saved)
 
-        assert await chat_handlers._persist_handover_tail(state, "s1", slot) is True
+        result = await chat_handlers._persist_handover_tail(state, "s1", slot)
+
+        assert result == chat_handlers._HandoverDrainResult(rows_committed=True, prompts_lost=0)
 
         # Nothing owed is still nothing written: the early return is narrowed, not
         # removed, so a hand-over does not rewrite every idle transcript.
         saved.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_declined_write_counts_the_pending_queue_as_lost(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from kiro_crew.dashboard import chat_handlers
+
+        state = _make_state(tmp_path)
+        slot = _busy_slot(state)
+        _save_slot_to_history(state, slot, closed=False)
+        slot._dirty = False
+        slot._disk_window_len = len(slot.messages)
+        slot.queue_append("mine")
+
+        monkeypatch.setattr(chat_handlers, "save_slot_off_loop", AsyncMock(return_value=False))
+        notify = MagicMock()
+        monkeypatch.setattr(state, "notify", notify)
+
+        result = await chat_handlers._persist_handover_tail(state, "s1", slot)
+
+        # The save wrote nothing, so a pending queue dies with the slot along
+        # with the rows — and both halves of the answer say so.
+        assert result == chat_handlers._HandoverDrainResult(rows_committed=False, prompts_lost=1)
+        assert notify.call_count == 1
+        assert notify.call_args.kwargs["meta"]["count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_raising_write_counts_the_pending_queue_as_lost(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from kiro_crew.dashboard import chat_handlers
+
+        state = _make_state(tmp_path)
+        slot = _busy_slot(state)
+        _save_slot_to_history(state, slot, closed=False)
+        slot._dirty = False
+        slot._disk_window_len = len(slot.messages)
+        slot.queue_append("mine")
+
+        monkeypatch.setattr(
+            chat_handlers, "save_slot_off_loop", AsyncMock(side_effect=OSError("disk wedged"))
+        )
+        notify = MagicMock()
+        monkeypatch.setattr(state, "notify", notify)
+
+        result = await chat_handlers._persist_handover_tail(state, "s1", slot)
+
+        assert result == chat_handlers._HandoverDrainResult(rows_committed=False, prompts_lost=1)
+        assert notify.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_an_already_durable_queue_is_not_counted_lost_by_a_failed_write(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from kiro_crew.dashboard import chat_handlers
+
+        state = _make_state(tmp_path)
+        slot = _busy_slot(state)
+        slot.queue_append("mine")
+        # A committed save carries the queue onto the durable line; a LATER
+        # failed hand-over write leaves that line in place, so the entries
+        # survive the popped object and must not be reported as lost.
+        _save_slot_to_history(state, slot, closed=False)
+        assert slot.queue_persist_pending is False
+        slot.append("user", "an unsaved row")
+
+        monkeypatch.setattr(
+            chat_handlers, "save_slot_off_loop", AsyncMock(side_effect=OSError("disk wedged"))
+        )
+        notify = MagicMock()
+        monkeypatch.setattr(state, "notify", notify)
+
+        result = await chat_handlers._persist_handover_tail(state, "s1", slot)
+
+        assert result == chat_handlers._HandoverDrainResult(rows_committed=False, prompts_lost=0)
+        notify.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_notification_does_not_fail_the_drain(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from kiro_crew.dashboard import chat_handlers
+
+        state = _make_state(tmp_path)
+        slot = _busy_slot(state)
+        _save_slot_to_history(state, slot, closed=False)
+        slot._dirty = False
+        slot._disk_window_len = len(slot.messages)
+        slot.queue_append("mine")
+
+        monkeypatch.setattr(chat_handlers, "save_slot_off_loop", AsyncMock(return_value=True))
+        monkeypatch.setattr(state, "notify", MagicMock(side_effect=RuntimeError("bus down")))
+
+        # The hand-over has to complete for the replacement holding the key, so
+        # a notice that cannot be delivered is logged and the answer still comes
+        # back whole.
+        result = await chat_handlers._persist_handover_tail(state, "s1", slot)
+
+        assert result == chat_handlers._HandoverDrainResult(rows_committed=True, prompts_lost=1)
+
+    def test_the_result_is_truthy_even_when_the_write_failed(self) -> None:
+        from kiro_crew.dashboard import chat_handlers
+
+        # A NamedTuple is a non-empty tuple, so ``if not result:`` passes over a
+        # failed drain. This pin makes the hazard explicit: callers must read
+        # ``rows_committed``, and a future refactor back to truthiness testing
+        # fails here first.
+        failed = chat_handlers._HandoverDrainResult(rows_committed=False, prompts_lost=1)
+        assert bool(failed) is True
+        assert failed.rows_committed is False
+
+    @pytest.mark.asyncio
+    async def test_a_replacement_clearing_the_line_is_reported_as_loss(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The slot's own persistence signature says "my queue is durable", but
+        the shared line is the entries' only copy — and a same-key recreate
+        persists at birth, rebuilding that line without them. Survival must be
+        read from the line, or exactly this hand-over reports zero loss."""
+        from kiro_crew.dashboard import chat_handlers
+
+        state = _make_state(tmp_path)
+        slot = _busy_slot(state)
+        slot.queue_append("mine")
+        # The original durably commits its queue: persist-pending goes False.
+        _save_slot_to_history(state, slot, closed=False)
+        assert slot.queue_persist_pending is False
+        slot.append("user", "an unsaved row")
+
+        # A same-key recreate takes the key and persists at birth: its full
+        # save rebuilds the shared line, clearing ``queued_prompts`` by absence.
+        state._slots.pop("s1")
+        replacement = _busy_slot(state)
+        _save_slot_to_history(state, replacement, closed=False)
+        assert "queued_prompts" not in _meta(state)
+
+        # The drain's rows-only write commits but never re-carries the queue.
+        monkeypatch.setattr(chat_handlers, "save_slot_off_loop", AsyncMock(return_value=True))
+        notify = MagicMock()
+        monkeypatch.setattr(state, "notify", notify)
+
+        result = await chat_handlers._persist_handover_tail(state, "s1", slot)
+
+        assert result == chat_handlers._HandoverDrainResult(rows_committed=True, prompts_lost=1)
+        assert notify.call_count == 1
+        assert notify.call_args.kwargs["meta"]["count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_live_replacement_dooms_line_entries_it_does_not_carry(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A read that finds the entries still on the line proves nothing while
+        a transcript-sharing holder is alive: that holder's next full save
+        rebuilds ``queued_prompts`` from its own queue. Survival is the
+        holder's queue, not a lucky snapshot of the line."""
+        from kiro_crew.dashboard import chat_handlers
+
+        state = _make_state(tmp_path)
+        slot = _busy_slot(state)
+        slot.queue_append("mine")
+        _save_slot_to_history(state, slot, closed=False)
+        assert slot.queue_persist_pending is False
+        slot._dirty = False
+        slot._disk_window_len = len(slot.messages)
+
+        # The recreate has taken the key but not yet saved: the line still
+        # shows the original's entries.
+        state._slots.pop("s1")
+        _busy_slot(state)
+        assert "queued_prompts" in _meta(state)
+
+        saved = AsyncMock(return_value=True)
+        monkeypatch.setattr(chat_handlers, "save_slot_off_loop", saved)
+        notify = MagicMock()
+        monkeypatch.setattr(state, "notify", notify)
+
+        result = await chat_handlers._persist_handover_tail(state, "s1", slot)
+
+        assert result == chat_handlers._HandoverDrainResult(rows_committed=True, prompts_lost=1)
+        assert notify.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_cleared_line_is_reported_even_when_nothing_needs_writing(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from kiro_crew.dashboard import chat_handlers
+
+        state = _make_state(tmp_path)
+        slot = _busy_slot(state)
+        slot.queue_append("mine")
+        _save_slot_to_history(state, slot, closed=False)
+        assert slot.queue_persist_pending is False
+        slot._dirty = False
+        slot._disk_window_len = len(slot.messages)
+
+        state._slots.pop("s1")
+        replacement = _busy_slot(state)
+        _save_slot_to_history(state, replacement, closed=False)
+        assert "queued_prompts" not in _meta(state)
+
+        saved = AsyncMock(return_value=True)
+        monkeypatch.setattr(chat_handlers, "save_slot_off_loop", saved)
+        notify = MagicMock()
+        monkeypatch.setattr(state, "notify", notify)
+
+        result = await chat_handlers._persist_handover_tail(state, "s1", slot)
+
+        # The no-write exit still answers for the entries: nothing here owes a
+        # row, but the line holds none of the user's words and this frame is
+        # their last reader.
+        assert result == chat_handlers._HandoverDrainResult(rows_committed=True, prompts_lost=1)
+        saved.assert_not_awaited()
+        assert notify.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_entries_the_replacement_restored_are_not_reported_lost(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The line is the survival test in BOTH directions: entries a
+        replacement's own save kept on the shared line live on as queue cards,
+        so counting them lost would over-report."""
+        from kiro_crew.dashboard import chat_handlers
+
+        state = _make_state(tmp_path)
+        slot = _busy_slot(state)
+        slot.queue_append("mine")
+        _save_slot_to_history(state, slot, closed=False)
+        assert slot.queue_persist_pending is False
+        slot.append("user", "an unsaved row")
+
+        monkeypatch.setattr(chat_handlers, "save_slot_off_loop", AsyncMock(return_value=True))
+        notify = MagicMock()
+        monkeypatch.setattr(state, "notify", notify)
+
+        # No clobber: the line still holds the entry this slot committed.
+        result = await chat_handlers._persist_handover_tail(state, "s1", slot)
+
+        assert result == chat_handlers._HandoverDrainResult(rows_committed=True, prompts_lost=0)
+        notify.assert_not_called()
 
 
 class TestAnAcceptedButUnpersistedPromptIsReported:

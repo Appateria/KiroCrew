@@ -1381,10 +1381,14 @@ state a close compensates is not all scoped the same way.
   restore they skip: a store that rejected the `closed=True` write can still
   accept the next one, and a lock lost to the recreate is exactly that case.
 - **A drain that fails is reported, not swallowed.** `_persist_handover_tail`
-  returns whether rows were owed and reached disk, and every caller honours it —
-  because this frame is the last reference to those rows, so nothing will retry and
+  returns a named result: `rows_committed` says whether rows were owed and
+  reached disk, `prompts_lost` counts the durable-eligible queued prompts whose
+  only copy dies with the popped slot. The result is a tuple and therefore
+  always truthy, so callers read `rows_committed` rather than testing the
+  result itself — and every caller honours it, because this frame is the last
+  reference to those rows, so nothing will retry and
   nothing else will ever report them. Both PRE-SAVE hand-over exits therefore turn
-  a False into their path's own failure: `close_slot` raises
+  a failed commit into their path's own failure: `close_slot` raises
   `SlotCloseError(code="history_save_failed")` (the same code as an ordinary failed
   archive — from the caller's side it is one thing, a close whose history write did
   not land) and cleanup adds the key to `failed`. There is nothing to roll back on
@@ -1393,7 +1397,18 @@ state a close compensates is not all scoped the same way.
   those arms already end in `SlotCloseError` / `failed.append(name)`, so a lost tail
   reaches the caller regardless, and the drain only decides whether the rows
   survived. Every failure is also logged with the exact row count, which is the only
-  report anything in the process can still make about the rows themselves.
+  report anything in the process can still make about the rows themselves. A
+  non-zero `prompts_lost` additionally posts a dashboard notification naming the
+  slot and the count — never the prompt text, which may belong to a restricted
+  session — because the gateway log is not reachable by the person whose words
+  were dropped. Survival is judged by who writes the durable line next, not by
+  the slot's own persistence signature: a live transcript-sharing holder
+  rebuilds the shared line on its every full save, so an owed entry survives a
+  hand-over only when that holder's own queue carries it (a rehydrated holder
+  restores the entries as queue cards; a fresh recreate does not), while with
+  no live sharing holder the line is at rest and answers directly. An owed
+  entry with no durable future is counted lost on every exit — including the
+  no-write one.
 
 Three properties the route holds, each of which fails silently if broken:
 
@@ -1844,7 +1859,11 @@ so absence clears it.
   which is the conservative side. `_persist_handover_tail` therefore treats an
   owed queue as work — a queued prompt changes neither the window length nor
   `_dirty`, so its "nothing owed" test would otherwise answer True over one — and
-  reports the count when the committed write could not carry them. Nothing in the
+  judges each owed entry's durable future by who writes the line next: an entry
+  with none is reported in every register that can still hold it — the
+  warning log, the `prompts_lost` field of its returned result, and a dashboard
+  notification that names the slot and the count (never the prompt text).
+  Nothing in the
   process visits that slot again, the same position the held `/note` lines are in.
 - Bounds: `MAX_DURABLE_QUEUE_ENTRIES` entries and `MAX_DURABLE_QUEUE_BYTES` of
   serialized value, admitted front-first because the front runs first. An
