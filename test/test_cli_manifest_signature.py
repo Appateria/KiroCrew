@@ -1175,3 +1175,228 @@ def test_installer_fetches_authenticated_urls_without_redirects() -> None:
     assert all(re.search(r"(?:^|\s)-[^\s]*L", line) is None for line in fetches)
     manifest_fetch = next(line for line in fetches if '"$MANIFEST_URL"' in line)
     assert "--max-filesize 65536" in manifest_fetch
+
+
+# ---------------------------------------------------------------------------
+# One contract, two verifiers.
+#
+# publish-installer.yml gates every live channel feed with
+# ``cli-manifest.py verify``, while end users run cli.sh's own inline verifier.
+# Those are separate implementations of one contract, so until the tests below
+# existed nothing failed when a rule was added to one side and not the other --
+# and the shape that reaches users is a publication reporting a feed valid that
+# the installer then refuses.
+#
+# The direction matters and only one direction is a defect. The gate is allowed
+# to be STRICTER than the installer: it caps the payload at 16 KiB against the
+# installer's 64 KiB, caps every field at 2048 characters, and refuses a
+# ``min_version`` above the version the manifest ships. Each of those costs a
+# publisher one loud failure on a feed the installer would have taken, which is
+# a safe trade. The gate may never be LAXER, because that publishes a feed that
+# bricks installs while reporting success.
+#
+# So the invariant is: whatever the gate ACCEPTS, a real cli.sh run must also
+# accept. The fixtures are built once and driven through both sides to hold it.
+# ---------------------------------------------------------------------------
+
+#: The fixture classes publication and installation must agree on. ``valid`` is
+#: the only one either side may accept; each other name is a manifest a release
+#: process must never ship, for a different reason.
+SHARED_FIXTURES = ("valid", "wrong-channel", "wrong-host", "tampered", "legacy")
+
+
+def _shared_fixture(root: Path, key: SigningKey, name: str) -> tuple[Path, Path]:
+    """Build the (manifest, wheel) pair for shared fixture *name*.
+
+    One builder for both verifiers: a fixture authored twice is how the two
+    sides drift while every test still passes.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    wheel = root / WHEEL_NAME
+    wheel.write_bytes(f"wheel bytes for {name}".encode("ascii"))
+
+    if name == "valid":
+        return _build_manifest(root, key, wheel), wheel
+    if name == "wrong-channel":
+        # Correctly signed for another channel. Both sides are asked for
+        # CHANNEL, so both must refuse to cross the channel boundary.
+        return _build_manifest(root, key, wheel, channel="nightly"), wheel
+    if name == "wrong-host":
+        # Correctly signed, but bound to an artifact host neither side asked
+        # for: a valid signer must not be able to redirect the download.
+        return (
+            _build_manifest(root, key, wheel, artifact_base="https://attacker.invalid"),
+            wheel,
+        )
+    if name == "tampered":
+        manifest = _build_manifest(root, key, wheel)
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        payload["sha256"] = "0" * 64
+        manifest.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return manifest, wheel
+    if name == "legacy":
+        # An unsigned feed shape, carrying no signature block at all. Neither
+        # side has an unsigned fallback, so this input must be refused.
+        manifest = root / "legacy.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "channel": CHANNEL,
+                    "version": VERSION,
+                    "wheel_url": f"{CDN_BASE}/cli/{CHANNEL}/{VERSION}/{WHEEL_NAME}",
+                    "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+                    "python_requires": ">=3.10",
+                    "pub_date": "2026-08-01T00:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return manifest, wheel
+    raise AssertionError(f"unknown shared fixture: {name}")
+
+
+def test_shared_fixture_names_are_the_set_the_two_verifiers_agree_on() -> None:
+    """Adding a fixture class must add it to BOTH sides, not to one.
+
+    The differential test below is parametrized over this tuple, so a name
+    added here is automatically driven through the gate and through a real
+    installer run. Pinning the tuple keeps the next author from quietly
+    reducing the agreed set instead of extending it.
+    """
+    assert SHARED_FIXTURES == ("valid", "wrong-channel", "wrong-host", "tampered", "legacy")
+    assert len(set(SHARED_FIXTURES)) == len(SHARED_FIXTURES)
+
+
+@pytest.mark.parametrize("fixture", SHARED_FIXTURES)
+def test_publication_gate_never_accepts_what_the_installer_refuses(
+    tmp_path: Path, test_key: SigningKey, fixture: str
+) -> None:
+    """The load-bearing invariant: gate accepts => a real cli.sh run accepts.
+
+    Runs the SAME manifest through ``cli-manifest.py verify`` (what
+    publish-installer.yml gates a live feed with) and through cli.sh itself
+    (what a user's ``curl … | sh`` executes), then asserts the two cannot
+    disagree in the direction that ships a broken feed.
+    """
+    manifest, wheel = _shared_fixture(tmp_path / fixture, test_key, fixture)
+
+    gate = _verify_manifest(manifest, test_key)
+    gate_accepted = gate.returncode == 0
+
+    cdn = _stage_cdn(tmp_path / fixture, manifest, wheel)
+    script = _patched_installer(tmp_path / fixture, test_key)
+    installed, _curl_marker, install_marker = _run_installer(
+        script, tmp_path / fixture / "run", cdn
+    )
+    installer_accepted = installed.returncode == 0
+
+    assert not (gate_accepted and not installer_accepted), (
+        f"false green on fixture {fixture!r}: the publication gate accepted a manifest "
+        f"cli.sh refused, so publishing this feed would brick installs while the gate "
+        f"reported success. installer stderr: {installed.stderr}"
+    )
+
+    if fixture == "valid":
+        assert gate_accepted, gate.stderr
+        assert installer_accepted, installed.stderr
+        assert install_marker.exists()
+    else:
+        assert not gate_accepted, f"{fixture!r} must not pass the publication gate"
+        assert not installer_accepted, f"{fixture!r} must not install"
+        assert not install_marker.exists()
+
+
+def test_gate_and_installer_normalize_a_repeated_slash_artifact_base_alike(
+    tmp_path: Path, test_key: SigningKey
+) -> None:
+    """A repeated-slash artifact base was a real false green, not a typo class.
+
+    cli.sh applies ``${ARTIFACT_BASE%/}`` and wheel_engine interpolates its base
+    unchanged, so both strip at most ONE trailing slash. The gate used
+    ``str.rstrip("/")``, which strips every one, so for a base of
+    ``https://host//`` the gate expected ``https://host/cli/...`` while the
+    installer expected ``https://host//cli/...``. A feed carrying the former
+    passed publication and was refused at install time -- exactly the failure
+    the gate exists to catch, produced by the gate itself.
+
+    The manifest here is signed for the URL the OLD gate accepted, so this test
+    fails against the previous normalization and passes once the gate models the
+    installer.
+    """
+    doubled_base = f"{CDN_BASE}//"
+    wheel = tmp_path / WHEEL_NAME
+    wheel.write_bytes(b"repeated-slash wheel")
+    # Signed for the single-slash URL: what rstrip() derives from doubled_base.
+    manifest = _build_manifest(tmp_path, test_key, wheel, artifact_base=CDN_BASE)
+
+    gate = _verify_manifest(manifest, test_key, artifact_base=doubled_base)
+
+    assert gate.returncode == 1, (
+        "the gate accepted a feed bound to a base the installer normalizes "
+        "differently; that is the false green this check exists to stop"
+    )
+    assert "repeated slashes" in gate.stderr
+
+    # And prove the installer really does refuse it, so the assertion above is
+    # protecting a live divergence rather than a hypothetical one.
+    cdn = _stage_cdn(tmp_path, manifest, wheel)
+    script = _patched_installer(tmp_path, test_key)
+    installed, _curl_marker, install_marker = _run_installer(
+        script, tmp_path / "run", cdn, "--cdn", doubled_base
+    )
+
+    assert installed.returncode == 1
+    assert "does not match the requested channel/version/artifact host" in installed.stderr
+    assert not install_marker.exists()
+
+
+def test_gate_still_accepts_a_single_trailing_slash_artifact_base(
+    tmp_path: Path, test_key: SigningKey
+) -> None:
+    """One trailing slash is what the installer itself tolerates, so the gate must.
+
+    ``${ARTIFACT_BASE%/}`` removes exactly one, so ``https://host/`` and
+    ``https://host`` are the same base to cli.sh. Refusing the slashed spelling
+    would turn a tightening into an outage for any caller that passes it.
+    """
+    wheel = tmp_path / WHEEL_NAME
+    wheel.write_bytes(b"single-slash wheel")
+    manifest = _build_manifest(tmp_path, test_key, wheel, artifact_base=CDN_BASE)
+
+    accepted = _verify_manifest(manifest, test_key, artifact_base=f"{CDN_BASE}/")
+
+    assert accepted.returncode == 0, accepted.stderr
+
+
+def test_the_live_feed_gate_invokes_the_verifier_these_fixtures_pin() -> None:
+    """The invariant is only worth holding if the workflow runs this verifier.
+
+    Reads publish-installer.yml rather than trusting the comment above it: the
+    feed gate must still shell ``cli-manifest.py verify`` with the channel and
+    artifact base bound, and must still take its public key from cli.sh's own
+    embedded trust root rather than from a separately stored copy that could
+    rotate independently.
+    """
+    installer_workflow = ROOT / ".github" / "workflows" / "publish-installer.yml"
+    workflow = yaml.safe_load(installer_workflow.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["publish-installer"]["steps"]
+    gate = next(
+        step for step in steps if step.get("name", "").startswith("Verify every live channel feed")
+    )
+    run = gate["run"]
+
+    # Anchor on a LIVE line, not on the text appearing anywhere: commenting the
+    # invocation out leaves every substring in place, so a bare `in run` check
+    # stays green while the gate stops verifying anything.
+    invocations = [
+        line
+        for line in run.splitlines()
+        if "packaging/signing/cli-manifest.py verify" in line and not line.lstrip().startswith("#")
+    ]
+    assert invocations, "the feed gate no longer executes cli-manifest.py verify"
+    assert "--expected-channel" in run
+    assert "--artifact-base" in run
+    # The key the gate trusts is extracted from cli.sh itself, which is what
+    # makes "signed by the pinned key" mean the same thing on both sides.
+    assert "CLI_MANIFEST_PUBLIC_KEY_B64" in run
+    assert "cli.sh" in run

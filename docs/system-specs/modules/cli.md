@@ -139,6 +139,23 @@ pinned, the repository's explicit `UNCONFIGURED` state therefore makes stock
 `cli.sh` non-installing by design. Provisioning and rollout are specified in
 `packaging/signing/README.md`.
 
+The publication gate in `.github/workflows/publish-installer.yml` checks every
+live channel feed with `packaging/signing/cli-manifest.py verify` before it
+replaces the live `cli.sh`. That is a second implementation of the contract
+above, so what holds between them is a direction rather than equality:
+**whatever the gate accepts, the installer must also accept.** The gate is
+deliberately stricter in three places — a 16 KiB payload cap against the
+installer's 64 KiB, a 2048-character cap per field, and refusing a
+`min_version` above the version the manifest ships — because rejecting a feed
+the installer would have taken costs a publisher one loud failure, while the
+opposite direction publishes a feed that bricks installs and reports success
+while doing it. Both sides therefore normalize the artifact base identically,
+stripping at most ONE trailing slash (`${ARTIFACT_BASE%/}` in `cli.sh`), and the
+gate refuses a base with repeated trailing slashes instead of normalizing to a
+URL no installer reproduces. `test/test_cli_manifest_signature.py` holds the
+direction by driving one shared fixture set — valid, wrong-channel, wrong-host,
+tampered, legacy — through the gate and through a real `cli.sh` run.
+
 ## Project Directory Detection
 
 At startup, `main()` auto-detects the project root and sets `KIROCREW_PROJECT_DIR`:

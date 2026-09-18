@@ -147,9 +147,18 @@ handled by an agent. Operational enablement is a human/infrastructure step:
    is enforced mechanically: `publish-installer.yml` refuses to publish while
    `cli.sh` still pins `CLI_MANIFEST_KEY_ID="UNCONFIGURED"`, and — once a key
    is pinned — refuses unless every LIVE channel feed verifies against that
-   key (`cli-manifest.py verify`, the same checks the installer runs), so
-   neither the pin commit nor any later merge can replace the live installer
-   with one that refuses the feeds it is pointed at.
+   key (`cli-manifest.py verify`), so neither the pin commit nor any later
+   merge can replace the live installer with one that refuses the feeds it is
+   pointed at. That gate is a SEPARATE implementation of the installer's
+   contract, so the direction between them is what is guaranteed rather than
+   equality: whatever the gate accepts, `cli.sh` must also accept. The gate is
+   deliberately stricter in three places (a 16 KiB payload cap against the
+   installer's 64 KiB, a 2048-character cap per field, and refusing a
+   `min_version` above the shipped version), each of which costs a publisher
+   one loud failure instead of shipping a feed nobody can install. It may never
+   be laxer, and `test_cli_manifest_signature.py` drives one shared fixture set
+   (valid, wrong-channel, wrong-host, tampered, legacy) through the gate AND
+   through a real `cli.sh` run so the two cannot drift apart silently.
 
 Pinned versions released before enablement have no immutable signed manifest and
 therefore fail closed under the new installer. The project's disposition is a
