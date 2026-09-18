@@ -2634,8 +2634,14 @@ Examples:
     )
     mem_sub.add_parser("stats", help="Show memory statistics")
     mem_sub.add_parser("audit", help="Scan memory for suspicious content")
-    mem_export = mem_sub.add_parser("export", help="Export all memory to JSON")
+    mem_export = mem_sub.add_parser("export", help="Export one memory store's rows to JSON")
     mem_export.add_argument("--output", "-o", help="Output file (default: stdout)")
+    # Named for the same reason `backups`, `restore` and `carve` are: a store is a
+    # separate on-disk silo, so "all memory" was never a thing one file held. Without
+    # this flag no surface could read a named store's rows in either direction.
+    mem_export.add_argument(
+        "--store", default=None, help="Store to export (default: the default store)"
+    )
     mem_export.add_argument(
         "--include-markdown",
         action="store_true",
@@ -2709,6 +2715,9 @@ Examples:
     mem_retired.add_argument("--limit", type=int, default=20, help="How many to list")
     mem_import = mem_sub.add_parser("import", help="Import memory from JSON file")
     mem_import.add_argument("file", help="Path to JSON file (export format)")
+    mem_import.add_argument(
+        "--store", default=None, help="Store to import into (default: the default store)"
+    )
 
     # agent
     agent_parser = cli_help.add_command(sub, "agent")
