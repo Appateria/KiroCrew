@@ -932,6 +932,36 @@ def _resolve_claude_acp_bin() -> tuple[list[str] | None, str]:
 #: ``(None, path)`` value means "looked, and it is not here".
 _self_served_bin_caches: dict[str, tuple[str | None, str]] = {}
 
+#: Per-backend resolution generation, bumped by every deliberate cache clear.
+#:
+#: The caches above are all written AFTER an ``await``: a site checks the sentinel,
+#: offloads the resolve, and only then assigns. So a resolution that began before an
+#: operator installed a component can complete after a re-check cleared the cache, and
+#: its assignment would stamp that stale miss back over the cleared sentinel -- the
+#: panel having already reported the harness ready, and the next spawn failing on the
+#: revived miss.
+#:
+#: A resolution captures the generation before it awaits and publishes only if the
+#: generation is still current. Keyed by BACKEND rather than by cache name because a
+#: clear is per harness and pi keeps two caches under one id, so one bump has to fence
+#: both.
+_resolution_generation: dict[str, int] = {}
+
+
+def _resolution_epoch(backend: str) -> int:
+    """The generation a resolution should capture before it awaits."""
+    return _resolution_generation.get(backend, 0)
+
+
+def bump_resolution_generation(backend: str) -> None:
+    """Invalidate every resolution currently in flight for *backend*.
+
+    Called by ``agent_sdk.drivers.acp.forget_cached_resolution`` alongside the sentinel
+    reset. The sentinel is what makes the NEXT spawn resolve; this is what stops an
+    OLDER one from publishing over it.
+    """
+    _resolution_generation[backend] = _resolution_generation.get(backend, 0) + 1
+
 
 def _resolve_self_served_bin(backend: str) -> tuple[str | None, str]:
     """Find *backend*'s own executable and the PATH searched for it.
@@ -7075,11 +7105,20 @@ class AcpClient:
         H13).
         """
         launch = launch_for(self.backend)
-        if self.backend not in _self_served_bin_caches:
-            _self_served_bin_caches[self.backend] = await asyncio.to_thread(
-                _resolve_self_served_bin, self.backend
-            )
-        binary, search_path = _self_served_bin_caches[self.backend]
+        if self.backend in _self_served_bin_caches:
+            binary, search_path = _self_served_bin_caches[self.backend]
+        else:
+            epoch = _resolution_epoch(self.backend)
+            resolved = await asyncio.to_thread(_resolve_self_served_bin, self.backend)
+            # Publish only under the generation this resolve started in. A clear that
+            # landed while it ran means the answer predates an install, so writing it
+            # would undo the clear -- see ``_resolution_generation``. This session still
+            # uses its own answer: it began before the install and that verdict is
+            # honest for itself. Reading the local rather than re-subscripting keeps a
+            # concurrent pop from raising ``KeyError`` here.
+            if _resolution_epoch(self.backend) == epoch:
+                _self_served_bin_caches[self.backend] = resolved
+            binary, search_path = resolved
         if not binary:
             raise AcpError(
                 f"{launch.binary} not found "
@@ -7161,9 +7200,13 @@ class AcpClient:
             # at all; the warm is what keeps the read off the loop.
             self._session_mcp_cache = await asyncio.to_thread(self._resolve_session_mcp_servers)
             global _claude_acp_argv_cache  # noqa: PLW0603
-            if _claude_acp_argv_cache is _UNRESOLVED:
-                _claude_acp_argv_cache = await asyncio.to_thread(_resolve_claude_acp_bin)
-            cached_claude_resolution = _claude_acp_argv_cache
+            cached_claude_resolution: tuple[list[str] | None, str] | object = _claude_acp_argv_cache
+            if cached_claude_resolution is _UNRESOLVED:
+                # Fenced on the resolution generation -- see ``_resolution_generation``.
+                epoch = _resolution_epoch(ACP_BACKEND_CLAUDE)
+                cached_claude_resolution = await asyncio.to_thread(_resolve_claude_acp_bin)
+                if _resolution_epoch(ACP_BACKEND_CLAUDE) == epoch:
+                    _claude_acp_argv_cache = cached_claude_resolution
             claude_argv, acp_search_path = (
                 cached_claude_resolution
                 if isinstance(cached_claude_resolution, tuple)
@@ -7188,9 +7231,13 @@ class AcpClient:
             # left exactly as the operator set it (the adapter ships its own Codex
             # binary; overriding it is an explicit choice, never a default).
             global _codex_acp_argv_cache  # noqa: PLW0603
-            if _codex_acp_argv_cache is _UNRESOLVED:
-                _codex_acp_argv_cache = await asyncio.to_thread(_resolve_codex_acp_bin)
-            cached_codex_resolution = _codex_acp_argv_cache
+            cached_codex_resolution: tuple[list[str] | None, str] | object = _codex_acp_argv_cache
+            if cached_codex_resolution is _UNRESOLVED:
+                # Fenced on the resolution generation -- see ``_resolution_generation``.
+                epoch = _resolution_epoch(ACP_BACKEND_CODEX)
+                cached_codex_resolution = await asyncio.to_thread(_resolve_codex_acp_bin)
+                if _resolution_epoch(ACP_BACKEND_CODEX) == epoch:
+                    _codex_acp_argv_cache = cached_codex_resolution
             codex_argv, codex_search_path = (
                 cached_codex_resolution
                 if isinstance(cached_codex_resolution, tuple)
@@ -7378,9 +7425,14 @@ class AcpClient:
             # Two components, resolved separately because either can be absent on
             # its own and the not-found message must name the one that is.
             global _pi_acp_argv_cache, _pi_bin_cache  # noqa: PLW0603
-            if _pi_acp_argv_cache is _UNRESOLVED:
-                _pi_acp_argv_cache = await asyncio.to_thread(_resolve_pi_acp_bin)
-            cached_pi_acp = _pi_acp_argv_cache
+            cached_pi_acp: tuple[list[str] | None, str] | object = _pi_acp_argv_cache
+            if cached_pi_acp is _UNRESOLVED:
+                # Both halves are fenced on the SAME generation: a clear is per harness
+                # and pi keeps two caches under one id, so one bump has to cover both.
+                epoch = _resolution_epoch(ACP_BACKEND_PI)
+                cached_pi_acp = await asyncio.to_thread(_resolve_pi_acp_bin)
+                if _resolution_epoch(ACP_BACKEND_PI) == epoch:
+                    _pi_acp_argv_cache = cached_pi_acp
             pi_acp_argv, pi_acp_search_path = (
                 cached_pi_acp if isinstance(cached_pi_acp, tuple) else (None, "")
             )
@@ -7392,9 +7444,12 @@ class AcpClient:
                     f"{_ENV_PI_ACP_BIN} to the adapter's entry script. The '{PI_BIN}' "
                     f"CLI alone does not serve ACP."
                 )
-            if _pi_bin_cache is _UNRESOLVED:
-                _pi_bin_cache = await asyncio.to_thread(_resolve_pi_bin)
-            cached_pi = _pi_bin_cache
+            cached_pi: tuple[str | None, str] | object = _pi_bin_cache
+            if cached_pi is _UNRESOLVED:
+                epoch_pi_bin = _resolution_epoch(ACP_BACKEND_PI)
+                cached_pi = await asyncio.to_thread(_resolve_pi_bin)
+                if _resolution_epoch(ACP_BACKEND_PI) == epoch_pi_bin:
+                    _pi_bin_cache = cached_pi
             pi_bin, pi_search_path = cached_pi if isinstance(cached_pi, tuple) else (None, "")
             if not isinstance(pi_bin, str) or not pi_bin:
                 raise AcpError(
