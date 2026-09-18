@@ -1207,15 +1207,19 @@ def _mise_bin() -> str | None:
 
     A systemd / launchd gateway does not source the user's shell rc, so
     ``~/.local/bin`` (mise's default install dir) is often absent from the
-    inherited ``$PATH``.  Try ``$PATH`` first, then fall back to the canonical
-    install location before giving up.
+    inherited ``$PATH``. Try ``$PATH`` first, then the default install dir,
+    then macOS Homebrew locations. Discovery must work before mise activation
+    adds the user's toolchain directories to the gateway environment.
     """
     found = shutil.which("mise")
     if found:
         return found
-    candidate = Path.home() / ".local" / "bin" / "mise"
-    if candidate.is_file() and os.access(candidate, os.X_OK):
-        return str(candidate)
+    candidates = [Path.home() / ".local" / "bin" / "mise"]
+    if sys.platform == "darwin":
+        candidates.extend([Path("/opt/homebrew/bin/mise"), Path("/usr/local/bin/mise")])
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
     return None
 
 

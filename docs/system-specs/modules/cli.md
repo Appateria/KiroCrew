@@ -58,6 +58,22 @@ binary) lands in `cli.main()`, whose prelude runs `boot_platform()`
 (fail-closed for non-standalone profiles), sandbox env hygiene, and
 `KIROCREW_PROJECT_DIR` resolution before any dispatch.
 
+## Gateway mise environment
+
+Before starting services, `cli_server._gateway()` calls `env.activate_mise()`.
+It loads the user's global mise environment even when a daemon starts without
+shell startup files. Binary lookup prefers the inherited `PATH`, then
+`~/.local/bin/mise`. On macOS it next checks `/opt/homebrew/bin/mise` and
+`/usr/local/bin/mise`, in that order. Each fallback must resolve to an executable
+file; the Homebrew paths are not probed on other platforms. No shell is started,
+and locating mise does not add any directory to the gateway's `PATH`.
+
+The selected binary runs `mise env --json` from the user's home with a ten-second
+timeout. Returned string values are merged into the gateway environment for
+later child processes. `KIROCREW_NO_MISE` skips discovery and activation. Missing
+mise or a failed invocation remains non-fatal. Registered MCP search directories
+remain separate from the runtime `PATH`; this lookup does not change that contract.
+
 ## Source Checkout Launcher
 
 The POSIX wrapper at `bin/kirocrew` resolves symlinks to find the real checkout,
