@@ -3,10 +3,10 @@ title: Projects — portable, syncable context bundles
 status: draft
 author: kseam
 created: 2026-08-21
-last-audited: 2026-09-17
-audited-at: 0640c1e0d5
+last-audited: 2026-09-18
+audited-at: 04f8f9139c
 doc-pr: 4941
-implementation-prs: [7181]
+implementation-prs: [7181, 11678]
 tracking-issues: [3551]
 supersedes: []
 superseded-by: []
@@ -104,12 +104,11 @@ else in the bundle as text that loads because the cwd is there.
 
 A Project is a **Git repository the gateway materializes and keeps in sync**,
 registered under a fenced per-install registry, that a session binds to at
-creation. The manifest shrinks to intent:
+creation. The manifest shrinks to intent. This is the whole PR A schema:
 
 ```yaml
 apiVersion: crew.kiro/v1
 kind: Project
-id: 5f2c9a71-8e0d-4b3a-9c14-7d6e2f0a1b33   # the Project's identity; see below
 name: payments-platform
 description: The payments platform team's working context.
 
@@ -121,24 +120,46 @@ sources:                       # `repo` is the only type in v1; the list shape s
   - type: repo
     url: https://github.com/acme/payments-infra
     role: reference
+```
 
-mcp:                           # servers by NAME, resolved against the owner's catalogue
+Two keys this revision *describes* are deliberately absent from PR A's schema
+and arrive with the PR that acts on them:
+
+```yaml
+memory:                        # PR B
+  mode: project                # project | none — WHETHER, never WHICH
+
+mcp:                           # PR C — servers by NAME, resolved against the owner's catalogue
   - name: atlassian
     scope: { site: acme, project: PAY, space: PAYDOCS }
   - name: datadog
-
-memory:
-  mode: project                # project | none — WHETHER, never WHICH
 ```
 
-`id` is a UUID minted when the manifest is first written and never changed
-afterwards. It is the Project's identity across installs and renames: the
-managed clone, every source checkout's provenance record, the reviewed digest
-and the memory store are keyed on it, and it is what lets a re-added or
-re-cloned Project be recognised as the same one rather than a fresh bundle.
-`name` is for people and may change; `id` is for the store and may not. A
-public schema field is a one-way door, so it is adopted here deliberately
-rather than left to the implementation.
+Unknown top-level keys are a named validation error, so a manifest carrying
+`memory:` today is refused by name and accepted once PR B lands. That is the
+direction a public schema can move: admitting a key later is compatible,
+retracting one that shipped parsed-but-unused is not. A key is in the schema
+when something reads it, and not before. The lagging-reader side of that rule
+is decided too: an install that has not yet upgraded refuses a manifest
+carrying a key it does not know, loudly and by name, and upgrading is the
+remedy — a Project is never half-honoured by an install that cannot act on
+what it declares. `apiVersion` stays `crew.kiro/v1` across additive keys and
+moves only when a key is retracted or changes meaning.
+
+**Identity is assigned at registration.** `project.yaml` carries no `id`. The
+registry mints a UUID when a Project is added and every install-local key —
+the managed clone, each source checkout's provenance record, the reviewed
+digest, the member record and (PR B) the memory store — hangs off that
+registration id. Re-adding a location the registry already holds (a local
+bundle by its real path; a Git bundle by its normalised remote and pinned
+branch) returns the existing registration rather than minting a second
+Project. Nothing in PR A needs a Project to be *the same one* on two installs:
+install B adding the same URL gets its own id and the same checkout contents,
+which is the exit criterion. Whether a manifest-carried identity is ever
+needed — the one thing it would buy is a memory store that follows the repo
+between installs, and memory contents never travel in the repo — is open
+question 9, decided under PR B if at all. `name` is for people and may
+change; the registration id is for the store and may not.
 
 Gone from the manifest: `context.skills`, `context.crew`, `context.mcp` (as a
 file of definitions), `context.workflows`, `knowledge` recipes and
@@ -172,7 +193,8 @@ nothing a derived one does not — memory contents never travel in the repo.
 * **A pull can never create or select a store.** A manifest edit — by an agent
   or a `git pull` — changes the review key, the activation goes stale, and the
   binding does not follow until the owner re-activates. Re-activation keeps the
-  existing store: a Project's identity is its id, not its manifest digest.
+  existing store: a Project's identity is its registration id, not its
+  manifest digest.
 * **Binding is fixed at conversation creation.** Every conversation started on
   the Project shares that one store; attaching or detaching a Project on a live
   session refuses when the memory store would change, consistent with the
@@ -314,13 +336,17 @@ the hardened Git store exist on #7181 and are carried forward unchanged.
 
 * **PR A — the thin Project** (cut from #7181, mostly deletion): the registry
   moved to the fenced leaf; `project_git.py` as hardened; a manifest reduced
-  to `name`, `description`, `sources[type: repo]`, `mcp[].name/scope`,
-  `memory.mode`; slot binding (`project_id`, the composer chip, "New session
+  to `name`, `description`, `sources[type: repo]` — no `id`, no `mcp`, no
+  `memory`, each refused by name as an unknown key; the Project id minted by
+  the registry at add; slot binding (`project_id`, the composer chip, "New session
   on this Project"); the Projects rail page and sidebar entry; `sync`. No
   capabilities module, no activation record beyond the digest and the
   approved name set, no CLI group. *Exit criteria:* a Project registered on
   install A and added by URL on install B attaches to a session on each with
-  the same primary checkout contents; a spawned shell inside a Project session
+  the same primary checkout contents; adding a location the registry already
+  holds returns the existing registration and mints no second id; a manifest
+  carrying `id:`, `mcp:` or `memory:` is refused with an error naming the key;
+  a spawned shell inside a Project session
   cannot read or write the registry; a manifest edit that repoints a source
   re-clones rather than reusing the old checkout; a session on a removed
   Project fails its next turn loudly through `project_not_found`; a `sync`
@@ -333,7 +359,8 @@ the hardened Git store exist on #7181 and are carried forward unchanged.
   cannot be bound to a `reference` checkout as its working directory (the
   binding resolves to the primary checkout or refuses), so the digest's scope
   and the session's cwd are the same tree by construction.
-* **PR B — memory.mode.** Activation provisions the `project--<id>` member and
+* **PR B — memory.mode.** Adds the `memory.mode` key to the manifest schema
+  and acts on it in the same PR. Activation provisions the `project--<id>` member and
   its V2 store; the binding is fixed at conversation creation; attach/detach
   refuses when the store would change; removal archives. Re-activation after a
   manifest change keeps the existing store, and flipping `memory.mode` back to
@@ -343,7 +370,8 @@ the hardened Git store exist on #7181 and are carried forward unchanged.
   `memory.mode` changes nothing until re-activation, and re-activating with
   `none` archives nothing; a private-memory provisioning refusal leaves the
   Project activated with memory unavailable.
-* **PR C — MCP by name.** Names in the manifest resolve onto the session
+* **PR C — MCP by name.** Adds the `mcp[]` key to the manifest schema and
+  acts on it in the same PR. Names in the manifest resolve onto the session
   agent from the owner's catalogue at session start; unknown names show as
   unavailable; nothing is written to the global `mcp.json`. *Exit criteria:* a
   manifest naming a server the owner has not installed activates with that
@@ -374,6 +402,12 @@ store's lifetime on a `memory.mode` flip (decided under PR B). New:
 8. **Shared memory across Projects.** Several Projects sharing one store is an
    owner-side grouping decision, not a bundle claim. Does that need a surface
    in v1, or does one-store-per-Project cover every real consumer for now?
+9. **Identity across installs.** PR A's id is install-local and nothing in it
+   needs more. A manifest-carried id would let two installs agree they hold
+   the *same* Project, which matters only if a store or a review acceptance
+   should ever follow the repo — and both are owner-side state today. Decide
+   under PR B, when memory is the first thing that could want it; until then
+   the schema does not carry a key nothing reads.
 
 ## Motivation
 
