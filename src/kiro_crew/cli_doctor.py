@@ -1501,13 +1501,18 @@ def _doctor_agent_auth() -> None:
     answers without spawning the install probes' subprocesses, which this row does
     not need.
 
-    **``kiro-cli whoami`` is the only credential this checks, and deliberately.**
-    kiro-cli signs in to the HOST identity store, so its state is the host's own
-    and readable here. Every other harness keeps its entitlement in a file it owns,
-    and reading that file is exactly what the credential floor exists to forbid --
-    a probe here would be the one reader the floor cannot fence. So those rows name
-    the store and print the declared remedy unprobed: advice that is always correct
-    beats a verdict obtained by breaking the floor.
+    **This checks only credentials that are the host's own, and deliberately.**
+    Two stores qualify: the HOST identity store, probed through ``kiro-cli
+    whoami`` (kiro-cli signs in to it, so its state is the host's own and
+    readable here), and Crew's own sign-in vault, which a harness in
+    ``ACP_BACKENDS_HOST_AUTH_CALLBACK`` draws on whenever the vault holds a
+    usable identity -- the same runtime decision the KAS relay makes at spawn,
+    so the row reports the store the next spawn will actually use. Every other
+    harness keeps its entitlement in a file it owns, and reading that file is
+    exactly what the credential floor exists to forbid -- a probe here would be
+    the one reader the floor cannot fence. So those rows name the store and
+    print the declared remedy unprobed: advice that is always correct beats a
+    verdict obtained by breaking the floor.
 
     Advisory only, which is why it takes no ``issues`` list: a harness the operator
     has not signed into is not a broken installation, and failing doctor's exit code
@@ -1515,6 +1520,7 @@ def _doctor_agent_auth() -> None:
     """
     from kiro_crew.acp_backends import POLICY_ID_BY_BACKEND, selectable_backend_values
     from kiro_crew.agent_sdk import declaration_for, entitlement_label, signs_in_separately
+    from kiro_crew.agent_sdk.backends import ACP_BACKENDS_HOST_AUTH_CALLBACK
 
     try:
         backends = selectable_backend_values()
@@ -1527,6 +1533,11 @@ def _doctor_agent_auth() -> None:
     # twice for one answer.
     host_signed_in: bool | None = None
     host_probed = False
+    # The vault too is probed at most once, for the same reason: every
+    # host-auth-callback harness draws on the one vault.
+    vault_owns = False
+    vault_detail: str | None = None
+    vault_probed = False
 
     for backend in backends:
         try:
@@ -1551,6 +1562,61 @@ def _doctor_agent_auth() -> None:
             _print_wrapped(declaration.sign_in_remedy)
             continue
 
+        if backend in ACP_BACKENDS_HOST_AUTH_CALLBACK:
+            # The spawn picks this harness's auth owner at runtime -- Crew's vault
+            # when it holds a usable identity, kiro-cli's store otherwise (see
+            # ``kas_host_auth``) -- so the row mirrors that decision instead of the
+            # declaration's compile-time constant, which cannot.
+            if not vault_probed:
+                vault_probed = True
+                try:
+                    # Deferred import, same seam as ``_report_kas_backend``: this
+                    # module is on the dashboard's boot path and ``kiro_crew.auth``
+                    # brings the cryptography wheel with it. An import or probe
+                    # failure degrades to the kiro-cli branch below rather than
+                    # losing the row.
+                    from kiro_crew.auth.bridge import (
+                        describe_vault_identity,
+                        vault_holds_identity,
+                    )
+
+                    vault_owns = vault_holds_identity()
+                    vault_detail = describe_vault_identity()
+                except Exception:
+                    vault_owns = False
+                    vault_detail = None
+            if vault_owns:
+                # Ownership and health are separate facts: the vault still owns the
+                # next spawn when the issuer has REJECTED its refresh token, because
+                # ``is_usable`` cannot know that without a network call (see its
+                # docstring) and ``vault_holds_identity`` reads only it. The glyph
+                # column is what an operator scans, so ✅ requires a verdict that
+                # affirms it: a detail line ending "-> usable". A missing detail
+                # (the two reads disagree -- a logout landed between them, or the
+                # describe probe failed) and an unrecognized verdict both degrade
+                # to ⚠️, never to a false ✅.
+                healthy = vault_detail is not None and vault_detail.endswith("-> usable")
+                glyph = "✅ " if healthy else "⚠️  "
+                print(f"  {label.ljust(13)}{glyph}Kiro Crew vault (signed in through Kiro Crew)")
+                if vault_detail:
+                    _print_wrapped(f"crew vault: {vault_detail}")
+                if host_probed and host_signed_in is True:
+                    # Both stores hold a sign-in, and they can be DIFFERENT
+                    # accounts (the usage reader's identity checks exist for
+                    # exactly that). Reported, not adjudicated: the relay uses the
+                    # vault, and which account is "right" is not this row's
+                    # question.
+                    _print_wrapped(
+                        f"{source} is also present and may be a different account "
+                        "(the kiro-cli row reports it); the relay uses the vault."
+                    )
+                continue
+            # Nothing usable in the vault: the kiro-cli branch below is the
+            # runtime's fallback owner, so it is this row's report too. A stored
+            # identity the probe rejected is still printed beneath the row --
+            # that entry is exactly why a spawn is failing when the operator has
+            # signed in through Crew and the sign-in has since lapsed.
+
         if not host_probed:
             host_signed_in = _kiro_cli_signed_in()
             host_probed = True
@@ -1565,6 +1631,8 @@ def _doctor_agent_auth() -> None:
             # Wrapped, not reflowed: ``textwrap.wrap`` only inserts line breaks, so
             # the operator reads the declared wording, which is what the panel shows.
             _print_wrapped(declaration.signed_out_message)
+        if backend in ACP_BACKENDS_HOST_AUTH_CALLBACK and vault_detail:
+            _print_wrapped(f"crew vault: {vault_detail}")
 
 
 def _kiro_cli_signed_in() -> bool | None:
@@ -3207,9 +3275,11 @@ def _doctor_kas(issues: list[str]) -> None:
     selected, KAS is served by kiro-cli's own ACP relay (see
     :mod:`kiro_crew.acp.kas_transport`), so the thing that makes a selected KAS
     backend fail at session-create time is a kiro-cli whose ``acp`` subcommand
-    cannot select the KAS engine. Credentials are deliberately NOT probed here:
-    the relay resolves tokens from kiro-cli's own store, so the declaration-driven
-    sign-in row already reported above is the same signal.
+    cannot select the KAS engine. The only credential read here is Crew's own
+    vault -- the same read the runtime makes to pick the spawn's auth owner:
+    the relay resolves tokens from the vault when it holds a usable identity
+    and from kiro-cli's own store otherwise, and the sign-in rows above report
+    that same decision.
     """
     # Positive backend test (not ``!= ACP_BACKEND_KAS``): an inequality would
     # silently capture every harness added later — see the harness-parity gate.
@@ -3236,9 +3306,17 @@ def _report_kas_backend(issues: list[str]) -> None:
     # which credential the next KAS process will actually draw on. Deferred
     # import: this module is on the dashboard's boot path and kiro_crew.auth
     # brings the cryptography wheel with it (see kas_host_auth's module doc).
-    from kiro_crew.auth.bridge import describe_vault_identity, vault_holds_identity
+    # An import or probe failure leaves the diagnostic on the kiro-cli path
+    # rather than ending the whole doctor report.
+    try:
+        from kiro_crew.auth.bridge import describe_vault_identity, vault_holds_identity
 
-    host_auth = vault_holds_identity()
+        host_auth = vault_holds_identity()
+        identity_line = describe_vault_identity()
+    except Exception:
+        host_auth = False
+        identity_line = None
+
     print(f"  relay:       ✅ {' '.join(build_kas_argv(binary, host_auth=host_auth))}")
     print(
         "  auth owner:  "
@@ -3252,7 +3330,6 @@ def _report_kas_backend(issues: list[str]) -> None:
     # callback (expired, nothing to renew it) is visible here rather than as a
     # broken spawn. Printed whenever something is stored, including the case the
     # probe rejected -- that is exactly the one worth seeing.
-    identity_line = describe_vault_identity()
     if identity_line:
         print(f"  crew vault:  {identity_line}")
     help_text = _kas_relay_help(binary)
@@ -3275,13 +3352,20 @@ def _report_kas_backend(issues: list[str]) -> None:
         print(f"  engine:      ❌ this kiro-cli does not offer engine {KAS_RELAY_ENGINE}")
         print("               Fix: update kiro-cli, or switch agent.acp_backend to kiro.")
         issues.append(f"kiro-cli does not support the KAS engine ({KAS_RELAY_ENGINE})")
-    # Read from the declaration rather than restated here: this block once claimed
-    # in prose whose token KAS used, which is a second place for that fact to be
-    # wrong. The relay resolves every access token from kiro-cli's own store, so the
-    # sign-in rows above are already the whole answer for this backend.
-    from kiro_crew.agent_sdk import entitlement_label
+    # Reported from the SAME decision as the ``auth owner:`` line above, so the
+    # two cannot disagree: the relay resolves every access token from whichever
+    # store owns the spawn -- Crew's vault when it holds a usable identity,
+    # kiro-cli's own store otherwise. The detail for each store lives in the
+    # sign-in rows and the ``crew vault:`` line rather than being restated here.
+    if host_auth:
+        print("  token:       ➖ Kiro Crew vault sign-in (see the auth owner line above)")
+    else:
+        from kiro_crew.agent_sdk import entitlement_label
 
-    print(f"  token:       ➖ {entitlement_label(ACP_BACKEND_KAS)} " "(see the sign-in rows above)")
+        print(
+            f"  token:       ➖ {entitlement_label(ACP_BACKEND_KAS)} "
+            "(see the sign-in rows above)"
+        )
 
 
 def _doctor_agents_janitor(issues: list[str], sweep_backups: bool) -> None:
