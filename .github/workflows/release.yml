@@ -489,16 +489,24 @@ jobs:
   # status visible in the run graph.
   #
   # Scope of that separation, stated precisely because the obvious reading is
-  # wrong: it decouples the PUBLISH steps, not the BUILDS. Both publishers
-  # still `needs: build-desktop`, which is the reusable-workflow caller job
-  # aggregating BOTH matrix legs, so a failed arm64 build skips the x64
-  # publish too. That is deliberate for now -- the versioned S3 keys are
-  # immutable, so publishing half a release and then discovering the other
-  # arch never built is the worse failure -- but it does mean a broken arm64
-  # build can hold up an x64 release, which was not true before this lane
-  # existed. True per-arch publish independence needs the publishers to run
-  # past a partial build failure and let their own artifact download decide;
-  # tracked in #2645 rather than reshaped here.
+  # wrong: it decouples the PUBLISH steps, not the BUILDS. Every publisher here
+  # still requires `needs.build-desktop.result == 'success'`, which is the
+  # reusable-workflow caller job aggregating ALL THREE matrix legs, so a failed
+  # arm64 build skips the x64 publish too.
+  #
+  # That is deliberate on THIS lane, and the reason is one layer down rather
+  # than in the workflow: a release run records the stable promotion candidate
+  # (see `record-promotion`), and scripts/release_promotion.py lists
+  # appimage_arm64, deb_arm64 and rpm_arm64 in REQUIRED_ARTIFACT_NAMES. Only
+  # the Windows installer pair is OPTIONAL. So publishing x64 alone here would
+  # burn immutable versioned keys for a version that can never be promoted to
+  # stable, and buying per-arch availability means moving those three roles to
+  # optional -- changing what a complete release IS. That is the question
+  # #1030 exists to settle, so it is not decided here.
+  #
+  # nightly.yml's copy of this block IS decoupled (#2645): it passes
+  # `soft_fail_arm64: true` to build-desktop.yml, which it can because a
+  # nightly run publishes per-arch keys and feeds and records no candidate.
   publish-linux-appimage-x64:
     name: Publish Linux appimage (${{ needs.version.outputs.channel }} channel · x64)
     needs: [version, stable-gate, build-desktop, resolve-promotion]
