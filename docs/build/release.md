@@ -199,9 +199,13 @@ there is no build step at stable-tag time to add it.
    pointer move. `Create GitHub Release` runs (the `if:` fix) and renders
    GitHub's own contributor block, so the body must not carry a second one —
    see "What the release body must not contain" below, because the body is
-   ASSEMBLED, not written, and the duplicate arrives on its own. Verify: stable
-   feed carries the bare `X.Y.Z`, the wheel filename has no `rc`, About shows
-   `X.Y.Z`, CHANGELOG shows no draft heading.
+   ASSEMBLED, not written, and the duplicate arrives on its own. The page appears
+   as a **draft** and becomes public only once `record-stable-promotion` has
+   written `stable-publication.json` onto it, so a release still drafted means a
+   required lane failed -- read that job, not the page. Verify: the release is
+   published and carries the marker asset, stable feed carries the bare `X.Y.Z`,
+   the wheel filename has no `rc`, About shows `X.Y.Z`, CHANGELOG shows no draft
+   heading.
 
    To ship the candidate's exact bytes instead — the only mode where stable runs
    the identical binary that was validated — set `vars.STABLE_PROMOTE_BYTES` to
@@ -347,9 +351,10 @@ trailer). The unsigned electron-builder zip and DMG are inter-job handoffs and
 never become release assets. Windows `Setup.exe` is not attached. The release is
 marked `prerelease` when the channel is insider, and notes are generated.
 
-`github-release` is the one job that needs `contents: write`, and it is the only
-job that has it: the signing jobs hold AWS credentials but never
-`contents: write`. `test_workflow_permissions.py` pins that split.
+`github-release` and `record-stable-promotion` are the two jobs that need
+`contents: write`, and they are the only ones that have it: the signing jobs hold
+AWS credentials but never `contents: write`.
+`test_workflow_permissions.py` pins that split.
 
 **The release page is the publication boundary.** Every publish lane gates on
 `stable-gate`, which is a pre-flight (the version is documented in
@@ -370,6 +375,62 @@ the same immutable artifacts, which is what makes the retry deterministic rather
 than a second, differently-composed release. `build-windows` stays outside the
 condition on purpose -- it is waited on so the installer artifact exists, but its
 result is soft-failed and must not gate the page.
+
+**A stable page is created as a draft, and `record-stable-promotion` completes
+it.** `github-release` is itself a publishing lane: it creates the release and
+uploads every asset in one action call, so a page published on create is visible
+from its first asset onward, and an upload that dies halfway leaves a live release
+offering some platforms and silently missing others. On the stable channel it
+therefore starts the page as a draft, and one further job -- gated on the same
+required lane set plus `github-release` itself -- writes the completion marker and
+then flips the draft visible, in that order. Insider is unchanged: those pages are
+prereleases, and `record-promotion` is already the record the promotion path
+consumes.
+
+**Nothing in this workflow writes to a release the public can already see.** That
+one rule is what the draft mechanism reduces to, and it is stronger than the
+individual failures that produced it: `draft: true` on an update withdrew a live
+page, a swallowed API error made a live page look absent, a rerun re-uploaded over
+bytes a marker already certified, and an interrupted re-upload left a mixed asset
+set visible on a public page. None of those can be undone by a later run.
+
+So a stable page is only ever **created**, as a draft, and only while the public
+cannot see one. A probe step reads the release's own state and answers `create`
+(absent or still a draft) or `skip` (already published, marked or not); the upload
+action carries `if: steps.page.outputs.action == 'create'`, which is why `draft` is
+a constant on the create path rather than a decision. A rerun of a finished stable
+release therefore touches nothing remote. Only gh's own "release not found" reads
+as absent -- any other API error fails the step, because a run that publishes
+nothing is recoverable and a wrong guess is a write to a live page.
+
+The marker is `stable-publication.json`, attached to the release it certifies. A
+release asset rather than a workflow artifact, because an artifact expires and
+"did this version publish completely?" outlives any retention window. It carries
+the tag, the version and base version, `promote_mode`, the OCI digest, the source
+commit and run id, and the required lane set -- so a complete publication is
+checkable rather than inferred from green job bubbles. If any required lane
+failed, the draft stays unpublished and no marker exists; there is no state where
+one is present without the other.
+
+Reruns reconcile against the release's own state, not against a record of what
+the run did -- and the question asked is whether the **marker** is on the release,
+not whether the page is visible, because those can disagree. A draft carries a
+"Publish release" button, so a half-populated page can be made public by hand, and
+releases published before this job existed are public with nothing certifying them
+either. Reading visibility alone would call both states complete and leave them
+uncertified forever. So: published **and** marked is a no-op that
+logs a notice; still drafted completes normally; and published-but-unmarked
+**fails the job**, because marking it would certify an asset set the run never
+uploaded and rebuilding it would rewrite a page users can already see. The error
+names the two ways out: delete the release page (keeping the tag) and re-run the
+tag, or accept the version as one published before the marker existed.
+
+Do not publish a stable draft by hand. It announces a release no marker certifies,
+and it is the state that failure exists to surface rather than repair.
+
+Windows is carved out here exactly as it is on the page -- absent from both
+`needs` and the condition, since a soft-failed result reports `success` regardless
+and this job downloads no artifacts to race.
 
 ### There is no PyPI publish
 
