@@ -2162,3 +2162,8 @@ through `SkillsLoader.load_skill` with a shared 24,750-byte read allowance.
 Those results contain safe names and content, not live project paths. Sessionless
 CLI search remains global-only. Mixed CJK/English keywords use memory's existing
 CJK-pair tokenizer. Native tool schemas and Tool Search thresholds are unchanged.
+
+`skill_search` supports scoped `search`, paginated `list` and exact-key `read`. The
+gateway resolves scope from the signed session, never a model-supplied agent name.
+Without signed identity it uses the global installed catalog. Incremental indexing
+reports incomplete recall explicitly; list/read remain available during refresh.

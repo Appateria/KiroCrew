@@ -2,6 +2,14 @@
 
 ## Overview
 
+Bulk skill enumeration still validates every canonical path against fresh sensitive
+targets. A canonical path without a keystone artifact suffix cannot be a publish
+artifact, so that second target lookup is skipped; suffixed paths retain the artifact
+check. Candidate resolution, sensitive anchors and the no-link body reader are unchanged.
+During a target-set rebuild, identical override leaves shared by the two supported
+Crew home prefixes are resolved once. These answers live only for that build;
+the target cache's TTL and fresh root checks are unchanged.
+
 The subprocess audit lists two fixed test-harness sites separately:
 `testing/harness.py::_launch_gateway` starts the package's gateway, while
 `testing/harness.py::spawn_feature_gateway` runs the literal seed program before
@@ -373,6 +381,12 @@ which this module refuses everywhere else too. The useful action is to fail fast
 which layer to look at, loudly.
 
 ### XPIA Hardening (`security.py` + `hooks.py`)
+
+External mapped skill reads preserve their enumeration-time canonical admission
+root through the shared no-link reader (`within_root_is_canonical=True`). The
+reader compares the opened descriptor against that snapshot rather than resolving
+a replacement root. This protects mapped metadata and indexed/direct bodies;
+other callers retain the existing default root-resolution contract.
 
 The shared file readers authorize the opened regular-file descriptor before
 consuming bytes. Its kernel path must match the validated name and pass the
