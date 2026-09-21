@@ -1506,11 +1506,30 @@ class TestHelpers:
         home = os.path.expanduser("~")
         args = f._grep_sensitive_globs(home)
         assert args[0::2] == ["--iglob"] * (len(args) // 2)
-        patterns = set(args[1::2])
+        patterns = {p.casefold() for p in args[1::2]}
         for entry in sensitive_home_dirs():
             relative = entry.strip("/")
             if relative:
-                assert f"!/{relative}" in patterns
+                # CASE is folded, separators are NOT. The emitted spelling is the
+                # ON-DISK one: ``sandbox_credential_targets`` realpaths every target,
+                # and on Windows that folds a leaf to the real directory name, so the
+                # ``AppData/Local/kiro-cli`` fence entry surfaces as
+                # ``!/AppData/Local/Kiro-Cli``. Case cannot cost coverage -- every
+                # pattern is emitted under ``--iglob``, which ripgrep matches
+                # case-insensitively -- so byte-identical case is a stricter claim
+                # than the contract makes, and one only a case-insensitive volume can
+                # break.
+                #
+                # Separators carry a real claim and stay compared exactly: ripgrep
+                # reads only ``/`` as a separator, which is why the emitting side runs
+                # each path through ``PurePath.as_posix``, so a pattern carrying
+                # Windows backslashes matches nothing and the store gets read.
+                # ``os.path.normcase`` would hide that regression, because on Windows
+                # it rewrites ``/`` to ``\`` on both sides of this comparison;
+                # ``casefold`` drops the case claim alone. The sibling anchor test
+                # checks the leading ``!/`` only, so it is not a net for an
+                # internal-separator slip.
+                assert f"!/{relative}".casefold() in patterns
 
     def test_every_exclusion_is_anchored_to_the_root(self):
         """The leading slash is the anchor, and without it the exclusion is not
