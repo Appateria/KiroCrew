@@ -78,8 +78,8 @@ import ErrorNotice from '../../components/ErrorNotice'
 import { useGuardedLeave, useRegisterNavigationLeaveGuard, usePublishNavigationStake } from '../../components/NavigationLeaveGuard'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { useConnected } from '../../hooks/useConnected'
-import { SearchFilterBar, FilterMenuButton, FilterChip, FILTER_CHIP_ROW_CLS, FILTER_MENU_LABEL_CLS, FILTER_MENU_CONTENT_CLS } from '../../components/SearchFilterBar'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '../../components/ui/dropdown-menu'
+import { SearchFilterBar, FilterMenuButton, FilterChip, FILTER_CHIP_ROW_CLS, FilterMenuLabel, FilterMenuContent } from '../../components/SearchFilterBar'
+import { DropdownMenu, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '../../components/ui/dropdown-menu'
 import {
   countByFilter, narrowRoster, parseSort, parseSourceFilter, parseStatusFilters, queryNarrows, sortRoster,
   SORT_OPTIONS, SOURCE_FILTERS, STATUS_FILTERS,
@@ -2169,8 +2169,8 @@ export default function MembersPage() {
                   testId="member-filter-menu"
                 />
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className={FILTER_MENU_CONTENT_CLS} data-testid="member-filters">
-                <DropdownMenuLabel className={FILTER_MENU_LABEL_CLS}>{t('pages.chatSidebar.filter')}</DropdownMenuLabel>
+              <FilterMenuContent align="end" data-testid="member-filters">
+                <FilterMenuLabel>{t('pages.chatSidebar.filter')}</FilterMenuLabel>
                 <DropdownMenuItem
                   onSelect={(e) => { e.preventDefault(); toggleStarredOnly() }}
                   role="menuitemcheckbox"
@@ -2205,7 +2205,7 @@ export default function MembersPage() {
                   )
                 })}
                 <DropdownMenuSeparator />
-                <DropdownMenuLabel className={FILTER_MENU_LABEL_CLS}>{t('pages.membersPage.filter_origin')}</DropdownMenuLabel>
+                <FilterMenuLabel>{t('pages.membersPage.filter_origin')}</FilterMenuLabel>
                 {SOURCE_FILTERS.map((key) => {
                   const active = sourceFilter === key
                   return (
@@ -2226,7 +2226,7 @@ export default function MembersPage() {
                   )
                 })}
                 <DropdownMenuSeparator />
-                <DropdownMenuLabel className={FILTER_MENU_LABEL_CLS}>{t('pages.chatSidebar.sort_by')}</DropdownMenuLabel>
+                <FilterMenuLabel>{t('pages.chatSidebar.sort_by')}</FilterMenuLabel>
                 {SORT_OPTIONS.map((key) => (
                   <DropdownMenuItem
                     key={key}
@@ -2239,7 +2239,7 @@ export default function MembersPage() {
                     {sort === key && <Check size={14} className="text-accent shrink-0" />}
                   </DropdownMenuItem>
                 ))}
-              </DropdownMenuContent>
+              </FilterMenuContent>
             </DropdownMenu>
           )}
         />
