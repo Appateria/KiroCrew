@@ -372,6 +372,36 @@ def job_agent_names_from_disk() -> list[tuple[str, str]]:
     return out
 
 
+def cron_job_agent_key(job: "CronJob") -> str | None:
+    """The effective agent identity a job dispatches, or ``None`` when exempt.
+
+    Used by the scheduler's per-agent concurrency limit to bucket runs by the
+    agent they actually keep busy. ``None`` means "not subject to per-agent
+    limiting" and covers two disjoint cases:
+
+    - ``script`` / ``command`` jobs run WITHOUT an LLM agent (they bypass agent
+      dispatch entirely, see :func:`job_agent_names_from_disk`), so their agent
+      fields are dormant and rate-limiting them per-agent would be meaningless;
+    - an agentless job (empty ``agent_id`` and no dispatching sequence) names no
+      agent to key against.
+
+    The dispatch-vs-storage rule is NOT re-spelled here: it reuses
+    :func:`agent_sequence_dispatches` so this key can never drift from what
+    dispatch actually runs. A sequence of more than one agent takes precedence
+    over ``agent_id`` (the gateway runs the sequence, keyed on its first entry),
+    while a shorter one is dormant and dispatch falls through to ``agent_id``.
+    """
+    if job.script or job.command:
+        return None  # runs with no LLM agent; exempt from per-agent limiting
+    if agent_sequence_dispatches(job.agent_sequence):
+        # The sequence dispatches: key on its primary (first non-empty) agent,
+        # matching the session-key the gateway runs the sequence under.
+        for name in job.agent_sequence:
+            if name:
+                return name
+    return job.agent_id or None
+
+
 _STORE_VERSION = 2
 _MIN_INTERVAL_SECS = 60
 _JOB_TIMEOUT_SECS = 1800  # 30 min per job
@@ -2089,7 +2119,12 @@ class CronService:
         self._sessions: SessionManager | None = None
         self._reaper_task: asyncio.Task[None] | None = None
         self._push_refresh: Callable[[str], None] | None = None  # set externally
-        _cfg = KiroCrewConfig.load().cron_history
+        _loaded_cfg = KiroCrewConfig.load()
+        _cfg = _loaded_cfg.cron_history
+        # Per-agent fire-time concurrency cap, captured at construction like the
+        # history caps above (a single load() serves both). 0 means unlimited;
+        # see _rate_limit_deferred for the enforcement.
+        self._max_concurrent_per_agent = _loaded_cfg.cron_rate_limit.max_concurrent_per_agent
         _history_dir = base_dir if base_dir is not None else _default_dir()
         # Execution history is BEST-EFFORT and must never be load-bearing for
         # scheduling: a throw HERE would propagate out of CronService.__init__
@@ -4772,6 +4807,61 @@ class CronService:
             self.audit_one_shot_removal(jid, "cron_deferred_drain")
         return list(self._jobs)
 
+    def _rate_limit_deferred(
+        self, due: list[CronJob]
+    ) -> tuple[list[CronJob], list[CronJob]]:
+        """Partition ``due`` into ``(admitted, deferred)`` by per-agent concurrency.
+
+        Enforces ``cron_rate_limit.max_concurrent_per_agent`` (captured onto the
+        instance at construction): no more than that many runs of any one
+        effective agent may be in flight at once. Keying is by
+        :func:`cron_job_agent_key`, so ``script`` / ``command`` / agentless jobs
+        (key ``None``) are ALWAYS admitted and never counted.
+
+        The in-flight count is seeded from the runs ALREADY executing
+        (``self._executing`` mapped through the live job list), so a run
+        admitted on an earlier tick still counts. Same-tick ordering is handled
+        by incrementing the count as each job is admitted, so two same-agent
+        jobs due on one tick cannot both slip past a limit of one.
+
+        Deferral is STATELESS, exactly like the critical-posture admission
+        deferral in :meth:`_on_timer`: a deferred job is NOT fired, its
+        ``last_run_ts`` is left untouched, no ``run_never_started`` /
+        ``fire_time_denied`` marker is set, and it is NOT added to
+        ``self._executing`` — so it is naturally due again on the next tick.
+        """
+        limit = self._max_concurrent_per_agent
+        if limit <= 0:
+            return due, []  # 0 (or negative) = unlimited; nothing to enforce
+
+        # Seed per-agent counts from runs already in flight. A job id may have
+        # left the live list (edited/removed) or key to None (script/command);
+        # both are skipped rather than counted.
+        live_by_id = {j.id: j for j in self._jobs}
+        counts: dict[str, int] = {}
+        for jid in self._executing:
+            job = live_by_id.get(jid)
+            if job is None:
+                continue
+            key = cron_job_agent_key(job)
+            if key is None:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+
+        admitted: list[CronJob] = []
+        deferred: list[CronJob] = []
+        for j in due:
+            key = cron_job_agent_key(j)
+            if key is None:
+                admitted.append(j)  # exempt: never counted, never deferred
+                continue
+            if counts.get(key, 0) < limit:
+                counts[key] = counts.get(key, 0) + 1
+                admitted.append(j)
+            else:
+                deferred.append(j)
+        return admitted, deferred
+
     async def _on_timer(self) -> None:
         """Fire due jobs as independent tasks (non-blocking).
 
@@ -4875,6 +4965,20 @@ class CronService:
             elif self._admission_deferring:
                 self._admission_deferring = False
                 logger.info("Cron: memory posture recovered — resuming scheduled firings")
+
+            # Per-agent fire-time concurrency cap. Applied AFTER the critical
+            # posture partition so it only ever sees jobs this tick would
+            # otherwise fire, and it reads self._executing at this instant so
+            # runs admitted earlier count against the limit. Deferral is
+            # stateless (last_run_ts untouched, no marker, not added to
+            # _executing), so a deferred job is simply due again next tick.
+            due, rate_deferred = self._rate_limit_deferred(due)
+            if rate_deferred:
+                logger.debug(
+                    "Cron: deferring %d run(s) at per-agent concurrency limit (max %d/agent)",
+                    len(rate_deferred),
+                    self._max_concurrent_per_agent,
+                )
 
             if not due:
                 return
