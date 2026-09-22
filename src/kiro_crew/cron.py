@@ -4829,6 +4829,18 @@ class CronService:
         ``last_run_ts`` is left untouched, no ``run_never_started`` /
         ``fire_time_denied`` marker is set, and it is NOT added to
         ``self._executing`` — so it is naturally due again on the next tick.
+
+        Cron-expression jobs (``schedule.kind == "cron"``) are NEVER
+        rate-deferred, mirroring the carve-out the critical-posture block one
+        level up uses for the SAME reason: :meth:`_is_due` reports such a job
+        due only while ``cron_expr_matches`` holds for the current UTC minute
+        (and it refuses to re-fire once ``last_run_ts`` lands in that minute).
+        A stateless defer touches neither, so on the next tick — likely a later
+        minute where the expression no longer matches — the occurrence is gone,
+        not delayed. ``every`` / ``at`` jobs stay due on their own clock, so
+        deferring them is lossless. The cap therefore bounds concurrency for
+        interval/one-shot jobs only; cron-expression jobs sharing a minute all
+        fire, exactly as the posture block treats them as non-deferrable.
         """
         limit = self._max_concurrent_per_agent
         if limit <= 0:
@@ -4848,9 +4860,22 @@ class CronService:
                 continue
             counts[key] = counts.get(key, 0) + 1
 
+        # Admission is FIFO over ``due`` with no cross-tick rotation. Under
+        # sustained same-agent pressure a job that always sorts last could be
+        # deferred repeatedly, but deferral is stateless and re-evaluated every
+        # tick (nothing is consumed), so this is a throughput characteristic,
+        # not starvation of correctness — matching the posture block's own
+        # order-preserving deferral. Deterministic rotation is intentionally
+        # not added here; it would only matter under saturation that the cap is
+        # meant to shed anyway.
         admitted: list[CronJob] = []
         deferred: list[CronJob] = []
         for j in due:
+            # Cron-expression jobs are exempt from rate-deferral (see docstring):
+            # a stateless defer would drop the minute's occurrence outright.
+            if j.schedule.kind == "cron":
+                admitted.append(j)
+                continue
             key = cron_job_agent_key(j)
             if key is None:
                 admitted.append(j)  # exempt: never counted, never deferred

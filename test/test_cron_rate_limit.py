@@ -51,6 +51,17 @@ def _job(
     )
 
 
+def _cron_job(jid: str, *, agent_id: str = "", cron_expr: str = "* * * * *") -> CronJob:
+    """A minimal cron-expression CronJob for the schedule-kind carve-out tests."""
+    return CronJob(
+        id=jid,
+        name=jid,
+        message="m",
+        schedule=CronSchedule(kind="cron", cron_expr=cron_expr),
+        agent_id=agent_id,
+    )
+
+
 def _svc(tmp_path: Path, limit: int) -> CronService:
     """A CronService with the per-agent limit set, no timer armed."""
     svc = CronService(base_dir=tmp_path)
@@ -152,6 +163,51 @@ class TestRateLimitDeferred:
         assert j2.run_never_started is False
         assert j2.fire_time_denied is False
         assert "j2" not in svc._executing
+
+    def test_cron_expression_jobs_never_deferred(self, tmp_path: Path) -> None:
+        # Cron-expression jobs are exempt from rate-deferral even past the
+        # limit: a stateless defer would silently drop that minute's occurrence
+        # (the expression no longer matches on the next tick), so they are
+        # always admitted, mirroring the critical-posture carve-out. This locks
+        # in the fix for the review's blocking issue.
+        svc = _svc(tmp_path, limit=1)
+        c1 = _cron_job("c1", agent_id="alice")
+        c2 = _cron_job("c2", agent_id="alice")
+        c3 = _cron_job("c3", agent_id="alice")
+        admitted, deferred = svc._rate_limit_deferred([c1, c2, c3])
+        assert admitted == [c1, c2, c3]
+        assert deferred == []
+
+    def test_cron_jobs_admitted_alongside_deferred_interval_jobs(
+        self, tmp_path: Path
+    ) -> None:
+        # A same-agent mix: the cron-expression job always fires while the
+        # interval jobs are capped. The cron job is not counted against the cap,
+        # so the first interval job still admits and the second defers.
+        svc = _svc(tmp_path, limit=1)
+        cron_j = _cron_job("cron", agent_id="alice")
+        i1 = _job("i1", agent_id="alice")
+        i2 = _job("i2", agent_id="alice")
+        admitted, deferred = svc._rate_limit_deferred([cron_j, i1, i2])
+        assert cron_j in admitted
+        assert i1 in admitted
+        assert deferred == [i2]
+
+    def test_deferred_interval_job_is_re_due_next_tick(self, tmp_path: Path) -> None:
+        # An every/at deferral is lossless: once the occupant frees the slot,
+        # a fresh partition on the SAME due list admits the previously deferred
+        # job (nothing about it was mutated on the first pass).
+        svc = _svc(tmp_path, limit=1)
+        j1 = _job("j1", agent_id="alice")
+        j2 = _job("j2", agent_id="alice")
+        admitted, deferred = svc._rate_limit_deferred([j1, j2])
+        assert admitted == [j1]
+        assert deferred == [j2]
+        # Next tick: j1 has finished (no longer executing). Re-partitioning the
+        # still-due list now admits j2 — the occurrence was delayed, not lost.
+        admitted2, deferred2 = svc._rate_limit_deferred([j2])
+        assert admitted2 == [j2]
+        assert deferred2 == []
 
 
 # ── _on_timer end-to-end (only the admitted job fires) ──
