@@ -220,6 +220,7 @@ from kiro_crew.config.sections import (  # noqa: F401
     ChannelConfig,
     ComputerUseConfig,
     CronHistoryConfig,
+    CronRateLimitConfig,
     DashboardConfig,
     DecisionsConfig,
     DiscordConfig,
@@ -2850,6 +2851,14 @@ def _build_cron_history_config(cron_history_data: dict) -> CronHistoryConfig:
     )
 
 
+def _build_cron_rate_limit_config(cron_rate_limit_data: dict) -> CronRateLimitConfig:
+    return CronRateLimitConfig(
+        max_concurrent_per_agent=_safe_int(
+            cron_rate_limit_data.get("max_concurrent_per_agent", 0), 0
+        ),
+    )
+
+
 def _build_messaging_config(messaging_data: dict) -> MessagingConfig:
     return MessagingConfig(
         use_transport=bool(messaging_data.get("use_transport", True)),
@@ -3716,6 +3725,10 @@ class KiroCrewConfig:
         default_factory=CronHistoryConfig,
         metadata=_meta("Cron History", "Cron execution history storage limits."),
     )
+    cron_rate_limit: CronRateLimitConfig = field(
+        default_factory=CronRateLimitConfig,
+        metadata=_meta("Cron Rate Limit", "Per-agent concurrency limits for the cron scheduler."),
+    )
     memory: MemoryConfig = field(
         default_factory=MemoryConfig,
         metadata=_meta("Memory", "Memory and embedding configuration."),
@@ -4367,6 +4380,7 @@ class KiroCrewConfig:
         session_data = _coerced_section(data, "session", _degraded)
         taskrunner_data = _coerced_section(data, "taskrunner", _degraded)
         cron_history_data = _coerced_section(data, "cron_history", _degraded)
+        cron_rate_limit_data = _coerced_section(data, "cron_rate_limit", _degraded)
         memory_data = _coerced_section(data, "memory", _degraded)
         knowledge_data = _coerced_section(data, "knowledge", _degraded)
         telegram_data = _coerced_section(data, "telegram", _degraded)
@@ -4610,6 +4624,7 @@ class KiroCrewConfig:
             session=_build_session_config(session_data),
             taskrunner=_build_taskrunner_config(taskrunner_data),
             cron_history=_build_cron_history_config(cron_history_data),
+            cron_rate_limit=_build_cron_rate_limit_config(cron_rate_limit_data),
             messaging=_build_messaging_config(messaging_data),
             # orchestrator/watchdog are advertised in config-baseline.json,
             # served by /api/config/schema, and read by real consumers
@@ -4952,6 +4967,7 @@ class KiroCrewConfig:
             "resource_limits": asdict(self.resource_limits),
             "messaging": asdict(self.messaging),
             "cron_history": asdict(self.cron_history),
+            "cron_rate_limit": asdict(self.cron_rate_limit),
             "knowledge": asdict(self.knowledge),
             "heartbeat": asdict(self.heartbeat),
             "monitoring": asdict(self.monitoring),
