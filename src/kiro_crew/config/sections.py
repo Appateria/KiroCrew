@@ -1994,6 +1994,25 @@ class CronHistoryConfig:
 
 
 @dataclass
+class CronRateLimitConfig:
+    max_concurrent_per_agent: int = field(
+        default=0,
+        metadata=_meta(
+            "Max Concurrent Per Agent",
+            "Maximum cron runs that may execute at once for a single agent "
+            "(0 = unlimited). Script/command jobs are exempt because they "
+            "dispatch no agent.",
+        ),
+    )
+
+    def __post_init__(self) -> None:
+        # Fail-safe clamp: a hand-edited negative value means 'unlimited'
+        # (like the 0 default) rather than wedging dispatch to zero runs.
+        if self.max_concurrent_per_agent < 0:
+            self.max_concurrent_per_agent = 0
+
+
+@dataclass
 class MemoryConfig:
     embedding_provider: str = field(
         default="llama_cpp",

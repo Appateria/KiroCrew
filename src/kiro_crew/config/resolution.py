@@ -74,6 +74,7 @@ _KNOWN_CONFIG_SECTIONS: frozenset = frozenset(
         "resource_limits",
         "messaging",
         "cron_history",
+        "cron_rate_limit",
         "decisions",
         "knowledge",
         "heartbeat",
